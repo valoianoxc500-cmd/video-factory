@@ -3,6 +3,7 @@
 import json
 import logging
 import math
+import re
 from pathlib import Path
 
 import clients
@@ -23,6 +24,414 @@ from settings import settings
 logger = logging.getLogger("video_factory")
 
 _MAX_DURATION_RETRIES = 2
+
+# How far past its estimate a section's narration is assumed to run when
+# deciding how many visual slots it needs. `script_timing_profile` is keyed on
+# the TTS model only, so it cannot know that a channel has asked for a slower,
+# more deliberate read. Measured overshoot on a Horror run was 1.16x and 1.25x
+# on the two long sections. Calibrated to the measurement rather than rounded
+# up: at 1.30 a correctly paced 14.7s section is told it needs five slots
+# instead of four, and every surplus slot is another image to source, review
+# and pay for. Overrun past this degrades instead of failing, because
+# compute_sub_durations now rebalances to the lowest peak available. It only
+# ever raises the slot requirement -- narration, timing and rendered duration
+# are untouched.
+_TTS_DURATION_MARGIN = 1.25
+
+# Spare visual slots per section, so losing one to sourcing does not break the
+# hold cap. On a web-photo-only channel a slot that no real photograph can
+# satisfy is dropped rather than filled with a wrong or generated image, which
+# means the surviving slots have to cover the section between them. A Horror
+# run was planned with the six slots its 25.85s section needed, lost one to
+# sourcing, and the five that remained held 5.41s each against a 5.0s cap --
+# failing at render after the narration and every image had been paid for.
+# One spare absorbs the common case; a section losing two is rare enough that
+# the cap should genuinely fail rather than be padded around.
+_SOURCING_DROP_ALLOWANCE = 1
+
+# ── Photographable-subject rule ──────────────────────────────────
+#
+# A web-photo-only channel can only ever be given what a real photograph or an
+# authentic archival document contains. A slot asking for a graphic device or a
+# scene nobody ever photographed cannot be satisfied by any search, so the
+# candidate filter rejects everything, the relevance gate falls back to a
+# top-ranked near-miss, and the image review gate then fails the run.
+#
+# A D.B. Cooper run died exactly this way. The review gate's own words:
+#   "Several images failed due to incorrect subjects or styles (e.g. book
+#    covers or cartoons instead of cinematic photos) ... several specific
+#    requested details (like the tie on the seat or the red question mark)
+#    were missing."
+# There is no photograph of a red question mark, and no photograph of the tie
+# staged on the seat -- the tie exists only as an FBI evidence photograph.
+#
+# These are matched against the slot's search keywords, which are what actually
+# reach the image search.
+# Graphic devices and mood shots. Nothing exempts these: naming a real artefact
+# in the same breath does not make them sourceable. A slot asking for
+# "question mark D.B. Cooper composite sketch" reached image search because the
+# archival allowlist matched "composite sketch" and short-circuited before the
+# question mark was ever considered -- so search was sent looking for a
+# photograph containing a question mark, and the review gate flagged it.
+_ALWAYS_FORBIDDEN_KEYWORD_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\bquestion\s*mark\b", "a question mark is a graphic device, not a subject"),
+    (r"\bexclamation\s*mark\b", "punctuation is a graphic device, not a subject"),
+    (r"\b(mystery|mysterious|spooky|creepy|eerie|scary)\s+"
+     r"(background|backdrop|wallpaper|texture|atmosphere|vibes?)\b",
+     "a mood backdrop is not a real-world subject"),
+    (r"\b(book|album|magazine)\s*cover\b", "cover art is artwork, not documentation"),
+    (r"\bpodcast\s*(thumbnail|cover|art)\b", "podcast art is artwork, not documentation"),
+    (r"\b(movie|film)\s*poster\b", "poster art is artwork, not documentation"),
+    (r"\b(re-?enactment|recreation|reconstruction|staged|dramatis(ed|ation))\b",
+     "a staged recreation is not a real photograph of the event"),
+    (r"\b(silhouette|shadowy\s+figure|faceless\s+man|unknown\s+man)\b",
+     "an anonymous stand-in figure is not the real subject"),
+    (r"\bred\s+(circle|arrow)\b", "an annotation overlay is not a subject"),
+    (r"\bcinematic\b", "a style word matches artwork, not a real place or object"),
+)
+
+# Artwork wording, which an authentic archival artefact is allowed to trip --
+# an FBI composite sketch is a drawing and still a real case record.
+_ARTWORK_KEYWORD_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\b(cartoon|clipart|clip\s*art|vector\s*art|concept\s*art|"
+     r"digital\s*art|artist'?s?\s+impression|render(ing|ed)?)\b",
+     "illustration is not a photograph or archival document"),
+)
+
+# Charts, diagrams and visual metaphors.
+#
+# These are the briefs that stopped a Football News run: three slots asked for
+# "رسم بياني" -- a diagram -- typed as google_photo, on a channel where every
+# photo slot must be a real photograph. Search does the only thing it can and
+# returns renders and infographics, the relevance gate correctly rejects all of
+# them as not-photographs, the beats are dropped, and the run dies for want of
+# images it was never going to find.
+#
+# The remedy is not a better search query. A chart is a thing the renderer
+# draws, so these belong in an info_card or info_slide, and catching them here
+# means the scripter is told that before any sourcing is paid for.
+#
+# Arabic matters as much as English here: the failing run was Arabic, and
+# `.lower()` leaves Arabic unchanged, so the two sets sit side by side. Arabic
+# has no word boundaries that \b can use around its script, so those patterns
+# are matched as substrings.
+_CONCEPTUAL_KEYWORD_PATTERNS: tuple[tuple[str, str], ...] = (
+    # English
+    (r"\b(diagram|infographic|info-?graphic|flow\s*chart|flowchart|"
+     r"bar\s*chart|pie\s*chart|line\s*chart|chart|graph)\b",
+     "a chart or diagram is drawn, not photographed"),
+    (r"\b(domino\s+effect|ripple\s+effect|chain\s+reaction)\b",
+     "a visual metaphor is not a real-world subject"),
+    (r"\b(timeline|org\s*chart|mind\s*map|venn\s+diagram)\b",
+     "a diagrammatic device is drawn, not photographed"),
+    # Arabic
+    (r"رسم\s*بياني", "a chart or diagram is drawn, not photographed"),
+    (r"رسم\s*توضيحي", "an explanatory illustration is drawn, not photographed"),
+    (r"مخطط", "a diagram or schematic is drawn, not photographed"),
+    (r"إنفوجرافيك|انفوجرافيك", "an infographic is drawn, not photographed"),
+    (r"تأثير\s*الدومينو", "a visual metaphor is not a real-world subject"),
+    (r"جدول\s*بياني", "a data table is drawn, not photographed"),
+)
+
+# Archival artefacts that ARE authentic documents and must never be caught by
+# the patterns above -- an FBI composite sketch is a real, citable case record,
+# even though it is a drawing. It stays allowed only because the keywords name
+# it as the composite sketch rather than as a photograph of the man.
+_ARCHIVAL_KEYWORD_ALLOWLIST: tuple[str, ...] = (
+    r"\b(composite|police|forensic|wanted)\s+sketch\b",
+    r"\bfbi\s+sketch\b",
+    r"\bsketch\s+of\s+the\s+suspect\b",
+    r"\b(evidence|case|court|police|fbi)\s+(photo(graph)?|file|document|report|record)s?\b",
+    r"\bwanted\s+poster\b",
+    r"\barchival\s+(photo(graph)?|footage|document)s?\b",
+    r"\bnewspaper\s+(clipping|front\s*page|archive)\b",
+)
+
+
+def non_photographable_reason(keywords: str) -> str:
+    """Why these search keywords cannot be satisfied by a real photo, or "".
+
+    Returns an empty string for anything sourceable, including archival
+    artefacts that happen to be drawings.
+    """
+    text = " ".join(str(keywords or "").split()).lower()
+    if not text:
+        return ""
+
+    # Graphic devices are rejected regardless of what else is in the string.
+    for pattern, reason in _ALWAYS_FORBIDDEN_KEYWORD_PATTERNS:
+        if re.search(pattern, text):
+            return reason
+
+    # Artwork wording is forgiven only when the slot is genuinely asking for an
+    # archival artefact that happens to be drawn.
+    is_archival = any(
+        re.search(allowed, text) for allowed in _ARCHIVAL_KEYWORD_ALLOWLIST
+    )
+    if is_archival:
+        return ""
+    for pattern, reason in _ARTWORK_KEYWORD_PATTERNS:
+        if re.search(pattern, text):
+            return reason
+    # Same tier as artwork, and for the same reason: a genuine archival chart
+    # named as a case document is still a real record, so the allowlist above
+    # gets first refusal.
+    for pattern, reason in _CONCEPTUAL_KEYWORD_PATTERNS:
+        if re.search(pattern, text):
+            return reason
+    return ""
+
+
+def conceptual_brief_reason(keywords: str) -> str:
+    """Why this brief wants a drawn graphic rather than a photograph, or "".
+
+    Separate from `non_photographable_reason` because the two have different
+    remedies. An unphotographable *subject* needs different keywords; a chart
+    needs a different slot type -- info_card or info_slide, which the renderer
+    draws. Telling the scripter to "find a more concrete subject" for a bar
+    chart sends it looking for a photograph of one.
+    """
+    text = " ".join(str(keywords or "").split()).lower()
+    if not text:
+        return ""
+    if any(re.search(allowed, text) for allowed in _ARCHIVAL_KEYWORD_ALLOWLIST):
+        return ""
+    for pattern, reason in _CONCEPTUAL_KEYWORD_PATTERNS:
+        if re.search(pattern, text):
+            return reason
+    return ""
+
+
+# Arabic and Latin question marks. The Arabic one is what MSA narration uses.
+_QUESTION_MARKS = ("؟", "?")
+
+
+def _ends_with_question(text: str) -> bool:
+    """Whether narration closes on a question rather than a statement."""
+    stripped = str(text or "").strip().rstrip("\"'”’)]»")
+    return stripped.endswith(_QUESTION_MARKS)
+
+
+def _ensure_closing_question(script_data: dict, *, fallback: str) -> None:
+    """Guarantee the narration ends on a question the viewer can answer.
+
+    The channel closes on a short, story-specific question rather than a
+    subscribe prompt -- the thing that actually earns a comment is being asked
+    what you think happened. The script is asked for one, and the model
+    normally writes a far better question than any generic wording because it
+    can draw on the case's own unresolved detail.
+
+    This is the floor under that, not a replacement for it: when the last
+    sentence is not a question, the configured fallback is appended so the beat
+    is never silently missing. The fallback asks only for the viewer's reading
+    of the story, so it introduces no fact or claim of its own.
+
+    An empty `fallback` disables the behaviour entirely.
+    """
+    if not fallback.strip():
+        return
+
+    sections = [s for s in (script_data.get("sections") or []) if isinstance(s, dict)]
+    if not sections:
+        return
+
+    last = sections[-1]
+    narration = str(last.get("narration") or "").strip()
+    if _ends_with_question(narration):
+        return
+
+    last["narration"] = f"{narration} {fallback.strip()}".strip()
+    logger.info(
+        "Narration did not close on a question; appended the channel's "
+        "closing question so the ending still invites a reply"
+    )
+
+
+# Qualifiers that decide *which* photograph of a subject qualifies, without
+# changing what the subject is. Stripped only on web-photo-only channels, and
+# only from slot briefs -- never from narration, which is where the facts live.
+#
+# Ordered longest-first within each family so "under a grey sky" is consumed
+# before a bare "grey" could be.
+_STAGING_QUALIFIER_PATTERNS: tuple[str, ...] = (
+    # Viewpoint and framing.
+    r"\b(?:the\s+)?(?:view|shot|angle|perspective)\s+from\s+(?:the\s+)?"
+    r"(?:inside|outside|within|above|below|behind|afar|a\s+distance)\b",
+    r"\b(?:looking|seen|viewed|shot|photographed)\s+"
+    r"(?:out\s+)?from\s+(?:the\s+)?(?:inside|outside|within|above|below|behind)\b",
+    r"\b(?:from\s+)?(?:inside|within)\s+looking\s+out\b",
+    # The trailing "of (the)" goes with the framing word: dropping "aerial
+    # shot" alone from "aerial shot of the mountain pass" leaves "of the
+    # mountain pass", which is worse than what it replaced.
+    r"\b(?:bird'?s[-\s]?eye|worm'?s[-\s]?eye|low|high|wide|close[-\s]?up|"
+    r"aerial|overhead|point[-\s]of[-\s]view|pov)\s+(?:shot|angle|view)"
+    r"(?:\s+of(?:\s+the)?)?\b",
+    # Season.
+    r"\bin\s+(?:the\s+)?(?:deep\s+)?(?:winter|summer|spring|autumn|fall)\b",
+    r"\b(?:winter|summer|spring|autumn|autumnal|wintry|snowy|snow[-\s]covered)\s+"
+    r"(?:landscape|scene|setting|backdrop|surroundings)\b",
+    # Weather and sky.
+    r"\bunder\s+(?:a|an|the)\s+[a-z\- ]{0,20}\b(?:sky|clouds?|sun|moon)\b",
+    # Only *qualified* weather. A bare "in snow" is the setting of the story
+    # and narrows the search usefully; "in heavy fog" is a photograph the
+    # archive is unlikely to hold of the right subject.
+    r"\bin\s+(?:the\s+)?(?:heavy|light|driving|thick|dense|falling|blowing|"
+    r"swirling)\s+(?:rain|snow|fog|mist|blizzard|storm|sunshine|overcast)\b",
+    r"\b(?:heavy|thick|dense|light)\s+(?:fog|mist|snow|rain|cloud)\b",
+    # Time of day.
+    r"\bat\s+(?:night|dusk|dawn|sunset|sunrise|midday|noon|twilight|midnight)\b",
+    r"\b(?:night[-\s]?time|day[-\s]?time|early\s+morning|late\s+afternoon|"
+    r"golden\s+hour|blue\s+hour)\b",
+    # Instrument, device and subject state.
+    r"\bwith\s+(?:the\s+|its\s+)?(?:needle|dial|gauge|meter|hand|pointer)\s+"
+    r"(?:indicating|showing|pointing\s+(?:to|at)|at)\s+[a-z\- ]{0,24}\b",
+    r"\b(?:displaying|showing|indicating)\s+(?:a\s+)?"
+    r"(?:high|low|zero|maximum|minimum|elevated)\s+(?:reading|value|level|number)s?\b",
+    r"\b(?:switched|turned)\s+(?:on|off)\b",
+    # A bare atmospheric word left trailing on a brief -- "torn tent snow
+    # night". It narrows the photograph without naming anything, and only the
+    # trailing position is safe: "night watchman" is a subject, "… at night"
+    # is lighting.
+    r"\s(?:night|dusk|dawn|midnight|twilight|daytime|nighttime)\s*$",
+)
+
+_STAGING_QUALIFIER_RES = tuple(
+    re.compile(p, re.I) for p in _STAGING_QUALIFIER_PATTERNS
+)
+
+# Removing a qualifier can strand the preposition that introduced it --
+# "memorial plaque in" or "torn tent under". Trailing connectives are dropped
+# so the brief reads as a subject rather than a sentence fragment.
+_DANGLING_CONNECTIVE_RE = re.compile(
+    r"\s+\b(?:in|on|at|under|with|from|into|over|beneath|during|and|of|the|a|an)\b"
+    r"(?=\s*$|\s+(?:in|on|at|under|with|from|and)\b)",
+    re.I,
+)
+
+
+def _destage_slot_briefs(script_data: dict, *, web_photos_only: bool) -> None:
+    """Strip staging the archive cannot satisfy from slot keywords and prompts.
+
+    The image review gate judges each photograph against its slot prompt, so an
+    unattainable prompt fails a correct image. A Horror run was rejected for
+    showing "recovered money instead of original stacks" -- but the Cooper
+    money was only ever photographed after recovery, decayed on a riverbank.
+    The archive's only real photograph of the subject was marked wrong because
+    the brief asked for one that has never existed. Same for "an action
+    (digging) instead of a close-up of the ground".
+
+    Removing the staging leaves the subject, which is what the channel can
+    actually source and what the gate should be judging. The subject itself is
+    untouched, so relevance is still fully checked -- this drops demands for a
+    pose, a quantity, an angle or a time of day, not for the right thing.
+
+    A Dyatlov Pass run failed the same way for a wider family of qualifiers:
+
+        "view from inside torn tent snow night"      the viewpoint
+        "memorial plaque in a snowy landscape"       the season
+        "Geiger counter with the needle at a high reading"   the instrument state
+        "modern empty desolate landscape under a grey sky"   the weather
+
+    Real photographs of the plaque and the tent exist; they were rejected for
+    being the wrong season, or shot from outside. Those constraints decide
+    which photograph qualifies without changing what the photograph is of, so
+    dropping them costs nothing factual and turns "no candidate" into "the
+    right subject". Anything that changes the subject -- who, what, where,
+    when in history -- is left alone.
+    """
+    if not web_photos_only:
+        return
+
+    from core.image_sourcer import (
+        _ACTION_WRAPPER_RE,
+        _ATMOSPHERE_TAIL_RE,
+        _MEDIUM_WRAPPER_RE,
+    )
+
+    def _clean(text: str) -> str:
+        raw = str(text or "")
+        lowered = " ".join(raw.split()).lower()
+
+        # Someone posing with the subject, or a count of it, is always staging.
+        stripped = _ACTION_WRAPPER_RE.sub(" ", raw)
+        stripped = _ATMOSPHERE_TAIL_RE.sub(" ", stripped)
+
+        # Viewpoint, season, weather, time of day and instrument state. Each
+        # narrows which photograph counts without changing what it is of.
+        for pattern in _STAGING_QUALIFIER_RES:
+            stripped = pattern.sub(" ", stripped)
+
+        # Repeatedly, because one pass is not enough: removing "a snowy
+        # landscape" from "memorial plaque in a snowy landscape" leaves
+        # "memorial plaque in a", and a single sub() consumes the "a" while
+        # stepping over the "in" that preceded it.
+        for _ in range(4):
+            reduced = _DANGLING_CONNECTIVE_RE.sub(" ", stripped)
+            if reduced == stripped:
+                break
+            stripped = reduced
+
+        # Framing wording is only staging when the brief is not asking for an
+        # archival artefact. "FBI evidence photograph of the tie" names one,
+        # and stripping its "photograph of" produced "FBI evidence the tie" --
+        # worse than the original and no longer a recognisable archival request.
+        if not any(re.search(p, lowered) for p in _ARCHIVAL_KEYWORD_ALLOWLIST):
+            stripped = _MEDIUM_WRAPPER_RE.sub(" ", stripped)
+
+        return " ".join(stripped.split())
+
+    for section in script_data.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for slot in section.get("slots") or []:
+            if not isinstance(slot, dict):
+                continue
+            for field in ("keywords", "prompt"):
+                original = slot.get(field)
+                if not isinstance(original, str) or not original.strip():
+                    continue
+                cleaned = _clean(original)
+                # Never blank a field out: an empty brief is worse than an
+                # over-specified one.
+                if cleaned and cleaned.lower() != original.lower():
+                    slot[field] = cleaned
+
+
+def _coerce_slot_keywords(script_data: dict) -> None:
+    """Flatten list-shaped slot keywords into the search string the model owes us.
+
+    `VisualSlot.keywords` is typed `str`, and the model returns one almost
+    every time -- but it occasionally emits a JSON array instead, typically on
+    a section's last and most generic slot. Pydantic will not coerce a list
+    into a str, so a single stray field killed a run *after* research, script
+    generation and the review gate had all been paid for:
+
+        slots.4.keywords
+          Input should be a valid string
+          [input_value=['unsolved mystery background'], input_type=list]
+
+    The value is perfectly usable, so it is repaired in place rather than
+    thrown away. Multi-element lists join on ", " -- the same shape the model
+    produces when it writes keywords as one string. Strings, and every other
+    type, are left exactly as they are for the validator to judge.
+    """
+    for section in script_data.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for slot in section.get("slots") or []:
+            if not isinstance(slot, dict):
+                continue
+            keywords = slot.get("keywords")
+            if isinstance(keywords, list):
+                slot["keywords"] = ", ".join(
+                    str(part).strip() for part in keywords if str(part).strip()
+                )
+
+
+# Every visual type the pipeline knows how to source or render.
+_ALLOWED_SLOT_VISUALS = (
+    VisualSlot.IMAGE_TYPES | VisualSlot.COMPONENT_TYPES
+)
 
 
 def _thumbnail_strategy_options(
@@ -149,6 +558,7 @@ def _script_validation_errors(
     min_sections: int | None = None,
     min_words: int | None = None,
     max_words: int | None = None,
+    web_photos_only: bool = False,
 ) -> tuple[list[str], list[dict]]:
     sections = data.get("sections", [])
     errors = _title_banner_numbering_errors(data, numbering_order)
@@ -183,18 +593,47 @@ def _script_validation_errors(
             errors.append(f"Section {section_id} has no visual slots.")
             continue
 
+        # Structural slot check. Without it a slot missing "visual" passes
+        # review and then dies in Script parsing, where there is no retry.
+        for slot_idx, slot in enumerate(slots, start=1):
+            if not isinstance(slot, dict):
+                errors.append(
+                    f"Section {section_id} slot {slot_idx} is not an object."
+                )
+                continue
+            visual = str(slot.get("visual", "")).strip()
+            if not visual:
+                errors.append(
+                    f'Section {section_id} slot {slot_idx} is missing the required '
+                    f'"visual" field. Every slot needs a visual type.'
+                )
+            elif visual not in _ALLOWED_SLOT_VISUALS:
+                errors.append(
+                    f'Section {section_id} slot {slot_idx} has unknown visual '
+                    f'"{visual}". Allowed: {", ".join(sorted(_ALLOWED_SLOT_VISUALS))}.'
+                )
+
         word_count = len(str(section.get("narration", "")).split())
         estimated_seconds = estimate_section_seconds(
             word_count,
             profile=timing_profile,
         )
+        # Size the slot requirement against how long the narration will
+        # actually run, not the estimate. The timing profile is keyed on the
+        # TTS model alone, so a channel whose voice direction asks for slow,
+        # deliberate delivery with pauses overshoots it: a Horror run measured
+        # 21.3s -> 24.69s and 22.8s -> 28.45s (up to 1.25x). Validating against
+        # the bare estimate passed a script whose real sections then needed six
+        # slots and had five, and the render failed the max-hold check after
+        # the narration had already been paid for.
+        planning_seconds = estimated_seconds * _TTS_DURATION_MARGIN
         minimum_slots = minimum_visual_slots_for_duration(
-            estimated_seconds,
+            planning_seconds,
             max_visual_hold_seconds,
             crossfade,
-        )
+        ) + _SOURCING_DROP_ALLOWANCE
         avg_hold = (
-            estimated_seconds + (crossfade * max(len(slots) - 1, 0))
+            planning_seconds + (crossfade * max(len(slots) - 1, 0))
         ) / len(slots)
         if avg_hold > max_visual_hold_seconds:
             issue = {
@@ -240,6 +679,58 @@ def _script_validation_errors(
                 errors.append(
                     f"Section {section_id} slot {slot_index}: info_slide requires an image prompt; do not use image-less text slides."
                 )
+            # A prompt without keywords is not sourceable. The prompt is what
+            # the review gate judges against; the keywords are what image
+            # search is actually given. A Dyatlov run shipped two info_slides
+            # with a full prompt and an empty keywords field, so search was
+            # handed nothing, both beats were dropped, and the run died two
+            # slots short of its minimum.
+            if visual in ("info_slide", "info_card") and not str(
+                slot.get("keywords", "")
+            ).strip():
+                errors.append(
+                    f"Section {section_id} slot {slot_index}: {visual} has an "
+                    f"empty \"keywords\" field. Image search is given the "
+                    f"keywords, not the prompt, so this beat cannot be sourced "
+                    f"at all. Add concrete search keywords naming the real "
+                    f"subject to photograph."
+                )
+            # On a web-photo-only channel the keywords are the whole contract
+            # with image search: if they name something no photograph or
+            # archival document contains, every candidate is rejected and the
+            # image review gate fails the run after sourcing has been paid for.
+            # Caught here so the scripter revises it instead.
+            if web_photos_only and visual in VisualSlot.IMAGE_TYPES:
+                keywords_text = str(slot.get("keywords", ""))
+                # A chart has a different remedy from an unphotographable
+                # subject: change the slot type, not the search terms. Telling
+                # the scripter to "find a concrete subject" for a bar chart
+                # only sends it looking for a photograph of one.
+                conceptual = conceptual_brief_reason(keywords_text)
+                if conceptual:
+                    errors.append(
+                        f"Section {section_id} slot {slot_index}: keywords "
+                        f"{keywords_text!r} describe a graphic the renderer draws "
+                        f"-- {conceptual}. Do not use '{visual}' for it. Change "
+                        f"this slot to \"info_card\" (short callout; set "
+                        f"props.text) or \"info_slide\" (titled slide; set "
+                        f"props.text, optional props.title) and write the point "
+                        f"as text, or replace the beat with a real photographable "
+                        f"subject such as the stadium, the player or the crowd."
+                    )
+
+                reason = "" if conceptual else non_photographable_reason(keywords_text)
+                if reason:
+                    errors.append(
+                        f"Section {section_id} slot {slot_index}: keywords "
+                        f"{keywords_text!r} cannot be sourced as a real "
+                        f"photograph -- {reason}. Replace them with a concrete "
+                        f"real-world subject that could plausibly appear in an actual "
+                        f"photograph or authentic archival document (the real place, "
+                        f"aircraft, object, building, document or person), rather than "
+                        f"a concept, mood or graphic device."
+                    )
+
             visual_policy = str(slot.get("visual_policy", "source_as_written"))
             if visual_policy not in VisualSlot.VISUAL_POLICIES:
                 errors.append(
@@ -424,6 +915,7 @@ async def generate_script(
         cta_angle=plan.get("cta_angle", ""),
         min_visible_beat_seconds=config.rendering_defaults.image_slot_min_duration,
         max_visual_hold_seconds=max_visual_hold_seconds,
+        web_photos_only=config.image_sourcing.web_photos_only,
     )
     system_inst = prompts.script_system(
         tone=config.script_style.tone,
@@ -454,6 +946,7 @@ async def generate_script(
             max_visual_hold_seconds=max_visual_hold_seconds,
             crossfade=intra_crossfade,
             timing_profile=timing_profile,
+            web_photos_only=config.image_sourcing.web_photos_only,
         )
         return errors, pacing_issues, n_sections, total_words, min_words, max_words
 
@@ -611,6 +1104,7 @@ async def generate_script(
             min_score=min_score,
             numbering_order=numbering_order,
             max_visual_hold_seconds=max_visual_hold_seconds,
+            web_photos_only=config.image_sourcing.web_photos_only,
         )
 
     try:
@@ -633,6 +1127,15 @@ async def generate_script(
 
     # Parse into Script model
     final_data = result["content"]
+    _coerce_slot_keywords(final_data)
+    _destage_slot_briefs(
+        final_data,
+        web_photos_only=config.image_sourcing.web_photos_only,
+    )
+    _ensure_closing_question(
+        final_data,
+        fallback=config.closing_question_fallback,
+    )
     final_errors, _, _, _, _, _ = _validate_generated_script(final_data)
     if final_errors:
         raise ValueError("Reviewed script failed validation: " + "; ".join(final_errors))

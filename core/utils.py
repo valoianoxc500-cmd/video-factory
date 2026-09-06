@@ -179,6 +179,10 @@ class VideoConfig(BaseModel):
     transition_duration_seconds: float = 0.8
     background_music_volume: float = 0.15
     music_pool: list[str] = []
+    # Transition SFX stems this channel may use. Empty keeps the historical
+    # assets/sfx/transitions/ set, so channel-specific one-shots added for one
+    # engine cannot appear in another engine's videos.
+    sfx_pool: list[str] = []
     # Filenames (without .mp3) to restrict music selection for this channel.
     # Empty = use all tracks in assets/music/.
     visual_guidance: dict[str, str] = {}
@@ -219,6 +223,33 @@ class VoiceConfig(BaseModel):
 
 class ImageSourcingConfig(BaseModel):
     generation_model: str = "gemini-3.1-flash-image-preview"
+    # News/documentary channels must show real photographs of the actual
+    # people and events. When true, every photo-lane slot is sourced from web
+    # image search and AI image generation is never used as a fallback.
+    web_photos_only: bool = False
+    # Last-resort cover for a run that would otherwise be stopped.
+    #
+    # `web_photos_only` still governs ordinary sourcing: every photo-lane slot
+    # is searched for on the web, and a real photograph always wins. This only
+    # applies after search AND subject rescue have both failed and the run is
+    # about to be abandoned for want of images -- at which point a clearly
+    # non-documentary illustration for the few missing beats is better than no
+    # video. Generated frames are recorded as generated in the provenance log
+    # so nothing downstream can mistake one for evidence.
+    # Short licensed stock clips mixed among the photographs, so a story has
+    # motion as well as stills. Off by default so no channel gains video
+    # b-roll by upgrading; the two channels that want it opt in.
+    #
+    # This is a ceiling on how much of a video may be motion footage, not a
+    # target. Photographs still carry the facts -- b-roll is atmosphere, and
+    # the review gate holds it to the scene rather than the topic.
+    allow_video_broll: bool = False
+    max_broll_ratio: float = 0.34
+    allow_generated_fallback: bool = False
+    # Hard ceiling per video. A run needing more than this is not short of
+    # images, it is short of a subject that can be illustrated honestly.
+    max_generated_fallback_images: int = 5
+    generated_fallback_model: str = "gemini-3.1-flash-lite-image"
     generate_info_slide_illustrations: bool = True
     generate_info_card_illustrations: bool = True
     style_prompt_suffix: str = ""
@@ -354,6 +385,10 @@ class TemplateStyle(BaseModel):
     subtitle_highlight: dict[str, Any] = {}
     video: dict[str, Any] = {}
     watermark: dict[str, Any] = {}
+    # Publish a 9:16 thumbnail instead of 16:9. On a vertical short a landscape
+    # thumbnail is the only landscape image in the package and the final review
+    # gate blocks on it. Opt-in, so an existing channel keeps its thumbnails.
+    vertical_thumbnail: bool = False
 
 
 KNOWN_FORCES = {"TitleCard", "FactHighlight"}
@@ -377,14 +412,44 @@ class TestConfig(BaseModel):
 
 class RenderingDefaults(BaseModel):
     component_min_duration: float = 5.0
-    image_slot_min_duration: float = 5.0
-    max_visual_hold_seconds: float = 16.0
+    # Visual pacing. These two bound how long one image owns the screen, and
+    # together they decide how many images a section needs: the scripter's
+    # validator demands at least minimum_visual_slots_for_duration() slots,
+    # and compute_sub_durations() then snaps the changes to pauses in the
+    # narration. At a 16s hold a single photo covered half a section and the
+    # video stopped illustrating what was being said; ~5s is roughly one
+    # sentence of narration, which is the beat the images should follow.
+    image_slot_min_duration: float = 2.5
+    max_visual_hold_seconds: float = 5.0
     intra_slot_crossfade: float = 0.3
     sfx_volume: float = 0.15
     sfx_boundary_coverage: float = 0.70
     render_concurrency: int = 4
     frame_sequence_image_format: Literal["jpeg", "png"] = "jpeg"
     frame_sequence_jpeg_quality: int = Field(default=80, ge=0, le=100)
+
+
+class MatchFootageConfig(BaseModel):
+    """Footage policy for a match-analysis engine.
+
+    Defaults are the safe ones: no footage directory and no stock, which makes
+    the engine a pure photo pipeline until an operator opts in.
+    """
+
+    enabled: bool = False
+    # Directory of operator-supplied match video. Empty means none, and the
+    # engine falls back to the existing photo system.
+    footage_dir: str = ""
+    allow_licensed_stock: bool = False
+    lead_in_seconds: float = 5.0
+    lead_out_seconds: float = 8.0
+    min_clip_seconds: float = 10.0
+    max_clip_seconds: float = 15.0
+    max_moments: int = 6
+
+    def get(self, key: str, default=None):
+        """dict-style access, so callers can stay agnostic about the type."""
+        return getattr(self, key, default)
 
 
 class ChannelConfig(BaseModel):
@@ -403,6 +468,20 @@ class ChannelConfig(BaseModel):
     review_thresholds: ReviewThresholds = ReviewThresholds()
     thumbnail_strategies: list[ThumbnailStrategyConfig]
     rendering_defaults: RenderingDefaults = RenderingDefaults()
+    # Per-language overrides for channels the viewer can switch. Each entry is
+    # a partial ChannelConfig merged over the base by `apply_language_variant`,
+    # so a channel with no variants behaves exactly as before.
+    language_variants: dict[str, dict[str, Any]] = {}
+    # Match Analysis footage layer. Absent on every other engine, which is how
+    # the pipeline knows not to run match identification or clip cutting for
+    # them. See core/footage.py for the sourcing rules this config drives.
+    match_footage: MatchFootageConfig | None = None
+    # Closing question for channels that end on one. The narration's last
+    # sentence must be a short, story-specific question that invites an
+    # opinion; this value is the wording used when the script does not supply
+    # one, so the beat can never simply be missing. Empty disables the whole
+    # behaviour, which is how channels that do not end this way stay unchanged.
+    closing_question_fallback: str = ""
 
     @field_validator("thumbnail_strategies", mode="before")
     @classmethod
@@ -524,14 +603,29 @@ def slot_requires_sourced_still(
     return True
 
 
+# Marks a rendered beat as re-showing an earlier beat's sourced file rather
+# than owning one. Set by core.render_sections when a section has fewer real
+# photographs than it needs beats; read here so the validator does not expect a
+# file for it.
+REUSED_MEDIA_KEY = "_reused_media_index"
+
+
 def expected_sourced_image_slots(
     script: Script,
     config: ChannelConfig,
 ) -> list[tuple[int, int]]:
-    """Return (section_id, sub_idx) for each slot that should have a sourced still/video asset."""
+    """Return (section_id, sub_idx) for each slot that should have a sourced still/video asset.
+
+    A beat that re-shows an earlier beat's image has no file of its own -- the
+    renderer points it back at the original -- so it is not expected to have
+    been sourced. Without this the validator asked for a section_003_04.png
+    that nothing ever downloaded.
+    """
     result: list[tuple[int, int]] = []
     for section in script.sections:
         for sub_idx, slot in enumerate(section.non_overlay_slots):
+            if REUSED_MEDIA_KEY in (slot.props or {}):
+                continue
             if slot_requires_sourced_still(slot, config):
                 result.append((section.id, sub_idx + 1))
     return result
@@ -605,12 +699,18 @@ def compute_sub_durations(
     section_end = words[-1]["end"]
     sub_durations.append(max(section_end - prev_time + crossfade, 1.0))
 
-    if max_visual_hold_seconds is not None:
+    if max_visual_hold_seconds is not None and max(sub_durations) > max_visual_hold_seconds:
+        # Gap-based splitting follows the delivery, but an uneven run of pauses
+        # can park one image far longer than the rest. Previously the uniform
+        # rescue only applied when it cleared the cap outright, so a section
+        # that could not be fixed kept the worst split available: a 24.7s
+        # section over 5 slots held one image for 9.24s when an even split
+        # would have held 5.18s. Take whichever split has the lower peak --
+        # when neither clears the cap, the smaller overrun is still better,
+        # and the slot count is what actually fixes it (see the pacing
+        # requirement in core.scripter).
         uniform_durations = _uniform_split()
-        if (
-            max(sub_durations) > max_visual_hold_seconds
-            and max(uniform_durations) <= max_visual_hold_seconds
-        ):
+        if max(uniform_durations) < max(sub_durations):
             return uniform_durations
 
     return sub_durations
@@ -663,14 +763,58 @@ class Checkpoint(BaseModel):
 
 # ── Loading helpers ───────────────────────────────────────────────
 
+def _deep_merge(base: dict, patch: dict) -> dict:
+    """Recursively merge `patch` over `base`, returning a new dict."""
+    merged = dict(base)
+    for key, value in (patch or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def available_languages(data: dict) -> list[str]:
+    """Script languages a channel offers, base language first."""
+    base = str(data.get("language") or "").strip()
+    variants = list((data.get("language_variants") or {}).keys())
+    ordered = ([base] if base else []) + [v for v in variants if v != base]
+    return ordered or ([base] if base else [])
+
+
 def load_channel_config(
     channel_slug: str,
     overrides: list[str] | None = None,
+    language: str | None = None,
 ) -> ChannelConfig:
+    """Load a channel, optionally in one of its declared script languages.
+
+    A language variant is a partial config merged over the base, so switching
+    to English swaps the narration language, the voice and its direction, and
+    the script instructions together -- they have to move as a set, or the
+    scripter writes English while the TTS still reads Arabic.
+
+    An unknown or unset language leaves the base config untouched, which is
+    what every channel without variants gets.
+    """
     path = CHANNELS_DIR / f"{channel_slug}.json"
     if not path.exists():
         raise FileNotFoundError(f"Channel config not found: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
+
+    wanted = str(language or "").strip().lower()
+    if wanted:
+        variant = (data.get("language_variants") or {}).get(wanted)
+        if variant:
+            data = _deep_merge(data, variant)
+            data["language"] = wanted
+        elif wanted != str(data.get("language", "")).lower():
+            raise ValueError(
+                f"{channel_slug} does not offer script language {wanted!r}; "
+                f"available: {', '.join(available_languages(data))}"
+            )
+
+    # CLI overrides win over the variant, so a run can still pin one field.
     for ov in overrides or []:
         apply_dot_override(data, ov)
     return ChannelConfig(**data)

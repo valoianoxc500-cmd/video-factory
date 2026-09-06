@@ -1,0 +1,293 @@
+{
+  "channel_name": "Horror Stories",
+  "channel_id": "horror_stories",
+  "language": "ar",
+  "content_mode": "visual",
+  "style": {
+    "name": "Cinematic Horror",
+    "effects": {},
+    "text": {
+      "title_color": "#FFFFFF",
+      "title_position": "bottom_center",
+      "title_size_ratio": 0.06,
+      "title_accent_color": "#2E86DE",
+      "section_color_palette": [
+        "#2E86DE",
+        "#00A676",
+        "#F5A623",
+        "#D64550"
+      ]
+    },
+    "subtitle_highlight": {
+      "enabled": true,
+      "color": "#E23B3B",
+      "keywords_per_phrase": 2
+    },
+    "video": {
+      "background_color": [
+        12,
+        16,
+        24
+      ],
+      "transition_pool": [
+        "fade",
+        "dissolve"
+      ]
+    },
+    "watermark": {
+      "enabled": false
+    },
+    "vertical_thumbnail": true
+  },
+  "niche": {
+    "category": "Horror storytelling",
+    "focus": "Short Arabic horror videos: true crime and unexplained cases, paranormal accounts, urban legends, and original horror fiction.",
+    "audience": "Arabic speakers who watch horror and true-crime shorts",
+    "content_style": "Cinematic, suspenseful, escalating, honest about what is known"
+  },
+  "video": {
+    "target_duration_minutes": 1,
+    "resolution": [
+      1080,
+      1920
+    ],
+    "fps": 30,
+    "transition_duration_seconds": 0.8,
+    "background_music_volume": 0.25,
+    "music_pool": [
+      "horror_dread_low",
+      "horror_tension_pulse",
+      "horror_climax_dark"
+    ],
+    "visual_guidance": {
+      "google_photo": "Default. Name the specific, real, photographable subject of THIS sentence, and name it the way an archive would label it: the person, unit, vessel, aircraft, building, road, town or document, together with the event and its year.\nGOOD: 'Flight 19 TBM Avenger Fort Lauderdale 1945', 'Martin PBM Mariner US Navy 1945', 'Lieutenant Charles Taylor US Navy', 'NAS Fort Lauderdale control tower 1945'.\nBAD: 'vintage 1940s aircraft radio equipment', '1940s cockpit instrument panel', 'old military airplane' -- these describe a period prop, not the subject, and return whatever era-correct object a stock site happens to hold, from the wrong country or the wrong service.\nEvery keyword set must contain at least one proper noun -- a name, place, unit, vessel, aircraft type or organisation -- taken from the narration or the research brief.",
+      "stock_photo": "Only for atmosphere the narration does not tie to a specific place: fog, a dark treeline, an empty corridor. Never for a slot whose narration names a real person, place or case.",
+      "ai_illustration": "Fallback only, and only for openly fictional content or an abstract mood beat. Must read as illustration, never as a photograph.",
+      "ai_photo": "Never on this channel for a real case, person, victim, vehicle or crime. A generated photo of a real event is a fabricated document. When no real photograph exists, use the archival fallback above.",
+      "visual_policy": "Use literal_google_photo whenever the narration names a real place, person, building or case, so the slot can only be satisfied by a real photograph.",
+      "backdrop_keywords": "title_banner, info_slide and fact_highlight backdrops are searched against real images like any other slot. Name a concrete photographable subject. Never use design or mood words -- no 'cinematic', 'dark atmosphere', 'horror background', 'eerie glow', 'poster' -- they match wallpapers and album art, not real places.",
+      "forbidden_visuals": "Never request gore, corpses, real victim photographs, crime-scene bodies, or content sexualising or degrading a real person. Never request a fabricated depiction of a real crime, victim or perpetrator.\nNever request a symbolic or designed stand-in for a documented subject: a question mark, a book cover, podcast cover art, a cartoon or comic illustration, a dramatised re-enactment still, an anonymous silhouette, or a 'cinematic' mood shot. These are graphics about the story rather than evidence from it, and a real archive holds none of them.\nNever request generic jump-scare stock imagery -- masked figures, plastic skulls, Halloween props.\nNever request a bare period prop ('a 1940s radio', 'an old compass', 'a vintage cockpit') with no named subject attached: it is the single most common cause of an irrelevant or wrongly-branded photograph, and it is what returned an Air France receiver for a US Navy story.",
+      "photographable_subjects_only": "EVERY visual keyword must name a concrete real-world subject that could plausibly appear in an actual photograph or an authentic archival document: the real place, building, road, aircraft, vehicle, object, document, or person. If a beat is conceptual or metaphorical, convert it into a documented subject rather than asking for a graphic or an illustration of the idea. 'The mystery deepened' becomes the real building where the investigation was run, not a question mark.",
+      "archival_evidence": "For a real case, prefer the authentic record: the actual aircraft type and airline livery, the real airport and terminal, the real landscape the events crossed, official evidence photographs, case files, court and police documents, wanted posters, and contemporary newspaper front pages. Request an evidence item ONLY as the real archival photograph of it -- 'FBI evidence photograph of the clip-on tie' -- never as a staged close-up or a re-created scene, which would be a fabricated document. A police or FBI composite sketch is an allowed archival artefact, but the keywords must name it as the composite sketch; never present it, or request it, as a photograph of the person.",
+      "thin_photographic_record": "Some true cases have almost no photographs of the central figure. That is a fact of the case, not a reason to invent imagery. When the person was never photographed, build the visuals from what WAS documented: the aircraft, the airports, the money, the terrain, the search operation, the investigators, the documents and the press coverage. Do not fill the gap with artwork, a stand-in figure, or a mood shot.",
+      "describe_the_artefact_not_a_scene": "Describe the visual as the archive actually holds it, not as a scene you would stage. Name the subject and let the photograph be whatever it is. Do NOT specify a person performing an action with the object (hands holding it, someone examining it), a quantity (stacks, piles, a single one), a camera angle, a time of day, or weather -- a real archival photograph will not happen to match those, and asking for them turns the correct image into a failed match. Write 'FBI evidence photograph of the recovered ransom money', not 'hands holding stacks of 1971 twenty dollar bills'. The one detail worth naming is the era or year when the subject would otherwise be ambiguous -- 'Boeing 727 in 1971 Northwest Orient livery' -- because a modern equivalent would be wrong.",
+      "distinctness": "Each slot must name a DIFFERENT subject from its neighbours. Slots that repeat one subject collapse into the same search result, and a section whose photographs cannot be sourced ends up re-showing the few that could -- which puts an image on a sentence it was never chosen for. Vary the subject, the vantage point or the moment on every beat."
+    },
+    "include_intro": false,
+    "include_outro": false,
+    "sfx_pool": [
+      "horror_door_creak",
+      "horror_heartbeat",
+      "horror_jarring_hit"
+    ],
+    "music_guidance": "Choose music_track from the pool by the story's dominant intensity: horror_dread_low for slow, quiet menace and unresolved disappearances; horror_tension_pulse for investigations, mounting evidence and chase; horror_climax_dark for a story that builds to a violent or shocking reveal."
+  },
+  "video_types": {
+    "listicle": {
+      "enabled": true,
+      "section_style": "One concrete unexplained detail per section, each anchored to a real documented fact of the case: a time, a location, a piece of physical evidence, a witness account, or a contradiction investigators could never resolve.",
+      "pacing": "Name the detail, place it in the scene, give the documented fact that makes it strange, then leave the viewer with why it has never been explained.",
+      "example": "5 Details From This Disappearance That Were Never Explained",
+      "numbering_order": "ascending",
+      "allowed_thumbnail_strategies": [
+        "horror_case_thumbnail"
+      ],
+      "narrative_hooks": [
+        "Open on the single strangest detail, then work back through the rest in order.",
+        "Start with what investigators expected to find, then count off what they actually found.",
+        "Lead with the detail that broke the official theory, then build the case around it."
+      ]
+    },
+    "explainer": {
+      "enabled": true,
+      "section_style": "One unresolved question about a real case, broken into what is documented, what was claimed, and what remains unknown -- keeping the three clearly apart.",
+      "pacing": "The question -> what the record actually establishes -> what was only ever claimed or theorised -> what is still unanswered today.",
+      "example": "Why This Vanishing Was Never Solved",
+      "allowed_thumbnail_strategies": [
+        "horror_case_thumbnail"
+      ],
+      "narrative_hooks": [
+        "Open with the theory everyone believes, then show what the evidence does not support.",
+        "Start from the last confirmed moment and follow the record until it runs out.",
+        "Begin with the detail that makes every explanation fail."
+      ]
+    },
+    "narrative": {
+      "enabled": true,
+      "section_style": "A real case told as a cinematic sequence: the ordinary opening, the moment it turns, the escalation, and what was left behind -- built only from documented events and clearly attributed accounts.",
+      "pacing": "Ordinary setting -> the first thing that is wrong -> escalation as the situation slips out of control -> the reveal or the silence where a resolution should be.",
+      "example": "The Night He Stepped Out Of The Plane And Vanished",
+      "allowed_thumbnail_strategies": [
+        "horror_case_thumbnail"
+      ],
+      "narrative_hooks": [
+        "Open in the last ordinary minute before anything went wrong.",
+        "Start at the moment of disappearance, then go back and show how it was possible.",
+        "Begin with what was found afterwards, then tell the story that explains it."
+      ]
+    }
+  },
+  "voice": {
+    "provider": "gemini_2.5_tts",
+    "language": "ar-SA",
+    "voice_name": "Charon",
+    "voice_prompt": "راوٍ بالعربية الفصحى بصوت عميق وهادئ، نبرة جادة وحميمة كأنه يتحدث إليك وحدك في غرفة مظلمة. إلقاء بطيء ومضبوط، مع وقفات مقصودة قبل التفاصيل المهمة. يبني التوتر تدريجيًا جملة بعد جملة، دون مبالغة ولا أداء مسرحي ولا رفع للصوت. مناسب لقصص الجرائم الحقيقية وحالات الاختفاء والألغاز غير المُفسَّرة.",
+    "voice_prompt_variations": [
+      "راوٍ بالعربية الفصحى بصوت عميق وهادئ، نبرة جادة وحميمة كأنه يتحدث إليك وحدك في غرفة مظلمة. إلقاء بطيء ومضبوط، مع وقفات مقصودة قبل التفاصيل المهمة. يبني التوتر تدريجيًا جملة بعد جملة، دون مبالغة ولا أداء مسرحي ولا رفع للصوت. مناسب لقصص الجرائم الحقيقية وحالات الاختفاء والألغاز غير المُفسَّرة.",
+      "راوٍ وثائقي بالعربية الفصحى، صوت منخفض ورصين، يتحدث بهدوء وكأنه يكشف سرًّا لا يريد أن يسمعه أحد. صمت قصير بين الجمل، تصاعد محسوب في التوتر، نبرة باردة ومتزنة بلا انفعال.",
+      "صوت عميق وهادئ بالعربية الفصحى، سرد متمهّل وواضح المخارج، يترك وقفة قصيرة قبل كل معلومة ثقيلة. يوحي بالغموض من خلال الهدوء لا من خلال التهويل، ولا يرفع الصوت أبدًا."
+    ]
+  },
+  "image_sourcing": {
+    "generation_model": "gemini-2.5-flash-image",
+    "web_photos_only": true,
+    "generate_info_slide_illustrations": false,
+    "generate_info_card_illustrations": false,
+    "style_prompt_suffix": "documentary photograph, natural available light, muted desaturated palette, no text, no watermark",
+    "illustration_style_prompt_suffix": "clean educational illustration, simple shapes, warm balanced colors, no text",
+    "allow_generated_fallback": true,
+    "max_generated_fallback_images": 5,
+    "generated_fallback_model": "gemini-3.1-flash-lite-image",
+    "allow_video_broll": true,
+    "max_broll_ratio": 0.34
+  },
+  "youtube": {
+    "category_id": "27",
+    "tags": [
+      "horror",
+      "mystery",
+      "unsolved",
+      "true crime",
+      "unexplained",
+      "disappearance",
+      "رعب",
+      "قصص رعب",
+      "غموض",
+      "قضايا غامضة"
+    ],
+    "title_formats": [
+      {
+        "name": "question",
+        "instruction": "Title MUST be a clear question."
+      },
+      {
+        "name": "numbered_list",
+        "instruction": "Title MUST start with a number."
+      },
+      {
+        "name": "hook",
+        "instruction": "Title MUST use a practical curiosity hook."
+      }
+    ],
+    "description_styles": [
+      {
+        "name": "short_clear",
+        "instruction": "Write 2-3 concise sentences about what the video covers and end with a simple subscribe CTA."
+      },
+      {
+        "name": "timestamps",
+        "instruction": "Write one short paragraph, then list section timestamps in 00:00 format."
+      }
+    ]
+  },
+  "script_style": {
+    "tone": "Cinematic Arabic horror narration: intimate, deliberate, and escalating. Short sentences. Concrete detail over adjectives. Never campy.",
+    "instructions": "Write Modern Standard Arabic horror narration with a complete dramatic arc: a hook in the first sentence that plants a specific unsettling question, rising suspense with escalating detail, a climax where the worst thing is revealed, and an ending that resolves the emotional beat even when the case itself is unsolved.\n\nSTORY TYPE drives how truth is handled. The plan's story_type is one of true_story, paranormal, urban_legend, or custom_horror.\n\nFor true_story: this is a real case involving real people. Use ONLY the research brief. State [VERIFIED] facts plainly. Attribute [REPORTED] claims (بحسب التقارير، قال الشهود). Mark [UNVERIFIED] material explicitly as unconfirmed, or omit it. Never invent a name, a date, a quote, a cause of death, or a culprit. If the case is unsolved, say so; do not manufacture a resolution.\n\nFor paranormal and urban_legend: these are accounts and folklore, not established fact. Narrate them as what people claim, tell or believe (تقول الرواية، يزعم السكان), and say plainly when there is no evidence. Never assert a supernatural event as a documented fact.\n\nFor custom_horror: this is openly fiction. Do not dress it as a real case, do not attach it to a real place, person or crime, and do not use documentary framing.\n\nEvery visual slot must name a real, photographable subject tied to the sentence it accompanies -- the actual place, building, road, object, document or landscape being described. When nothing real can be shown, ask for an atmospheric shot of the setting rather than a stand-in for a person or event.\n\nCLOSING QUESTION. The final spoken sentence of the last section MUST be a short question to the viewer, built from this story's own unresolved detail. It has to be answerable as an opinion -- the viewer should feel they could argue either side -- and it must be specific to this case, not a phrase that would fit any story. Name the real people, places or facts already established in the narration and pose the open question the case leaves behind: 'برأيك... هل مات دي بي كوبر ليلة القفزة، أم أنه عاش واختفى بهوية جديدة؟'. Keep it to one sentence, in the same calm voice as the rest of the narration, and end it with ؟. Introduce NO new fact, name, date, theory or claim in it -- ask only about what the video has already established, and never imply the case is solved. Do NOT end on a like, follow or subscribe request; the question is the ending."
+  },
+  "business_strategy": {
+    "channel_goal": "Short Arabic horror videos that feel complete, cinematic and honest about the line between fact and claim.",
+    "video_jobs": [
+      "Turn real, verified horror, mystery, paranormal and unexplained stories into cinematic Arabic short-form videos.",
+      "Research the case against reliable sources before writing, and keep verified fact, reported claim and unverified rumour clearly separated.",
+      "Name a real, photographable subject for every visual slot: the actual place, object, vehicle, building or person the sentence describes.",
+      "Never fabricate evidence, quotes, names, dates or a resolution the record does not support."
+    ],
+    "content_families": [
+      {
+        "name": "true_case",
+        "planning_focus": "A real, documented case -- a disappearance, an unsolved crime, a hijacking, a wreck, a discovery -- involving real people and places.",
+        "example_topics": [
+          "The man who vanished mid-flight and was never found",
+          "The passenger who boarded and never arrived",
+          "The wreck that was found decades too late"
+        ],
+        "cta_angle": "Invite viewers to follow for more real unsolved cases."
+      },
+      {
+        "name": "unexplained_phenomenon",
+        "planning_focus": "A recurring or one-off phenomenon that is genuinely documented but has no accepted explanation, told without asserting the supernatural.",
+        "example_topics": [
+          "The signal no one has ever accounted for",
+          "The place people keep disappearing from",
+          "The recording that has never been explained"
+        ],
+        "cta_angle": "Invite viewers to follow for more unexplained cases."
+      },
+      {
+        "name": "folklore_and_legend",
+        "planning_focus": "A legend or local account narrated explicitly as something people claim, tell or believe -- never as established fact.",
+        "example_topics": [
+          "The story the town still tells about that road",
+          "The legend behind the abandoned building",
+          "What locals claim happens after dark"
+        ],
+        "cta_angle": "Invite viewers to follow for more stories and legends."
+      }
+    ],
+    "cta_rules": [
+      "End with a natural closing line. Use the Part 2 call to action -- \"إذا تريدون الجزء الثاني، اكتبولي بالتعليقات.\" -- ONLY when the story genuinely leaves an unresolved thread worth a second video: another victim, a later development, a second case. If the story is complete, close on the story itself and do not promise a part two."
+    ],
+    "launch_strategy": "Build the channel around real, verified horror, mystery, paranormal and unexplained stories, told cinematically in Arabic and honest about the line between what is documented and what is only claimed."
+  },
+  "rendering_defaults": {
+    "component_min_duration": 5.0,
+    "image_slot_min_duration": 2.5,
+    "max_visual_hold_seconds": 5.0,
+    "intra_slot_crossfade": 0.3,
+    "sfx_volume": 0.32,
+    "sfx_boundary_coverage": 0.7,
+    "render_concurrency": 2,
+    "frame_sequence_image_format": "jpeg",
+    "frame_sequence_jpeg_quality": 80
+  },
+  "review_thresholds": {
+    "script_min_score": 7.0,
+    "script_max_attempts": 3,
+    "image_review_max_attempts": 2,
+    "thumbnail_max_attempts": 2,
+    "final_review_max_attempts": 1
+  },
+  "thumbnail_strategies": [
+    {
+      "name": "horror_case_thumbnail",
+      "instruction": "Create a dark, cinematic true-mystery thumbnail for THIS specific case.\nSUBJECT: exactly one focal subject, drawn from the real case -- the actual person, the actual object, the actual aircraft, vehicle, building, or location named in the narration. When a reliable photograph or a real archival likeness of that subject exists, base the composition on it. When it does not, use the real place or object instead; never substitute a stand-in person.\nCOMPOSITION: dark, high-contrast, cinematic. Deep shadow with a single directional light on the subject. Muted, desaturated palette -- cold blues, greys and blacks with at most one warm accent. Heavy negative space. Shallow depth of field. Unsettling stillness rather than gore, shock imagery or jump-scare faces.\nHONESTY: this is a real unsolved case, so the image must not fabricate evidence. Do NOT invent documents, police files, ransom notes, tickets, news clippings, photographs of unidentified people, crime-scene imagery, or anything that could be mistaken for a genuine historical record or a real forensic artefact. Do not depict a named real person committing a crime. Do not imply the case is solved when it is not.\nTEXT: add no captions, headlines, dates, arrows, circles, watermarks, logos or channel branding -- the Arabic headline is composited separately. Keep the bottom third and the centre-right visually simple and free of detail so right-to-left Arabic text stays readable over it.\nThe thumbnail must depict the story actually being narrated. A generic horror image that does not show this case's subject is a failure."
+    }
+  ],
+  "closing_question_fallback": "ما تفسيرك لهذه القصة؟",
+  "language_variants": {
+    "ar": {
+      "language": "ar"
+    },
+    "en": {
+      "language": "en",
+      "script_style": {
+        "tone": "Cinematic English horror narration: intimate, deliberate, and escalating. Short sentences. Concrete detail over adjectives. Never campy.",
+        "instructions": "Write English horror narration with a complete dramatic arc: a hook in the first sentence that plants a specific unsettling question, rising suspense with escalating detail, a climax where the worst thing is revealed, and an ending that resolves the emotional beat even when the case itself is unsolved.\n\nSTORY TYPE drives how truth is handled. The plan's story_type is one of true_story, paranormal, urban_legend, or custom_horror.\n\nFor true_story: this is a real case involving real people. Use ONLY the research brief. State [VERIFIED] facts plainly. Attribute [REPORTED] claims (\"according to reports\", \"witnesses said\"). Mark [UNVERIFIED] material explicitly as unconfirmed, or omit it. Never invent a name, a date, a quote, a cause of death, or a culprit. If the case is unsolved, say so; do not manufacture a resolution.\n\nFor paranormal and urban_legend: these are accounts and folklore, not established fact. Narrate them as what people claim, tell or believe (\"the story goes\", \"locals claim\"), and say plainly when there is no evidence. Never assert a supernatural event as a documented fact.\n\nFor custom_horror: this is openly fiction. Do not dress it as a real case, do not attach it to a real place, person or crime, and do not use documentary framing.\n\nEvery visual slot must name a real, photographable subject tied to the sentence it accompanies -- the actual place, building, road, object, document or landscape being described. When nothing real can be shown, ask for an atmospheric shot of the setting rather than a stand-in for a person or event.\n\nCLOSING QUESTION. The final spoken sentence of the last section MUST be a short question to the viewer, built from this story's own unresolved detail. It has to be answerable as an opinion -- the viewer should feel they could argue either side -- and it must be specific to this case, not a phrase that would fit any story. Name the real people, places or facts already established in the narration and pose the open question the case leaves behind: 'برأيك... هل مات دي بي كوبر ليلة القفزة، أم أنه عاش واختفى بهوية جديدة؟'. Keep it to one sentence, in the same calm voice as the rest of the narration, and end it with ؟. Introduce NO new fact, name, date, theory or claim in it -- ask only about what the video has already established, and never imply the case is solved. Do NOT end on a like, follow or subscribe request; the question is the ending."
+      },
+      "voice": {
+        "language": "en-US",
+        "voice_name": "Charon",
+        "voice_prompt": "A deep, calm English narrator speaking as if to one listener in a dark room. Slow, controlled delivery with deliberate pauses before important details. Builds tension sentence by sentence, without theatrics or raised voice. Suited to true crime, disappearances and unexplained cases.",
+        "voice_prompt_variations": [
+          "A deep, calm English narrator, unhurried and intimate, letting the facts carry the dread.",
+          "A restrained English documentary narrator: measured pace, precise consonants, no melodrama."
+        ]
+      },
+      "business_strategy": {
+        "cta_rules": [
+          "End with a natural closing line. Use the Part 2 call to action -- \"If you want part two, tell me in the comments.\" -- ONLY when the story genuinely leaves an unresolved thread worth a second video: another victim, a later development, a second case. If the story is complete, close on the story itself and do not promise a part two."
+        ]
+      }
+    }
+  }
+}

@@ -7,7 +7,9 @@ After all images are sourced, Gate #2 reviews them with Gemini Vision.
 import asyncio
 import hashlib
 import io
+import json
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
@@ -19,12 +21,16 @@ from PIL import Image, ImageFilter, ImageOps
 
 import clients
 import prompts
+from core import generated_visuals
+from core.bilingual_queries import build_bilingual_queries, is_single_script
+from core.framing import subject_aware_fit, verticality_score
 from core.utils import meets_minimum_source_size, minimum_source_size
 from core.reviewer import review_gate
 from core.utils import (
     Script,
     ChannelConfig,
     VisualSlot,
+    minimum_visual_slots_for_duration,
     save_script,
     slot_requires_sourced_still,
 )
@@ -55,6 +61,8 @@ _STOCK_DOMAINS = {
 _MAX_CONCURRENT_SOURCES = 6
 _PEXELS_CANDIDATE_COUNT = 8
 _SERPER_CANDIDATE_COUNT = 8
+_SERPER_MAX_ATTEMPTS = 3
+_SERPER_RETRY_BACKOFF = 1.5  # seconds, multiplied by the attempt number
 
 
 def _is_blank_media_prompt(text: str) -> bool:
@@ -86,6 +94,9 @@ def _generation_lane_for_slot(
 
     if slot.visual == "info_slide" and bool((slot.props or {}).get("source_as_photo")):
         return "photo"
+    if config.image_sourcing.web_photos_only:
+        # No illustration lane at all: illustrations are AI-generated.
+        return "photo"
     if slot.visual in VisualSlot.ILLUSTRATION_TYPES:
         return "illustration"
     return "photo"
@@ -104,9 +115,86 @@ def _generation_operation(lane: GenerationLane, *, retry: bool = False) -> str:
     return "image_regeneration" if retry else "image_generate"
 
 
+# Largest enlargement the reframe composite may apply to a source photo.
+# Asset provenance. Candidates are downloaded to temp paths and only some are
+# chosen, so the URL and licence are recorded at download time and copied onto
+# the shipped filename when a candidate wins. Both are cleared per run.
+_CANDIDATE_PROVENANCE: dict[str, dict] = {}
+_ASSET_PROVENANCE: dict[str, dict] = {}
+
+
+def _record_candidate_provenance(
+    path: Path,
+    *,
+    platform: str,
+    url: str,
+    source_page: str = "",
+    licence: str = "",
+    attribution: str = "",
+    width: int = 0,
+    height: int = 0,
+) -> None:
+    _CANDIDATE_PROVENANCE[str(path)] = {
+        "platform": platform,
+        "url": url,
+        "source_page": source_page,
+        "licence": licence,
+        "attribution": attribution,
+        "width": width,
+        "height": height,
+    }
+
+
+def _reset_provenance() -> None:
+    _CANDIDATE_PROVENANCE.clear()
+    _ASSET_PROVENANCE.clear()
+
+
+def save_asset_provenance(workspace: Path) -> Path:
+    """Write the per-asset source/licence record for this run."""
+    out = workspace / "asset_provenance.json"
+    out.write_text(
+        json.dumps(
+            {"assets": list(_ASSET_PROVENANCE.values())},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    logger.info(f"recorded provenance for {len(_ASSET_PROVENANCE)} asset(s)")
+    return out
+
+
+_MAX_REFRAME_UPSCALE = 2.0
+
+# Below this share of the source retained, a cover crop is discarding so much
+# of the frame that the subject is likely lost and a blurred surround is the
+# better trade. A 16:9 photo into 9:16 retains ~0.32, so it crops. Mirrors
+# core.processor._MIN_COVER_RETENTION.
+_MIN_COVER_RETENTION = 0.25
+
+
 def _minimum_reframe_source_size(target_size: tuple[int, int]) -> tuple[int, int]:
     min_w, min_h = minimum_source_size(target_size)
     return (max(640, min_w // 2), max(360, min_h // 2))
+
+
+def _reframe_upscale_factor(
+    width: int,
+    height: int,
+    target_size: tuple[int, int],
+) -> float:
+    """How much `_normalize_photo_bytes_for_target` must enlarge this source.
+
+    The composite scales the photo to *fit inside* the canvas, so only the
+    binding axis matters. Comparing raw width and height against the target
+    instead rejects almost every real landscape news photo when the target is
+    portrait (1080x1920), even when it barely needs enlarging at all.
+    """
+    target_w, target_h = target_size
+    if width <= 0 or height <= 0:
+        return float("inf")
+    return min(target_w / width, target_h / height)
 
 
 def _normalize_photo_bytes_for_target(
@@ -120,22 +208,22 @@ def _normalize_photo_bytes_for_target(
     if img.size == (target_w, target_h):
         return image_bytes
 
-    background = ImageOps.fit(
-        img,
-        (target_w, target_h),
-        method=Image.Resampling.LANCZOS,
-    ).filter(ImageFilter.GaussianBlur(24))
-    foreground = ImageOps.contain(
-        img,
-        (target_w, target_h),
-        method=Image.Resampling.LANCZOS,
-    )
-    x = (target_w - foreground.width) // 2
-    y = (target_h - foreground.height) // 2
-    background.paste(foreground, (x, y))
+    # Fill the vertical frame by cropping, rather than shrinking the photo to
+    # fit and padding the rest with a blur. A 16:9 photo letterboxed into
+    # 1080x1920 occupies about a fifth of the height and reads as a landscape
+    # video pasted into a vertical one -- the final-review gate rejects it as
+    # "not native vertical video". Cropping a landscape source to 9:16 keeps
+    # ~32% of its width, which is simply what the format costs.
+    # Framing is decided here, once. This used to be a blind ImageOps.fit
+    # center crop, which cut the subject out of any photo where they were not
+    # dead center -- and because it already produced a target-ratio image,
+    # processor's face-aware crop saw a matching aspect ratio and never ran.
+    # subject_aware_fit keeps the crop on the subject with portrait headroom
+    # and still falls back to a blurred surround for panoramas.
+    result = subject_aware_fit(img, (target_w, target_h))
 
     buffer = io.BytesIO()
-    background.save(buffer, format="JPEG", quality=90)
+    result.save(buffer, format="JPEG", quality=90)
     return buffer.getvalue()
 
 
@@ -222,6 +310,25 @@ def _build_sections_context(
     return sections_context
 
 
+def _usable_pexels_key() -> str | None:
+    """Return the Pexels key only if it can actually be sent as a header.
+
+    HTTP headers are latin-1; a key with stray non-ASCII characters (a
+    half-replaced placeholder, a smart-quoted paste) otherwise blows up deep
+    inside httpx and takes the slot's whole sourcing attempt with it.
+    """
+    key = settings.pexels_api_key
+    if not key:
+        return None
+    if not key.isascii():
+        logger.warning(
+            "PEXELS_API_KEY contains non-ASCII characters and cannot be used "
+            "as an HTTP header; Pexels sourcing is disabled for this run"
+        )
+        return None
+    return key
+
+
 def _is_stock_domain(url: str) -> bool:
     """Check if a URL belongs to a known stock-photo domain."""
     url_lower = url.lower()
@@ -261,11 +368,21 @@ def _apply_slot_rewrite(
     return before != _slot_marker(slot)
 
 
-def _image_source_for_slot(slot: VisualSlot) -> str:
+def _image_source_for_slot(
+    slot: VisualSlot,
+    config: ChannelConfig | None = None,
+) -> str:
     preferred_photo_source = str((slot.props or {}).get("photo_source", "")).strip()
     if preferred_photo_source:
-        return _VISUAL_TO_SOURCE.get(preferred_photo_source, "ai_gen")
-    return _VISUAL_TO_SOURCE.get(slot.visual, "ai_gen")
+        source = _VISUAL_TO_SOURCE.get(preferred_photo_source, "ai_gen")
+    else:
+        source = _VISUAL_TO_SOURCE.get(slot.visual, "ai_gen")
+
+    if config is not None and config.image_sourcing.web_photos_only:
+        # News visuals must be photographs of the actual subject: everything
+        # photographic goes through web image search, never image generation.
+        return "serper"
+    return source
 
 
 def _apply_ai_prompt_preview_slide(
@@ -418,6 +535,7 @@ async def source_images(
     """
     raw_dir = workspace / "images" / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
+    _reset_provenance()
 
     sourcing_log = []  # tracks per-image sourcing actions
     seen_hashes: set[str] = set()  # content-hash dedup across sections
@@ -430,6 +548,15 @@ async def source_images(
 
     # Build task descriptors, filtering out cached images/videos
     descriptors = []
+    # Slots whose image is already on disk. Not sourced again, but merged in
+    # below so the review gate can still re-source them if it rejects one.
+    cached_descriptors: list[dict] = []
+
+    # The b-roll ratio is judged against the whole video, so the total has to
+    # be known before the first slot is decided.
+    total_slots = sum(len(s.non_overlay_slots) for s in script.sections)
+    broll_used = 0
+
     for section in script.sections:
         non_overlay_slots = section.non_overlay_slots
         num_subs = len(non_overlay_slots) or 1
@@ -471,7 +598,7 @@ async def source_images(
                 })
                 continue
 
-            image_source = _image_source_for_slot(slot)
+            image_source = _image_source_for_slot(slot, config)
             if config.test.preview_ai_image_prompts and image_source == "ai_gen":
                 request, changed = _apply_ai_prompt_preview_slide(
                     section=section,
@@ -492,8 +619,21 @@ async def source_images(
                 })
                 continue
 
-            # B-roll video slots
+            # B-roll video slots. A channel that has not opted in, or one that
+            # has already used its share of motion footage, sources the slot as
+            # a photograph instead -- the beat still gets a visual, it just
+            # gets a still one. Falling back beats dropping the slot, which
+            # would cost the section a beat it needs for pacing.
+            if slot.visual == "b_roll" and not _broll_allowed(config, broll_used, total_slots):
+                logger.info(
+                    f"Section {section.id} sub-image {sub_idx + 1}: sourcing "
+                    f"b-roll slot as a photograph "
+                    f"({'video b-roll disabled' if not config.image_sourcing.allow_video_broll else 'b-roll ratio reached'})"
+                )
+                slot.visual = "stock_photo"
+
             if slot.visual == "b_roll":
+                broll_used += 1
                 video_path = videos_dir / f"{file_label}.mp4"
                 if video_path.exists():
                     logger.info(f"B-roll already exists: {video_path.name}")
@@ -515,6 +655,9 @@ async def source_images(
                     "img_path": None,
                     "b_roll": True,
                     "lane": "photo",
+                    "allow_generation_fallback": (
+                        not config.image_sourcing.web_photos_only
+                    ),
                     "fallback_to_illustration": False,
                     "video_path": video_path,
                     "target_duration": target_dur,
@@ -545,6 +688,33 @@ async def source_images(
                     "keywords": keywords,
                     "source": "cached",
                 })
+                # Still describe the slot, marked already-sourced. A cached
+                # image is skipped by the sourcing pass but must remain
+                # reachable by the review gate: on a resumed run every image is
+                # cached, and without a descriptor the gate had nothing to
+                # re-source, so it re-reviewed identical files until its retry
+                # budget ran out and failed the run.
+                cached_descriptors.append({
+                    "section": section,
+                    "sub_idx": sub_idx,
+                    "slot": slot,
+                    "keywords": keywords,
+                    "prompt": prompt,
+                    "img_path": img_path,
+                    "b_roll": False,
+                    "lane": lane,
+                    "allow_generation_fallback": (
+                        not config.image_sourcing.web_photos_only
+                        and slot.visual not in {"google_photo"}
+                        and policy not in {
+                            "literal_google_photo",
+                            "google_photo_exact_action",
+                            "photo_backed_info_slide",
+                        }
+                    ),
+                    "fallback_to_illustration": False,
+                    "sourced": True,
+                })
                 continue
 
             descriptors.append({
@@ -557,7 +727,8 @@ async def source_images(
                 "b_roll": False,
                 "lane": lane,
                 "allow_generation_fallback": (
-                    slot.visual not in {"google_photo"}
+                    not config.image_sourcing.web_photos_only
+                    and slot.visual not in {"google_photo"}
                     and policy not in {
                         "literal_google_photo",
                         "google_photo_exact_action",
@@ -601,6 +772,7 @@ async def source_images(
                     "keywords": keywords,
                     "source": "pexels_video",
                 })
+                desc["sourced"] = True
                 return
 
             # Fallback: source as normal image instead
@@ -612,7 +784,7 @@ async def source_images(
         # Normal image sourcing — dispatch on slot.visual
         img_path = desc["img_path"]
         slot = desc["slot"]
-        image_source = _image_source_for_slot(slot)
+        image_source = _image_source_for_slot(slot, config)
         lane = desc["lane"]
 
         async with sem:
@@ -627,6 +799,7 @@ async def source_images(
                 lane=lane,
                 allow_generation_fallback=desc.get("allow_generation_fallback", True),
                 fallback_to_illustration=desc.get("fallback_to_illustration", False),
+                narration=section.narration,
             )
 
         if source_used:
@@ -637,6 +810,7 @@ async def source_images(
                 "keywords": keywords,
                 "source": source_used,
             })
+            desc["sourced"] = True
         else:
             if (
                 config.test.preview_ai_image_prompts
@@ -666,11 +840,12 @@ async def source_images(
                     "model": request["model"],
                     "operation": request["operation"],
                 })
+                desc["sourced"] = True
                 return
-            raise RuntimeError(
-                f"Section {section.id} sub-image {sub_idx + 1}: "
-                f"source failed for visual {slot.visual} with policy {slot.visual_policy}"
-            )
+            # A miss is recorded, not raised. Raising here used to abort the
+            # whole gather, which tore down the shared HTTP client while its
+            # siblings were still using it ("client has been closed").
+            desc["sourced"] = False
 
     if descriptors:
         async with httpx.AsyncClient(
@@ -678,9 +853,72 @@ async def source_images(
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
             follow_redirects=True,
         ) as client:
-            await asyncio.gather(*[
-                _source_one(desc, client) for desc in descriptors
-            ])
+            outcomes = await asyncio.gather(
+                *[_source_one(desc, client) for desc in descriptors],
+                return_exceptions=True,
+            )
+            for desc, outcome in zip(descriptors, outcomes):
+                if isinstance(outcome, BaseException):
+                    logger.warning(
+                        f"Section {desc['section'].id} sub-image "
+                        f"{desc['sub_idx'] + 1}: sourcing raised "
+                        f"{type(outcome).__name__}: {outcome}"
+                    )
+                    desc["sourced"] = False
+
+            # Second pass for the misses, still inside the client's lifetime.
+            await _retry_missed_slots(
+                descriptors=descriptors,
+                script=script,
+                config=config,
+                client=client,
+                seen_hashes=seen_hashes,
+                sourcing_log=sourcing_log,
+                raw_dir=raw_dir,
+            )
+
+            # Third pass, only for beats whose loss would leave a section
+            # unable to fill its runtime inside the hold cap. The widening
+            # pass judges each slot alone and can afford to give one up; this
+            # one knows what the section still owes.
+            await _rescue_underpopulated_sections(
+                descriptors=descriptors,
+                script=script,
+                config=config,
+                client=client,
+                seen_hashes=seen_hashes,
+                sourcing_log=sourcing_log,
+                raw_dir=raw_dir,
+            )
+
+    # Fourth pass, and the last thing tried before beats start being thrown
+    # away: generate an atmospheric frame for slots that web search and subject
+    # rescue both failed to fill. Off unless the channel opts in, capped per
+    # video, and refused outright for anything that would fabricate evidence or
+    # a real person -- see core/generated_visuals.py.
+    fallback_budget = await _generate_missing_visuals(
+        descriptors=descriptors,
+        config=config,
+        sourcing_log=sourcing_log,
+    )
+
+    # Cached slots join the pool only now: they must not be re-sourced by the
+    # pass above, but the review gate downstream has to be able to reach them.
+    descriptors.extend(cached_descriptors)
+
+    survivor_map = _drop_unsourced_slots(descriptors, script)
+    if survivor_map:
+        script_mutated = True
+        _renumber_section_media(survivor_map, raw_dir, videos_dir)
+
+    # The script passed validation with enough slots to keep every beat under
+    # the hold cap. Dropping unsourced beats can break that contract after the
+    # fact, and nothing downstream re-checks it -- the renderer just cycles
+    # what it was given. Re-check the sections that actually lost beats.
+    if survivor_map:
+        enforce_minimum_slots(
+            script, config, only_sections=set(survivor_map)
+        )
 
     # ── Gate #2: Image Relevance Review ───────────────────────────
     image_paths = sorted(raw_dir.glob("section_*_*.jpg"))
@@ -690,22 +928,955 @@ async def source_images(
     sections_context = _build_sections_context(script, raw_dir, videos_dir)
 
     def _review_prompt(content):
-        return prompts.image_review_prompt(sections_context)
+        # Documentary channels judge b-roll against the scene, not the topic:
+        # under a factual voiceover a loosely related clip reads as footage of
+        # the real event. web_photos_only is what marks those channels.
+        return prompts.image_review_prompt(
+            sections_context,
+            documentary=config.image_sourcing.web_photos_only,
+        )
+
+    async def _regenerate(content, feedback):
+        """Re-source only the images the reviewer rejected.
+
+        Without this the gate had nothing to retry with, so one bad photo in a
+        ten-image run failed the whole pipeline after a single look. The
+        reviewer already reports which slot failed and often suggests a better
+        query, so the miss is actionable -- re-source those slots and let the
+        gate look again.
+        """
+        nonlocal image_paths, sections_context
+        rejected = _rejected_slot_keys(feedback)
+        if not rejected:
+            # Rejected overall but with no per-image detail: nothing targeted
+            # to redo, so re-review as-is rather than re-sourcing blindly.
+            logger.warning(
+                "[image_review] rejected without per-image results; "
+                "cannot target a re-source"
+            )
+            return content
+
+        rejected_files = _rejected_filenames(rejected, sections_context)
+
+        targets = [
+            d for d in descriptors
+            if d.get("img_path") and Path(d["img_path"]).name in rejected_files
+        ]
+        logger.info(
+            f"[image_review] re-sourcing {len(targets)} of "
+            f"{len(rejected)} rejected image(s): "
+            f"{', '.join(sorted(rejected_files)) or '(none matched)'}"
+        )
+
+        for desc in targets:
+            # Blacklist the rejected file so the retry cannot re-pick it, and
+            # take the reviewer's suggested query when it gave one.
+            path = desc.get("img_path")
+            if path and Path(path).exists():
+                try:
+                    # Same content hash the download path records, so the
+                    # rejected file is now a known duplicate and gets skipped.
+                    seen_hashes.add(
+                        hashlib.md5(Path(path).read_bytes()).hexdigest()
+                    )
+                except OSError:
+                    pass
+            suggestion = _query_from_suggestion(
+                rejected_files.get(Path(desc["img_path"]).name, "")
+            )
+            if suggestion:
+                desc["review_suggestion"] = suggestion
+            desc["sourced"] = False
+
+        if targets:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(60, connect=10),
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                follow_redirects=True,
+            ) as client:
+                await _retry_missed_slots(
+                    descriptors=targets,
+                    script=script,
+                    config=config,
+                    client=client,
+                    seen_hashes=seen_hashes,
+                    sourcing_log=sourcing_log,
+                    raw_dir=raw_dir,
+                )
+
+        # The set of files on disk may have changed, so rebuild what the next
+        # review pass looks at.
+        refreshed = sorted(raw_dir.glob("section_*_*.jpg")) or sorted(
+            raw_dir.glob("section_*_*.png")
+        )
+        image_paths[:] = refreshed
+        sections_context = _build_sections_context(script, raw_dir, videos_dir)
+        return content
 
     try:
         result = await review_gate(
             content=None,
             review_prompt_fn=_review_prompt,
             system_instruction=prompts.image_review_system(),
-            max_attempts=1,
+            regenerate_fn=_regenerate,
+            max_attempts=config.review_thresholds.image_review_max_attempts,
             gate_name="image_review",
             image_paths=image_paths,
         )
         result["sourcing_log"] = sourcing_log
+        result["asset_provenance"] = list(_ASSET_PROVENANCE.values())
         return result
     finally:
+        # Written in `finally` so a run that fails review still leaves an
+        # auditable record of what was downloaded and from where.
+        try:
+            save_asset_provenance(workspace)
+        except Exception as exc:
+            logger.warning(f"could not write asset provenance: {exc}")
         if script_mutated:
             save_script(workspace, script)
+
+
+def _rejected_slot_keys(feedback) -> dict[tuple[int, int], str]:
+    """Map (section_id, sub_image_index) -> suggested query for rejected images.
+
+    The reviewer returns `image_results` entries carrying `approved` and often
+    a `suggestion`. Warnings (watermark, soft focus) are approved and are left
+    alone -- only hard rejections are worth spending another search on.
+    """
+    if not isinstance(feedback, dict):
+        return {}
+
+    rejected: dict[tuple[int, int], str] = {}
+    for item in feedback.get("image_results") or []:
+        if not isinstance(item, dict) or item.get("approved", True):
+            continue
+        try:
+            key = (int(item["section_id"]), int(item["sub_image_index"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        rejected[key] = str(item.get("suggestion", "") or "").strip()
+    return rejected
+
+
+# Instruction scaffolding the reviewer wraps its suggested query in. The
+# schema asks for e.g. "Search for 'stadium crowd at Anfield' instead", so the
+# quoted span is the query and the rest is prose.
+_SUGGESTION_PREFIX_RE = re.compile(
+    r"^(?:please\s+)?(?:try\s+|use\s+|search\s+(?:for\s+)?|find\s+|look\s+for\s+|"
+    r"source\s+|replace\s+with\s+|swap\s+(?:in|for)\s+)+",
+    re.IGNORECASE,
+)
+_SUGGESTION_FILLER_RE = re.compile(
+    r"^(?:a|an|the)\s+(?:high[- ]quality\s+|better\s+|clearer\s+|real\s+|actual\s+)*"
+    r"(?:image|photo|photograph|picture|shot)\s+(?:of|showing|with)\s+",
+    re.IGNORECASE,
+)
+
+
+def _query_from_suggestion(suggestion: str) -> str:
+    """Turn the reviewer's prose suggestion into something searchable.
+
+    The suggestion is written for a human ("Search for a high-quality image of
+    a ticking clock face"). Passing that verbatim to image search matches the
+    sentence, not the subject, and returns worse results than the query that
+    already failed. Prefer the quoted span the schema asks for, and otherwise
+    strip the instruction wrapper.
+    """
+    text = (suggestion or "").strip()
+    if not text:
+        return ""
+
+    quoted = re.search(r"['\"‘“]([^'\"’”]{3,})['\"’”]", text)
+    if quoted:
+        return " ".join(quoted.group(1).split())[:120].strip()
+
+    text = _SUGGESTION_PREFIX_RE.sub("", text).strip()
+    text = _SUGGESTION_FILLER_RE.sub("", text).strip()
+    text = text.rstrip(".").strip()
+    # Prose that survived stripping is still a sentence, not a query; a long
+    # one matches nothing, so let the normal tiers handle it instead.
+    if len(text.split()) > 12:
+        return ""
+    return " ".join(text.split())[:120].strip()
+
+
+def _rejected_filenames(
+    rejected: dict[tuple[int, int], str],
+    sections_context: list[dict],
+) -> dict[str, str]:
+    """Resolve reviewer (section_id, sub_image_index) keys to filenames.
+
+    The reviewer numbers images the way `sections_context` lists them, and that
+    listing is built *after* unsourced slots are dropped and the survivors
+    renumbered. So a rejection of "3.3" does not necessarily mean the
+    descriptor whose sub_idx is 2 -- matching on the index silently resolved
+    every rejection to nothing. The filename is the identifier both the
+    reviewer's context and the descriptors agree on.
+    """
+    filename_for_key = {
+        (s.get("section_id"), s.get("sub_image_index", 1)): s.get("image_filename")
+        for s in sections_context
+    }
+    return {
+        filename_for_key[key]: suggestion
+        for key, suggestion in rejected.items()
+        if filename_for_key.get(key)
+    }
+
+
+def _latin_ratio(text: str) -> float:
+    """Fraction of the letters in *text* that are Latin script."""
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return 0.0
+    latin = sum(1 for c in letters if "a" <= c.lower() <= "z")
+    return latin / len(letters)
+
+
+# Below this, a query is mostly non-Latin script and will not match the
+# English-language captions and alt text that photo search indexes.
+_MIN_LATIN_RATIO_FOR_SEARCH = 0.5
+
+
+# Wording that describes a staged scene around a subject rather than the
+# subject itself. Stripping it turns "hands holding stacks of 1971 twenty
+# dollar bills" -- which no archival photograph happens to be -- into "1971
+# twenty dollar bills", which the archive does hold.
+# How the image is framed. This wording can be part of a legitimate archival
+# request ("FBI evidence photograph of the tie"), so it is only stripped when
+# the brief is not asking for an archival artefact.
+_MEDIUM_WRAPPER_RE = re.compile(
+    r"\b("
+    r"close[- ]?up\s+(of|shot\s+of)?|photo(graph)?\s+of|picture\s+of|image\s+of|"
+    r"view\s+of|shot\s+of|scene\s+(of|showing)|depicting|showing"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Someone doing something with the subject, or a count of it. Never part of an
+# archival request -- the archive holds the object, not a person posing with a
+# chosen number of them.
+_ACTION_WRAPPER_RE = re.compile(
+    r"\b("
+    r"hands?\s+(holding|gripping|clutching|examining|opening)|"
+    r"(a\s+)?(man|woman|person|someone|investigator|agent)\s+"
+    r"(holding|examining|inspecting|carrying|reviewing|looking\s+at)|"
+    r"examining|inspecting|digging|"
+    r"stacks?\s+of|piles?\s+of|bundles?\s+of|rows?\s+of|original\s+stacks?|"
+    # Small counts only. A four-digit number is a year, and the era is the one
+    # qualifier worth keeping -- the review gate rejected a 2013-series bill in
+    # a 1971 story, so stripping "1971" would trade one failure for another.
+    r"\d{1,3}\s+(of\s+)?|several\s+|many\s+|multiple\s+|a\s+single\s+|one\s+"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Both together, for the search-query ladder where the whole string is being
+# reduced to its subject.
+_SCENE_WRAPPER_RE = re.compile(
+    f"({_MEDIUM_WRAPPER_RE.pattern}|{_ACTION_WRAPPER_RE.pattern})",
+    re.IGNORECASE,
+)
+
+# Trailing atmosphere that narrows a search without naming anything real.
+_ATMOSPHERE_TAIL_RE = re.compile(
+    r"\b(at\s+(night|dusk|dawn|sunset|sunrise)|in\s+the\s+(rain|fog|dark|snow)|"
+    r"dramatic\s+lighting|moody|ominous|dark\s+and\s+stormy|low\s+angle|"
+    r"aerial\s+view|black\s+and\s+white)\b",
+    re.IGNORECASE,
+)
+
+
+def _documented_subject_queries(keywords: str) -> list[str]:
+    """Progressively reduce a slot query to the real subject inside it.
+
+    A slot can ask for something the archive simply does not contain -- an
+    action performed with an object, a quantity of it, a time of day. The
+    subject itself usually IS documented, so rather than dropping the beat or
+    inventing a picture, the wrapper is stripped and the search is retried for
+    the thing itself.
+
+    Returns simplified variants, longest first, excluding the original.
+    """
+    text = " ".join(str(keywords or "").split())
+    if not text:
+        return []
+
+    variants: list[str] = []
+
+    stripped = " ".join(_SCENE_WRAPPER_RE.sub(" ", text).split())
+    if stripped and stripped.lower() != text.lower():
+        variants.append(stripped)
+
+    base = stripped or text
+    no_atmosphere = " ".join(_ATMOSPHERE_TAIL_RE.sub(" ", base).split())
+    if no_atmosphere and no_atmosphere.lower() not in {
+        text.lower(), *(v.lower() for v in variants)
+    }:
+        variants.append(no_atmosphere)
+
+    # Last resort within this ladder: the trailing noun phrase, which is where
+    # the concrete subject almost always sits ("...1971 twenty dollar bills").
+    words = (no_atmosphere or base).split()
+    if len(words) > 3:
+        tail = " ".join(words[-3:])
+        if tail.lower() not in {text.lower(), *(v.lower() for v in variants)}:
+            variants.append(tail)
+
+    return variants
+
+
+def _relaxed_query_tiers(
+    desc: dict,
+    script: Script,
+    *,
+    web_photos_only: bool = False,
+) -> list[str]:
+    """Progressively broader real-photo queries for a slot that came up empty.
+
+    Every tier still describes the actual topic, so a rescue never degrades
+    into generic stock imagery of the sport in general.
+    """
+    slot = desc["slot"]
+    section = desc["section"]
+    title = script.title.strip()
+
+    tiers = [
+        # When the review gate rejected this slot it usually names a better
+        # query than the one that failed; try that before widening.
+        (desc.get("review_suggestion") or "").strip(),
+        (slot.keywords or "").strip(),
+        (slot.prompt or "").strip(),
+        f"{title} {(slot.keywords or '').strip()}".strip(),
+        title,
+    ]
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for tier in tiers:
+        # Long prose queries match nothing; keep them search-sized.
+        normalized = " ".join(tier.split())[:120].strip()
+        if not normalized or normalized.lower() in seen:
+            continue
+        seen.add(normalized.lower())
+        ordered.append(normalized)
+
+    # On a non-Latin-language channel the script title is narration copy -- an
+    # Arabic headline, often phrased as a question. Feeding that to image
+    # search returns infographics and text cards rather than photographs of the
+    # subject, so those tiers are dropped whenever a Latin-script tier (the
+    # slot's own English keywords) survives to search with.
+    usable = [t for t in ordered if _latin_ratio(t) >= _MIN_LATIN_RATIO_FOR_SEARCH]
+    if usable and len(usable) < len(ordered):
+        demoted = [t for t in ordered if t not in usable]
+        logger.debug(
+            f"Section {section.id} sub-image {desc['sub_idx'] + 1}: demoted "
+            f"{len(demoted)} non-Latin query tier(s) below the Latin ones"
+        )
+        # Demoted, not discarded. English leads because historical material is
+        # indexed under its original names, but Arabic-language sources hold
+        # photographs -- regional press, local place names, cases never written
+        # up in English -- that dropping these tiers made unreachable.
+        ordered = usable + [t for t in demoted if is_single_script(t)]
+
+    # The bare script title describes the story, not this beat, so it can only
+    # ever return a story-level image. A slot needing the recovered ransom
+    # money was widened to the title and came back with an airplane, which the
+    # review gate then correctly called "a complete subject mismatch". Where
+    # every image must be a real photograph OF THE NAMED SUBJECT, a story-level
+    # rescue is worse than no rescue -- the simplification ladder below finds
+    # the real subject instead.
+    if web_photos_only and len(ordered) > 1:
+        title_only = " ".join(title.split()).lower()
+        kept = [q for q in ordered if q.lower() != title_only]
+        if kept:
+            ordered = kept
+
+    if not ordered:
+        logger.warning(
+            f"Section {section.id} sub-image {desc['sub_idx'] + 1}: "
+            f"no usable search text for a retry"
+        )
+    return ordered
+
+
+async def _retry_missed_slots(
+    *,
+    descriptors: list[dict],
+    script: Script,
+    config: ChannelConfig,
+    client: httpx.AsyncClient,
+    seen_hashes: set[str],
+    sourcing_log: list[dict],
+    raw_dir: Path,
+) -> None:
+    """Re-source slots that missed, widening the query on each attempt.
+
+    Runs the same dispatch as the first pass so behaviour (and test seams)
+    stay identical. The final attempt drops the relevance gate: by then every
+    candidate for every query has been rejected, and a top-ranked photo for
+    the slot's own topic beats losing the visual beat altogether.
+    """
+    missed = [d for d in descriptors if not d.get("sourced", True)]
+    if not missed:
+        return
+
+    logger.info(f"Retrying {len(missed)} unsourced image slot(s) with wider queries")
+
+    for desc in missed:
+        section = desc["section"]
+        sub_idx = desc["sub_idx"]
+        slot = desc["slot"]
+        img_path = desc.get("img_path") or (
+            raw_dir / f"section_{section.id:03d}_{sub_idx + 1:02d}.jpg"
+        )
+        desc["img_path"] = img_path
+
+        tiers = _relaxed_query_tiers(
+            desc, script,
+            web_photos_only=config.image_sourcing.web_photos_only,
+        )
+        # (query, require_relevance_review) -- widen the query first.
+        attempts: list[tuple[str, bool]] = [(q, True) for q in tiers[1:]]
+
+        # Then fall back to the real documented subject inside the request. A
+        # slot can ask for something the archive does not hold -- an action
+        # performed with an object, a quantity of it, a time of day -- while the
+        # subject itself is well documented. Strip the staging and search for
+        # the thing. The relevance gate stays ON for every one of these: this
+        # finds a genuine photograph of the subject, it does not lower the bar
+        # for what counts as one.
+        seen_queries = {q for q, _ in attempts}
+        for tier in tiers:
+            for simplified in _documented_subject_queries(tier):
+                if simplified not in seen_queries:
+                    seen_queries.add(simplified)
+                    attempts.append((simplified, True))
+
+        # Then, only where a wrong-but-present image is better than a missing
+        # beat, try again with the relevance gate off.
+        #
+        # It is not better on a web-photo-only channel. Dropping the gate keeps
+        # whatever search ranked first, and search ranks confidently wrong
+        # things: a Horror run was handed Bigfoot for an investigator, toy
+        # soldiers for parachutes and an icon set for a photograph. Those then
+        # reach the image review gate, which correctly rejects them and -- with
+        # only two attempts -- fails the whole run. The slot is left unsourced
+        # instead, and _drop_unsourced_slots removes the beat; the pacing margin
+        # means a section can afford to lose one.
+        if not config.image_sourcing.web_photos_only:
+            attempts += [(q, False) for q in tiers]
+
+        for query, require_review in attempts:
+            try:
+                source_used = await _source_single_image(
+                    keywords=query,
+                    prompt=desc.get("prompt", ""),
+                    image_source=_image_source_for_slot(slot, config),
+                    config=config,
+                    output_path=img_path,
+                    client=client,
+                    seen_hashes=seen_hashes,
+                    lane=desc["lane"],
+                    allow_generation_fallback=False,
+                    fallback_to_illustration=False,
+                    require_relevance_review=require_review,
+                    narration=section.narration,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Section {section.id} sub-image {sub_idx + 1}: "
+                    f"retry {query!r} failed: {e}"
+                )
+                continue
+
+            if not source_used:
+                continue
+
+            if require_review:
+                logger.info(
+                    f"Section {section.id} sub-image {sub_idx + 1}: "
+                    f"recovered with query {query!r}"
+                )
+            else:
+                logger.warning(
+                    f"Section {section.id} sub-image {sub_idx + 1}: relevance "
+                    f"gate rejected every candidate; keeping the top-ranked "
+                    f"result for query {query!r}"
+                )
+            sourcing_log.append({
+                "section_id": section.id,
+                "sub_image_index": sub_idx + 1,
+                "file": img_path.name,
+                "keywords": query,
+                "source": f"{source_used}_retry" if require_review
+                          else f"{source_used}_top_ranked",
+            })
+            desc["sourced"] = True
+            break
+
+        # Slots whose policy demands a literal photograph of a specific real
+        # person or event are never generated: an invented image of a real
+        # transfer, match or player IS a fabricated news photograph. Those
+        # slots are dropped instead, and the section renders without them.
+        literal_photo_policy = (slot.visual_policy or "") in {
+            "literal_google_photo",
+            "google_photo_exact_action",
+            "photo_backed_info_slide",
+        }
+
+        # A web-photo-only channel means exactly that: no generated stand-in,
+        # ever. This became reachable once unsourceable slots stopped being
+        # filled with a rejected candidate -- they fell through to here instead
+        # and were quietly illustrated, which is how a Horror run ended up with
+        # three 1344x768 generated images in a run that was supposed to contain
+        # only real photographs. The beat is dropped instead.
+        if config.image_sourcing.web_photos_only:
+            if not desc.get("sourced", True):
+                logger.warning(
+                    f"Section {section.id} sub-image {sub_idx + 1}: no real "
+                    f"photograph found; dropping the beat rather than "
+                    f"generating a stand-in (web_photos_only)"
+                )
+            continue
+
+        if not desc.get("sourced", True) and not literal_photo_policy:
+            # Everything real has been tried. Generate a clearly illustrative
+            # stand-in rather than drop the visual beat entirely.
+            try:
+                source_used = await _source_single_image(
+                    keywords=tiers[0] if tiers else slot.keywords,
+                    prompt=desc.get("prompt", "") or slot.prompt,
+                    image_source="ai_gen",
+                    config=config,
+                    output_path=img_path,
+                    client=client,
+                    seen_hashes=seen_hashes,
+                    lane=desc["lane"],
+                    allow_generation_fallback=True,
+                    allow_last_resort_generation=True,
+                    narration=section.narration,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Section {section.id} sub-image {sub_idx + 1}: "
+                    f"last-resort generation failed: {e}"
+                )
+                source_used = None
+            if source_used:
+                sourcing_log.append({
+                    "section_id": section.id,
+                    "sub_image_index": sub_idx + 1,
+                    "file": img_path.name,
+                    "keywords": slot.keywords,
+                    "source": "ai_gen_last_resort",
+                })
+                desc["sourced"] = True
+
+
+def minimum_slots_for_section(section, config: ChannelConfig) -> int:
+    """How many visible beats this section needs to respect the hold cap.
+
+    Uses the measured narration duration when audio has already been made,
+    and the script's estimate before that. The estimate runs about 15% short
+    of real Gemini TTS, so trusting it alone under-counts the beats a section
+    will actually need.
+    """
+    rd = config.rendering_defaults
+    duration = (
+        getattr(section, "actual_duration_seconds", None)
+        or getattr(section, "estimated_duration_seconds", None)
+        or 0.0
+    )
+    if duration <= 0:
+        return 1
+    return minimum_visual_slots_for_duration(
+        duration, rd.max_visual_hold_seconds, rd.intra_slot_crossfade
+    )
+
+
+def underpopulated_sections(
+    script: Script,
+    config: ChannelConfig,
+) -> dict[int, tuple[int, int]]:
+    """Sections with too few slots to fill their runtime inside the cap.
+
+    Returns {section_id: (have, need)}. A section in here cannot be rendered
+    honestly: the renderer's only options are to hold one image past the cap
+    or to cycle the few it has, and cycling is what puts an unrelated image
+    on a sentence it was never chosen for.
+    """
+    short: dict[int, tuple[int, int]] = {}
+    for section in script.sections:
+        have = len(section.slots)
+        need = minimum_slots_for_section(section, config)
+        if have < need:
+            short[section.id] = (have, need)
+    return short
+
+
+def _subject_rescue_queries(script: Script, section, slot) -> list[str]:
+    """Subject-anchored queries for a beat the widening pass could not fill.
+
+    The relaxed tiers broaden a failing query; these narrow it back onto the
+    named subject instead. A slot asking for 'ornate old wooden door locked
+    dark hallway' fails because it describes a staged scene, while the story's
+    actual subject -- the house, the town, the case -- is documented.
+
+    Queries are built per script and never mixed. The first version of this
+    used the video's Arabic title against an archive catalogued entirely in
+    English ('الرحلة 19 archival photograph' for Flight 19), which is the
+    wrong key and a mixed-script query on top of it.
+    """
+    return build_bilingual_queries(
+        keywords=slot.keywords or "",
+        title=script.title or "",
+        narration=getattr(section, "narration", "") or "",
+        entities=[
+            e for e in (getattr(script, "tags", None) or [])
+            if isinstance(e, str) and e.strip()
+        ][:5],
+    )
+
+
+def _broll_allowed(config: ChannelConfig, used: int, total_slots: int) -> bool:
+    """Whether one more slot may be sourced as a video clip.
+
+    Two gates. The channel must have opted in, and the video must not become
+    mostly motion footage: stock clips are atmosphere between photographs, and
+    a story told mainly in stock footage stops looking like the story it is
+    telling.
+    """
+    sourcing = config.image_sourcing
+    if not getattr(sourcing, "allow_video_broll", False):
+        return False
+    ratio = float(getattr(sourcing, "max_broll_ratio", 0.34))
+    if total_slots <= 0:
+        return False
+    # At least one clip is allowed whenever the channel opted in, so a short
+    # video is not rounded down to none.
+    cap = max(1, int(total_slots * ratio))
+    return used < cap
+
+
+async def _generate_missing_visuals(
+    *,
+    descriptors: list[dict],
+    config: ChannelConfig,
+    sourcing_log: list[dict],
+) -> generated_visuals.FallbackBudget | None:
+    """Generate atmospheric frames for beats nothing could be found for.
+
+    Runs only after web search and subject rescue have both failed, which is
+    why it does not weaken `web_photos_only`: every photo-lane slot was still
+    searched for on the web first, and a real photograph still wins every time.
+    What changes is the outcome when there is no photograph -- previously the
+    whole run was abandoned, now a handful of clearly non-documentary frames
+    can cover the gap.
+
+    Anything that would fabricate evidence, a real person or a named event is
+    refused and the slot stays empty, so those runs still fail exactly as they
+    did before. The generated files are marked `generated: True` in the
+    sourcing log, and they face `image_review` like everything else.
+    """
+    sourcing = config.image_sourcing
+    if not getattr(sourcing, "allow_generated_fallback", False):
+        return None
+
+    unsourced = [d for d in descriptors if not d.get("sourced", True)]
+    if not unsourced:
+        return None
+
+    missing = [
+        {
+            "section_id": d["section"].id,
+            # These two keys are what the descriptors actually carry. Reading
+            # "sub_index" and "path" instead silently disabled the whole
+            # fallback: output_path came back None for every slot, the
+            # generation loop skipped each one on `if not target`, and nothing
+            # was logged because nothing was attempted.
+            "sub_image_index": d.get("sub_idx", 0) + 1,
+            "output_path": d.get("img_path"),
+            "brief": d.get("prompt", "") or d.get("keywords", ""),
+            "subject": d.get("subject", ""),
+        }
+        for d in unsourced
+    ]
+
+    planned, budget = generated_visuals.plan_fallback(
+        missing,
+        limit=int(getattr(sourcing, "max_generated_fallback_images", 5)),
+        style_suffix=sourcing.style_prompt_suffix,
+    )
+    if not planned:
+        if budget.refused:
+            logger.info(
+                f"generated fallback produced nothing: {budget.refused[0]}"
+            )
+        return budget
+
+    model = getattr(
+        sourcing, "generated_fallback_model", "gemini-3.1-flash-lite-image"
+    )
+    for item in planned:
+        target = item.get("output_path")
+        if not target:
+            continue
+        try:
+            await clients.generate_image_gemini(
+                item["prompt"],
+                Path(target),
+                model=model,
+                operation_label="generated_fallback",
+            )
+        except Exception as exc:
+            logger.warning(
+                f"fallback generation failed for section {item['section_id']}: {exc}"
+            )
+            continue
+
+        visual = generated_visuals.record_generated(
+            budget,
+            section_id=item["section_id"],
+            sub_image_index=item["sub_image_index"],
+            path=target,
+            prompt=item["prompt"],
+            model=model,
+        )
+        sourcing_log.append(visual.to_provenance())
+
+        for descriptor in unsourced:
+            if (
+                descriptor["section"].id == item["section_id"]
+                and descriptor.get("sub_index", 0) + 1 == item["sub_image_index"]
+            ):
+                descriptor["sourced"] = True
+                # Read downstream so a generated frame is never treated as a
+                # sourced photograph.
+                descriptor["generated"] = True
+                break
+
+    if budget.used:
+        summary = budget.summary()
+        logger.info(
+            f"generated {summary['generated_images']} fallback visual(s) "
+            f"(limit {summary['limit']}, refused {summary['refused']}, "
+            f"cost ${summary['total_cost_usd']:.4f})"
+        )
+    return budget
+
+
+async def _rescue_underpopulated_sections(
+    *,
+    descriptors: list[dict],
+    script: Script,
+    config: ChannelConfig,
+    client: httpx.AsyncClient,
+    seen_hashes: set[str],
+    sourcing_log: list[dict],
+    raw_dir: Path,
+) -> None:
+    """Third pass, for beats whose loss would leave a section too thin.
+
+    The widening pass gives up on a slot in isolation. This one asks a
+    different question -- would losing this beat break the section's pacing
+    contract? -- and if so tries again with subject-anchored queries.
+
+    The relevance gate stays ON throughout and web_photos_only is untouched,
+    so this can only find a genuine photograph of the subject; it never lowers
+    the bar for what counts as one, and it never generates an image.
+    """
+    short = underpopulated_sections(script, config)
+    if not short:
+        return
+
+    at_risk = [
+        d for d in descriptors
+        if not d.get("sourced", True) and d["section"].id in short
+    ]
+    if not at_risk:
+        return
+
+    logger.warning(
+        f"{len(short)} section(s) would fall below their visual minimum: "
+        + "; ".join(
+            f"section {sid} has {have} of {need}" for sid, (have, need) in short.items()
+        )
+    )
+    logger.info(
+        f"Re-sourcing {len(at_risk)} dropped beat(s) with subject-anchored queries"
+    )
+
+    for desc in at_risk:
+        section, slot = desc["section"], desc["slot"]
+        sub_idx = desc["sub_idx"]
+        img_path = desc.get("img_path") or (
+            raw_dir / f"section_{section.id:03d}_{sub_idx + 1:02d}.jpg"
+        )
+        desc["img_path"] = img_path
+        # Resolved outside the try: this is configuration, not a search, and
+        # a failure here is a bug rather than a query that found nothing. Left
+        # inside, the broad except below would have reported it as "query
+        # failed" and silently skipped every rescue attempt.
+        image_source = _image_source_for_slot(slot, config)
+
+        for query in _subject_rescue_queries(script, section, slot):
+            try:
+                source_used = await _source_single_image(
+                    keywords=query,
+                    prompt=desc.get("prompt", ""),
+                    image_source=image_source,
+                    config=config,
+                    output_path=img_path,
+                    client=client,
+                    seen_hashes=seen_hashes,
+                    lane=desc["lane"],
+                    narration=section.narration,
+                    # Never relaxed. A repeated image is bad; a confidently
+                    # wrong one presented as documentary evidence is worse.
+                    require_relevance_review=True,
+                    # A missing historical photograph is never answered by
+                    # generating one, on any channel.
+                    allow_generation_fallback=False,
+                    allow_last_resort_generation=False,
+                )
+            except Exception as exc:
+                logger.debug(f"subject rescue query {query!r} failed: {exc}")
+                continue
+            if source_used:
+                desc["sourced"] = True
+                sourcing_log.append({
+                    "section_id": section.id,
+                    "sub_image_index": sub_idx + 1,
+                    "file": img_path.name,
+                    "keywords": query,
+                    "source": f"{source_used} (subject rescue)",
+                })
+                logger.info(
+                    f"Section {section.id} sub-image {sub_idx + 1}: recovered "
+                    f"with {query!r}"
+                )
+                break
+
+
+def enforce_minimum_slots(
+    script: Script,
+    config: ChannelConfig,
+    *,
+    only_sections: set[int] | None = None,
+) -> None:
+    """Fail the run when a section cannot be rendered without cycling images.
+
+    Scoped to `only_sections` -- the sections that actually lost beats to
+    failed sourcing. The contract this restores is the one the script
+    validator already enforced and that dropping slots silently broke; it is
+    not a new, stricter rule applied to scripts that never lost anything.
+
+    Deliberately loud. The alternative is what shipped before: a section with
+    two photographs stretched over six beats, each reappearing three times in
+    twenty-five seconds, with images landing on sentences they were never
+    chosen for. A clear failure is recoverable; a quietly repetitive video is
+    published.
+    """
+    short = underpopulated_sections(script, config)
+    if only_sections is not None:
+        short = {sid: v for sid, v in short.items() if sid in only_sections}
+    if not short:
+        return
+    detail = "; ".join(
+        f"section {sid} has {have} real photograph(s) but needs {need} to keep "
+        f"every beat under {config.rendering_defaults.max_visual_hold_seconds:.0f}s"
+        for sid, (have, need) in sorted(short.items())
+    )
+    raise RuntimeError(
+        f"Not enough real photographs to render this video without repeating "
+        f"images: {detail}. The run is stopped rather than cycling the same "
+        f"few images across unrelated beats."
+    )
+
+
+def _drop_unsourced_slots(
+    descriptors: list[dict],
+    script: Script,
+) -> dict[int, list[int]]:
+    """Remove slots that could not be sourced so the run can still finish.
+
+    Returns {section_id: [original slot index of each survivor]} for the
+    sections that changed, which `_renumber_section_media` needs to re-index
+    the media files. A section always keeps at least one slot; if every slot
+    in a section failed there is nothing to render and the stage fails loudly.
+    """
+    doomed_by_section: dict[int, set[int]] = {}
+    for desc in descriptors:
+        if not desc.get("sourced", True):
+            doomed_by_section.setdefault(desc["section"].id, set()).add(id(desc["slot"]))
+
+    if not doomed_by_section:
+        return {}
+
+    survivor_map: dict[int, list[int]] = {}
+    for section in script.sections:
+        doomed = doomed_by_section.get(section.id)
+        if not doomed:
+            continue
+
+        survivors: list[VisualSlot] = []
+        survivor_indices: list[int] = []
+        for old_idx, slot in enumerate(section.slots):
+            if id(slot) in doomed:
+                logger.warning(
+                    f"Section {section.id} sub-image {old_idx + 1}: dropping "
+                    f"unsourced {slot.visual} slot"
+                )
+                continue
+            survivors.append(slot)
+            survivor_indices.append(old_idx)
+
+        if not survivors:
+            raise RuntimeError(
+                f"Section {section.id}: source failed for every visual slot "
+                f"({len(section.slots)}); nothing left to render for this section"
+            )
+
+        logger.warning(
+            f"Section {section.id} will render with its "
+            f"{len(survivors)} remaining slot(s)"
+        )
+        section.slots = survivors
+        survivor_map[section.id] = survivor_indices
+
+    return survivor_map
+
+
+def _renumber_section_media(
+    survivor_map: dict[int, list[int]],
+    raw_dir: Path,
+    videos_dir: Path,
+) -> None:
+    """Re-index media files after slots were dropped.
+
+    Slot media is addressed by position (section_XXX_NN), so removing a slot
+    would otherwise leave later files pointing at the wrong slot.
+    """
+    for section_id, old_indices in survivor_map.items():
+        for new_idx, old_idx in enumerate(old_indices):
+            if new_idx == old_idx:
+                continue
+            old_stem = f"section_{section_id:03d}_{old_idx + 1:02d}"
+            new_stem = f"section_{section_id:03d}_{new_idx + 1:02d}"
+            for directory, suffixes in (
+                (raw_dir, (".jpg", ".jpeg", ".png", ".webp")),
+                (videos_dir, (".mp4",)),
+            ):
+                for suffix in suffixes:
+                    source = directory / f"{old_stem}{suffix}"
+                    if not source.exists():
+                        continue
+                    target = directory / f"{new_stem}{suffix}"
+                    target.unlink(missing_ok=True)
+                    source.rename(target)
+                    logger.info(f"Re-indexed {source.name} -> {target.name}")
 
 
 async def _source_single_image(
@@ -719,6 +1890,9 @@ async def _source_single_image(
     lane: GenerationLane,
     allow_generation_fallback: bool = True,
     fallback_to_illustration: bool = False,
+    require_relevance_review: bool = True,
+    narration: str = "",
+    allow_last_resort_generation: bool = False,
 ) -> str | None:
     """Use the script-specified source, falling back to generation when allowed.
 
@@ -736,6 +1910,8 @@ async def _source_single_image(
                     client,
                     seen_hashes,
                     tuple(config.video.resolution),
+                    require_relevance_review=require_relevance_review,
+                    narration=narration,
                 )
             elif image_source == "pexels":
                 success = await _search_pexels(
@@ -745,6 +1921,7 @@ async def _source_single_image(
                     client,
                     seen_hashes,
                     tuple(config.video.resolution),
+                    narration=narration,
                 )
             elif image_source == "ai_gen":
                 success = False  # handled below
@@ -764,13 +1941,35 @@ async def _source_single_image(
     if config.test.preview_ai_image_prompts:
         return None
 
+    # News channels source real photographs. Generation is only reachable here
+    # after every web-search tier has already missed, and only when the caller
+    # explicitly opts in via allow_last_resort_generation -- so a descriptor
+    # that forgets to pass allow_generation_fallback still cannot quietly
+    # substitute AI art for a photo.
+    if config.image_sourcing.web_photos_only and not allow_last_resort_generation:
+        logger.info(
+            f"{output_path.name}: no usable web photo yet; deferring to the "
+            f"retry tiers rather than generating one"
+        )
+        return None
+
     # Generate with AI generation. Use illustration style when flagged.
     try:
         effective_lane: GenerationLane = (
             "illustration"
-            if lane == "illustration" or fallback_to_illustration
+            if lane == "illustration"
+            or fallback_to_illustration
+            # A generated stand-in on a news channel must look like an
+            # illustration. Rendering a photoreal image of a real player or a
+            # real match would be fabricating a news photograph.
+            or (allow_last_resort_generation and config.image_sourcing.web_photos_only)
             else "photo"
         )
+        if allow_last_resort_generation and config.image_sourcing.web_photos_only:
+            logger.warning(
+                f"{output_path.name}: no real photograph found after every "
+                f"search tier; falling back to a clearly illustrative image"
+            )
         request = _generation_request_preview(
             keywords=keywords,
             prompt=prompt,
@@ -805,8 +2004,15 @@ async def _search_serper(
     client: httpx.AsyncClient,
     seen_hashes: set[str],
     target_size: tuple[int, int],
+    *,
+    require_relevance_review: bool = True,
+    narration: str = "",
 ) -> bool:
-    """Search for images using Serper.dev (Google Image Search wrapper)."""
+    """Search for images using Serper.dev (Google Image Search wrapper).
+
+    With require_relevance_review=False the vision gate is skipped and the
+    top-ranked search result is kept. Only the last-resort retry does this.
+    """
     with tempfile.TemporaryDirectory(prefix="vf_serper_candidates_") as tmp_dir:
         candidate_records = await _collect_serper_candidates(
             keywords=keywords,
@@ -821,12 +2027,17 @@ async def _search_serper(
         if not candidate_paths:
             return False
 
-        winner = await _select_photo_candidate(
-            source_name="Serper",
-            keywords=keywords,
-            prompt=prompt,
-            candidate_paths=candidate_paths,
-            operation_label="serper_candidate_selection",
+        winner = (
+            await _select_photo_candidate(
+                source_name="Serper",
+                keywords=keywords,
+                prompt=prompt,
+                candidate_paths=candidate_paths,
+                operation_label="serper_candidate_selection",
+                narration=narration,
+            )
+            if require_relevance_review
+            else candidate_paths[0]
         )
         if winner is None:
             logger.info(f"No acceptable Serper candidate for {output_path.name}")
@@ -848,6 +2059,7 @@ async def _search_pexels(
     client: httpx.AsyncClient,
     seen_hashes: set[str],
     target_size: tuple[int, int],
+    narration: str = "",
 ) -> bool:
     """Search Pexels API and select the best image candidate."""
     with tempfile.TemporaryDirectory(prefix="vf_pexels_candidates_") as tmp_dir:
@@ -870,6 +2082,7 @@ async def _search_pexels(
             prompt=prompt,
             candidate_paths=candidate_paths,
             operation_label="pexels_candidate_selection",
+            narration=narration,
         )
         if winner is None:
             logger.info(f"No acceptable Pexels candidate for {output_path.name}")
@@ -893,6 +2106,11 @@ def _finalize_selected_photo_candidate(
     selected_bytes = winner.read_bytes()
     seen_hashes.add(hashlib.md5(selected_bytes).hexdigest())
     output_path.write_bytes(selected_bytes)
+    # Carry the candidate's provenance onto the file that actually ships, so a
+    # finished video can be traced back to where each asset came from.
+    record = _CANDIDATE_PROVENANCE.get(str(winner))
+    if record:
+        _ASSET_PROVENANCE[output_path.name] = {**record, "file": output_path.name}
     logger.info(
         f"Selected {source_name} candidate {winner.name} for {output_path.name}"
     )
@@ -906,16 +2124,28 @@ async def _select_photo_candidate(
     prompt: str,
     candidate_paths: list[Path],
     operation_label: str,
+    narration: str = "",
 ) -> Path | None:
-    review = await clients.review_with_vision(
-        prompt=prompts.pexels_candidate_selection_prompt(
-            keywords=keywords,
-            prompt=prompt,
-            num_images=len(candidate_paths),
-        ),
-        image_paths=candidate_paths,
-        operation_label=operation_label,
-    )
+    try:
+        review = await clients.review_with_vision(
+            prompt=prompts.pexels_candidate_selection_prompt(
+                keywords=keywords,
+                prompt=prompt,
+                num_images=len(candidate_paths),
+                narration=narration,
+            ),
+            image_paths=candidate_paths,
+            operation_label=operation_label,
+        )
+    except Exception as e:
+        # The vision selector is a relevance *refinement* over results that
+        # are already ranked by the search engine. If it is unavailable, keep
+        # the top-ranked real photo rather than dropping the slot.
+        logger.warning(
+            f"{source_name} candidate review unavailable ({e}); "
+            f"keeping the top-ranked search result"
+        )
+        return candidate_paths[0]
     if not review.get("approved", False):
         logger.info(
             f"{source_name} candidates rejected "
@@ -924,16 +2154,79 @@ async def _select_photo_candidate(
         return None
 
     winner_index = review.get("winner_index")
-    if type(winner_index) is not int:
-        raise ValueError(f"{source_name} candidate review missing winner_index: {review}")
-    if winner_index < 1 or winner_index > len(candidate_paths):
-        raise ValueError(f"{source_name} candidate winner_index out of range: {review}")
+    if type(winner_index) is not int or not (1 <= winner_index <= len(candidate_paths)):
+        logger.warning(
+            f"{source_name} candidate review returned an unusable winner_index "
+            f"({winner_index!r} of {len(candidate_paths)}); keeping the "
+            f"top-ranked search result"
+        )
+        return candidate_paths[0]
 
     logger.info(
         f"{source_name} candidate {winner_index}/{len(candidate_paths)} selected "
         f"(reason: {review.get('reason', 'n/a')})"
     )
     return candidate_paths[winner_index - 1]
+
+
+async def _serper_images_request(
+    query: str,
+    client: httpx.AsyncClient,
+    output_name: str,
+) -> dict | None:
+    """Call the Serper image endpoint, retrying only transient failures.
+
+    Returns the parsed payload, or None when the search cannot be completed.
+    4xx responses are permanent for this query (bad request, auth, quota
+    exhausted) and are reported without retrying; timeouts, connection errors
+    and 5xx/429 responses are retried with backoff.
+    """
+    payload = {"q": query, "num": 10, "imageType": "photo"}
+    headers = {
+        "X-API-KEY": settings.serper_api_key,
+        "Content-Type": "application/json",
+    }
+
+    for attempt in range(1, _SERPER_MAX_ATTEMPTS + 1):
+        try:
+            resp = await client.post(
+                "https://google.serper.dev/images",
+                headers=headers,
+                json=payload,
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as e:
+            if attempt == _SERPER_MAX_ATTEMPTS:
+                logger.warning(
+                    f"Serper search failed for {output_name} after "
+                    f"{attempt} attempts: {type(e).__name__}: {e}"
+                )
+                return None
+            await asyncio.sleep(_SERPER_RETRY_BACKOFF * attempt)
+            continue
+
+        if resp.status_code == 200:
+            try:
+                return resp.json()
+            except ValueError:
+                logger.warning(f"Serper returned non-JSON for {output_name}")
+                return None
+
+        retryable = resp.status_code == 429 or resp.status_code >= 500
+        if not retryable:
+            logger.warning(
+                f"Serper rejected the search for {output_name} "
+                f"(HTTP {resp.status_code}): {resp.text[:160]}"
+            )
+            return None
+        if attempt == _SERPER_MAX_ATTEMPTS:
+            logger.warning(
+                f"Serper still returning HTTP {resp.status_code} for "
+                f"{output_name} after {attempt} attempts"
+            )
+            return None
+        await asyncio.sleep(_SERPER_RETRY_BACKOFF * attempt)
+
+    return None
 
 
 async def _collect_serper_candidates(
@@ -949,23 +2242,33 @@ async def _collect_serper_candidates(
     if not settings.serper_api_key:
         return []
 
-    resp = await client.post(
-        "https://google.serper.dev/images",
-        headers={
-            "X-API-KEY": settings.serper_api_key,
-            "Content-Type": "application/json",
-        },
-        json={
-            "q": keywords,
-            "num": 10,
-            "imageType": "photo",
-        },
-    )
-    resp.raise_for_status()
-    data = resp.json()
+    query = (keywords or "").strip()
+    if not query:
+        # Serper answers a blank q with HTTP 400 "Missing query parameter".
+        logger.warning(f"Serper search skipped for {output_name}: empty keywords")
+        return []
+
+    data = await _serper_images_request(query, client, output_name)
+    if data is None:
+        return []
     images = data.get("images", [])
     if not images:
+        logger.info(f"Serper returned no images for {output_name}: {query!r}")
         return []
+
+    # Nudge vertical-friendly results up without overriding Google's relevance
+    # ordering: the bonus is worth at most ~3 positions, so a portrait photo
+    # outranks a 16:9 one of similar relevance but never a clearly better
+    # match. Relevance still decides; shape breaks ties.
+    images = sorted(
+        enumerate(images),
+        key=lambda pair: pair[0] - 3.0 * verticality_score(
+            int(pair[1].get("imageWidth") or 0),
+            int(pair[1].get("imageHeight") or 0),
+            target_size,
+        ),
+    )
+    images = [img for _, img in images]
 
     candidate_hashes: set[str] = set()
     candidates: list[dict[str, str | Path]] = []
@@ -1001,6 +2304,17 @@ async def _collect_serper_candidates(
 
         candidate_path = tmp_dir / f"serper_{idx:02d}.jpg"
         candidate_path.write_bytes(image_bytes)
+        _record_candidate_provenance(
+            candidate_path,
+            platform="google_images_via_serper",
+            url=img_url,
+            source_page=source_url,
+            # Serper returns search results, not licences. Recorded as unknown
+            # rather than guessed, so a reviewer can see what needs checking.
+            licence="unknown (web search result)",
+            width=int(img_result.get("imageWidth") or 0),
+            height=int(img_result.get("imageHeight") or 0),
+        )
         candidates.append({"path": candidate_path, "source": "serper"})
 
     return candidates
@@ -1016,23 +2330,41 @@ async def _collect_pexels_candidates(
     tmp_dir: Path,
     limit: int = _PEXELS_CANDIDATE_COUNT,
 ) -> list[dict[str, str | Path]]:
-    if not settings.pexels_api_key:
+    pexels_key = _usable_pexels_key()
+    if not pexels_key:
         return []
 
-    resp = await client.get(
-        "https://api.pexels.com/v1/search",
-        params={
-            "query": keywords,
-            "per_page": limit,
-            "orientation": "landscape",
-        },
-        headers={"Authorization": settings.pexels_api_key},
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    photos = data.get("photos", [])
+    # Portrait first. The output is 1080x1920, and a landscape source loses
+    # ~68% of its width to the crop -- asking Pexels for landscape was
+    # discarding the vertical photos that survive reframing intact. Landscape
+    # is still queried as a fallback so a thin portrait catalogue for a query
+    # cannot leave the slot unsourced.
+    photos: list[dict] = []
+    for orientation in ("portrait", "landscape"):
+        resp = await client.get(
+            "https://api.pexels.com/v1/search",
+            params={
+                "query": keywords,
+                "per_page": limit,
+                "orientation": orientation,
+            },
+            headers={"Authorization": pexels_key},
+        )
+        resp.raise_for_status()
+        photos.extend(resp.json().get("photos", []))
+        if len(photos) >= limit:
+            break
     if not photos:
         return []
+
+    # Best-surviving crop first, so the reframer gets the most usable source.
+    photos.sort(
+        key=lambda p: verticality_score(
+            int(p.get("width") or 0), int(p.get("height") or 0), target_size
+        ),
+        reverse=True,
+    )
+    photos = photos[:limit]
 
     candidate_hashes: set[str] = set()
     candidates: list[dict[str, str | Path]] = []
@@ -1061,6 +2393,16 @@ async def _collect_pexels_candidates(
 
         candidate_path = tmp_dir / f"pexels_{idx:02d}.jpg"
         candidate_path.write_bytes(image_bytes)
+        _record_candidate_provenance(
+            candidate_path,
+            platform="pexels",
+            url=img_url,
+            source_page=str(photo.get("url") or ""),
+            licence="Pexels License (free to use, no attribution required)",
+            attribution=str(photo.get("photographer") or ""),
+            width=int(photo.get("width") or 0),
+            height=int(photo.get("height") or 0),
+        )
         candidates.append({"path": candidate_path, "source": "pexels"})
 
     return candidates
@@ -1092,7 +2434,7 @@ def _extract_video_frame(video_path: Path, frame_path: Path) -> bool:
         "-q:v", "2",
         str(frame_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         logger.warning(f"Frame extraction failed for {video_path.name}")
         return False
@@ -1109,14 +2451,17 @@ async def _search_pexels_video(
     fps: int,
 ) -> bool:
     """Search Pexels Video API and download+prepare a B-roll clip."""
-    if not settings.pexels_api_key:
+    pexels_key = _usable_pexels_key()
+    if not pexels_key:
         return False
 
     try:
         resp = await client.get(
             "https://api.pexels.com/v1/videos/search",
-            params={"query": keywords, "per_page": 5, "orientation": "landscape"},
-            headers={"Authorization": settings.pexels_api_key},
+            # Vertical B-roll fills the 9:16 frame without a crop; see the
+            # note in _collect_pexels_candidates.
+            params={"query": keywords, "per_page": 5, "orientation": "portrait"},
+            headers={"Authorization": pexels_key},
         )
         resp.raise_for_status()
     except httpx.HTTPStatusError as e:
@@ -1132,9 +2477,21 @@ async def _search_pexels_video(
             "falling back to still image sourcing"
         )
         return False
-    data = resp.json()
-
-    videos = data.get("videos", [])
+    videos = resp.json().get("videos", [])
+    if not videos:
+        # Portrait stock footage is much scarcer than portrait stills, so a
+        # miss here should widen the search rather than drop straight to a
+        # still image.
+        try:
+            resp = await client.get(
+                "https://api.pexels.com/v1/videos/search",
+                params={"query": keywords, "per_page": 5, "orientation": "landscape"},
+                headers={"Authorization": pexels_key},
+            )
+            resp.raise_for_status()
+            videos = resp.json().get("videos", [])
+        except httpx.HTTPError:
+            return False
     if not videos:
         return False
 
@@ -1208,7 +2565,7 @@ async def _download_and_prepare_video(
             target_size=target_size,
             fps=fps,
         )
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if result.returncode != 0:
             logger.warning(f"B-roll encode failed: {result.stderr[-300:]}")
             return False
@@ -1309,20 +2666,21 @@ async def _download_valid_image_bytes(
         return img_resp.content
 
     if not meets_minimum_source_size(width, height, target_size):
-        reframe_min_w, reframe_min_h = _minimum_reframe_source_size(target_size)
-        if width >= reframe_min_w and height >= reframe_min_h:
+        upscale = _reframe_upscale_factor(width, height, target_size)
+        if upscale <= _MAX_REFRAME_UPSCALE:
             logger.info(
                 f"Reframing lower-resolution image for {output_name}: "
-                f"{width}x{height} into {target_size[0]}x{target_size[1]}"
+                f"{width}x{height} into {target_size[0]}x{target_size[1]} "
+                f"({upscale:.2f}x)"
             )
             return _normalize_photo_bytes_for_target(
                 img_resp.content,
                 target_size=target_size,
             )
-        min_w, min_h = minimum_source_size(target_size)
         logger.info(
-            f"Skipping low-resolution image for {output_name}: "
-            f"{width}x{height} below {min_w}x{min_h}"
+            f"Skipping low-resolution image for {output_name}: {width}x{height} "
+            f"would need {upscale:.2f}x enlargement "
+            f"(max {_MAX_REFRAME_UPSCALE:.1f}x)"
         )
         return None
 

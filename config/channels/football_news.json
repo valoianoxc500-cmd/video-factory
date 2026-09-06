@@ -1,0 +1,266 @@
+{
+  "channel_name": "Football News",
+  "channel_id": "football_news",
+  "language": "ar",
+  "content_mode": "visual",
+  "style": {
+    "name": "Clean Editorial Demo",
+    "effects": {},
+    "text": {
+      "title_color": "#FFFFFF",
+      "title_position": "bottom_center",
+      "title_size_ratio": 0.06,
+      "title_accent_color": "#2E86DE",
+      "section_color_palette": [
+        "#2E86DE",
+        "#00A676",
+        "#F5A623",
+        "#D64550"
+      ]
+    },
+    "subtitle_highlight": {
+      "enabled": true,
+      "color": "#FFD23F",
+      "keywords_per_phrase": 2
+    },
+    "video": {
+      "background_color": [
+        12,
+        16,
+        24
+      ],
+      "transition_pool": [
+        "fade",
+        "dissolve"
+      ]
+    },
+    "watermark": {
+      "enabled": false
+    }
+  },
+  "niche": {
+    "category": "Football News",
+    "focus": "Breaking football news, transfers, major matches, player updates, and important football stories.",
+    "audience": "Football fans who want fast, accurate, engaging news in Arabic.",
+    "content_style": "Fast-paced Arabic football news with real photos of players, clubs, matches, and events.",
+    "example_topics": [
+      "The latest twist in a major transfer saga",
+      "What actually decided last night's Champions League tie",
+      "Why this signing changes the title race"
+    ],
+    "avoid_topics": [
+      "medical advice",
+      "financial advice",
+      "legal advice",
+      "political persuasion"
+    ]
+  },
+  "video": {
+    "target_duration_minutes": 1,
+    "resolution": [
+      1080,
+      1920
+    ],
+    "fps": 30,
+    "transition_duration_seconds": 0.8,
+    "background_music_volume": 0.12,
+    "music_pool": [
+      "news_bed_calm",
+      "news_bed_drive"
+    ],
+    "visual_guidance": {
+      "google_photo": "Default for this channel. Every slot must name a real, photographable football subject: a named player, manager, club crest, stadium, trophy, or an actual moment from the match or event being narrated.",
+      "stock_photo": "Only for unnamed generic football context (a crowd, a pitch, a ball) when no specific subject is being discussed. Never for a slot whose narration names a person, club, or match.",
+      "b_roll": "Short motion of real football action or stadium atmosphere.",
+      "ai_photo": "Avoid on this channel. A generated photo of a real player, transfer, or match is a fabricated news photograph.",
+      "ai_illustration": "Last resort only, and only for a concept with no real subject to photograph. Must read as an illustration, never as a news photo.",
+      "visual_policy": "Set visual_policy explicitly when a slot needs exact sourcing. Use literal_google_photo whenever the narration names a specific person, club, stadium, or match, so the slot can never be satisfied by a generated image. Do not use text_only_slide outside test previews.",
+      "backdrop_keywords": "title_banner, info_slide and fact_highlight keywords are searched against real web images exactly like any other slot, so they must name a concrete photographable football subject -- a named player, manager, crest, stadium or trophy. Never put design, layout or typography words in keywords: no 'gold text', 'icons', 'dramatic', 'majestic', 'cinematic', 'background', 'poster', 'graphic' or colour-and-mood phrasing. Those words match album covers, wallpapers and clip-art instead of football photographs. Write the same keywords you would write for a google_photo of the person or place the section is about.",
+      "forbidden_visuals": "Never request metaphors or symbolic stand-ins: countdown clocks, hourglasses, calendars, generic money imagery, handshake stock photos, arrows, or transfer infographics. Never request tactics whiteboards, formation diagrams, lineup graphics or other drawn illustrations in place of a photograph. Never request fan-made mock-ups of a player in a kit they have not actually worn, or 'unveiling' images of a transfer that has not been officially completed -- these are fabricated depictions of real people. If a moment cannot be shown with a real photograph, narrate it over a real photo of the player or club instead."
+    },
+    "include_intro": false,
+    "include_outro": false,
+    "sfx_pool": [
+      "whoosh_soft",
+      "whoosh_rise"
+    ]
+  },
+  "video_types": {
+    "listicle": {
+      "enabled": true,
+      "section_style": "One concrete football fact, moment, or statistic per section, each tied to a named player, club, or match.",
+      "pacing": "Name the item, show what happened, give the number or detail that proves it, then why it matters.",
+      "example": "5 Numbers That Explain This Transfer Window",
+      "numbering_order": "ascending",
+      "allowed_thumbnail_strategies": [
+        "football_news_thumbnail"
+      ],
+      "narrative_hooks": [
+        "Tease the most surprising item in the opening hook, then deliver the list in order.",
+        "Frame the list as a practical checklist viewers can apply immediately.",
+        "Open with a common mistake, then reveal the better choice section by section."
+      ]
+    },
+    "explainer": {
+      "enabled": true,
+      "section_style": "A single football question broken into cause, evidence, and consequence, using real named examples.",
+      "pacing": "Question -> what the rules or money actually say -> a real case -> what it means for fans.",
+      "example": "Why Financial Fair Play Blocked This Deal",
+      "allowed_thumbnail_strategies": [
+        "football_news_thumbnail"
+      ],
+      "narrative_hooks": [
+        "Start with a familiar problem, then explain the hidden mechanism behind it.",
+        "Open with a simple question and build toward one useful mental model.",
+        "Begin with a counterintuitive claim, then unpack it through concrete examples."
+      ]
+    },
+    "narrative": {
+      "enabled": true,
+      "section_style": "A story about a real player, club, or match with a turning point and an outcome fans remember.",
+      "pacing": "Set the stakes -> the setback -> the turning point -> what it changed.",
+      "example": "The Night This Comeback Rewrote the Tie",
+      "allowed_thumbnail_strategies": [
+        "football_news_thumbnail"
+      ],
+      "narrative_hooks": [
+        "Start with a relatable moment of friction, then follow the fix.",
+        "Tell the story as a before-and-after change in how a task gets done.",
+        "Open with the cost of a messy process, then show the simpler replacement."
+      ]
+    }
+  },
+  "voice": {
+    "provider": "gemini_2.5_tts",
+    "language": "ar-SA",
+    "voice_name": "Charon",
+    "voice_prompt": "مذيع أخبار رياضية بالعربية الفصحى، صوت واضح ودافئ، إيقاع طبيعي وحماس مضبوط.",
+    "voice_prompt_variations": [
+      "مذيع أخبار رياضية بالعربية الفصحى، صوت واضح ودافئ، إيقاع طبيعي وحماس مضبوط.",
+      "راوٍ إخباري بالعربية الفصحى، نبرة متزنة وموجزة، مخارج حروف دقيقة.",
+      "معلق رياضي بالعربية الفصحى، متابعة سلسة وسهلة الفهم، دون مبالغة."
+    ]
+  },
+  "image_sourcing": {
+    "generation_model": "gemini-2.5-flash-image",
+    "web_photos_only": true,
+    "generate_info_slide_illustrations": false,
+    "generate_info_card_illustrations": false,
+    "style_prompt_suffix": "clean editorial photo, natural lighting, uncluttered composition, modern educational media style",
+    "illustration_style_prompt_suffix": "clean educational illustration, simple shapes, warm balanced colors, no text",
+    "allow_video_broll": true,
+    "max_broll_ratio": 0.34
+  },
+  "youtube": {
+    "category_id": "27",
+    "tags": [
+      "football",
+      "soccer",
+      "transfer news",
+      "champions league",
+      "football news",
+      "sports news",
+      "كرة القدم",
+      "أخبار الرياضة"
+    ],
+    "title_formats": [
+      {
+        "name": "question",
+        "instruction": "Title MUST be a clear question."
+      },
+      {
+        "name": "numbered_list",
+        "instruction": "Title MUST start with a number."
+      },
+      {
+        "name": "hook",
+        "instruction": "Title MUST use a practical curiosity hook."
+      }
+    ],
+    "description_styles": [
+      {
+        "name": "short_clear",
+        "instruction": "Write 2-3 concise sentences about what the video covers and end with a simple subscribe CTA."
+      },
+      {
+        "name": "timestamps",
+        "instruction": "Write one short paragraph, then list section timestamps in 00:00 format."
+      }
+    ]
+  },
+  "script_style": {
+    "tone": "Fast, confident Arabic sports-news delivery. Specific and factual, never hyped beyond the evidence.",
+    "instructions": "Write Modern Standard Arabic for a football news audience. Name the exact players, clubs, competitions, scorelines, and dates from the research brief - never speak in generalities. Respect the claim tags in the brief: state COMPLETED and CONFIRMED facts plainly, and attribute REPORTED or RUMORED ones as reports ('بحسب تقارير'). Never present a rumour as settled fact. Every visual slot must name a real, searchable football subject so a photograph of that exact person, club, or moment can be found. Place one short follow CTA after the viewer has received real value."
+  },
+  "business_strategy": {
+    "channel_goal": "Create fast, engaging Arabic football videos based on real football news, transfers, matches, players, clubs, competitions, controversies, and football stories.",
+    "video_jobs": [
+      "Turn real football stories into short, engaging Arabic videos.",
+      "Use current and reliable football information before writing the script.",
+      "Use specific real-world visual searches for every scene.",
+      "Prioritize real photographs of the exact players, clubs, matches, stadiums, transfers, and events being discussed."
+    ],
+    "content_families": [
+      {
+        "name": "breaking_news",
+        "planning_focus": "Recent football news involving a specific player, club, transfer, match, competition, or major football event.",
+        "example_topics": [
+          "The latest update on a major football transfer",
+          "What happened in the latest Champions League match",
+          "Why this football announcement matters"
+        ],
+        "cta_angle": "Invite viewers to follow for more football news."
+      },
+      {
+        "name": "football_explainer",
+        "planning_focus": "Explain a football rule, transfer, tactic, controversy, competition, or important event in simple Arabic.",
+        "example_topics": [
+          "How Financial Fair Play works",
+          "Why this transfer became historic",
+          "How VAR changed football"
+        ],
+        "cta_angle": "Invite viewers to follow for more football explanations."
+      },
+      {
+        "name": "football_story",
+        "planning_focus": "Tell a compelling short story about a player, club, match, transfer, comeback, controversy, or historical football moment.",
+        "example_topics": [
+          "How a young player became a superstar",
+          "The comeback that shocked football",
+          "The transfer that changed a player's career"
+        ],
+        "cta_angle": "Invite viewers to follow for more football stories."
+      }
+    ],
+    "cta_rules": [
+      "Use a short follow or subscribe CTA.",
+      "Do not invent products, offers, downloads, email lists, or private communities.",
+      "Keep the CTA natural and relevant to the video."
+    ],
+    "launch_strategy": "Build the channel around real football news, transfers, matches, players, clubs, competitions, controversies, and compelling football stories."
+  },
+  "rendering_defaults": {
+    "component_min_duration": 5.0,
+    "image_slot_min_duration": 2.5,
+    "max_visual_hold_seconds": 5.0,
+    "intra_slot_crossfade": 0.3,
+    "sfx_volume": 0.15,
+    "sfx_boundary_coverage": 0.7,
+    "render_concurrency": 2,
+    "frame_sequence_image_format": "jpeg",
+    "frame_sequence_jpeg_quality": 80
+  },
+  "review_thresholds": {
+    "script_min_score": 7.0,
+    "script_max_attempts": 3,
+    "image_review_max_attempts": 2,
+    "thumbnail_max_attempts": 2,
+    "final_review_max_attempts": 1
+  },
+  "thumbnail_strategies": [
+    {
+      "name": "football_news_thumbnail",
+      "instruction": "Create a bold sports-news thumbnail: one strong football subject (player, coach, or club crest) on a high-contrast background, in the colours of the clubs involved. Real club crests, kit sponsors, and competition badges that appear naturally on the subject are expected and acceptable. Do NOT add any invented captions, headlines, scorelines, stat overlays, watermarks, or channel branding — the headline is composited separately. Keep the bottom third simple so the headline stays readable. Avoid implying an official club or league affiliation."
+    }
+  ]
+}
