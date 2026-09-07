@@ -8,6 +8,10 @@ __pycache__/
 venv/
 config/youtube_oauth/
 workspace/
+# Same reason as workspace/: a salvaged run is generated output, not source.
+# 28 MB of one got committed under this name because the rule above only
+# covers workspace/, and an ignore rule cannot untrack what is already tracked.
+workspace_recovery/
 logs/
 data/
 data/topic_history.json
