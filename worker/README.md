@@ -70,12 +70,23 @@ Arabic-capable font — plus the variables in `.env.example`.
   restart straight after a stop waits out the few hundred milliseconds Windows
   takes to drop a dead process's locks.
 
-  This replaced a PID file that was read, checked, then written: two workers
-  launched in the same second both saw a file nobody held and both started.
+  This replaced a PID file that was read, checked, then written — two workers
+  launched in the same second would both see a file nobody held and both start.
   Do not reintroduce a PID liveness probe — see `worker/singleton.py`.
 
   The two workers hold *different* locks and are meant to run side by side.
   On Cloud Run use `--concurrency 1 --max-instances 1`.
+
+- **Counting worker processes on Windows.** `.venv\Scripts\python.exe` in this
+  checkout is a redirector: it re-launches the base interpreter and waits. Each
+  worker therefore appears **twice** in the process list — a `.venv` stub and a
+  `Python310` child — and two workers look like four. The child is the one
+  running the code and holding the lock, so `.worker.lock` names the child's
+  pid, not the pid you launched. Count workers by lock, or by `run_worker.py`
+  processes whose executable is under `.venv`, not by raw process count.
+
+  Stop the child (or the whole tree); killing only the `.venv` stub can leave
+  the real interpreter running and still holding the lock.
 - **Disk.** Each run leaves ~200 MB in `workspace/`. The worker prunes to
   `WORKSPACE_RETENTION` before every job and refuses to start below
   `MIN_FREE_DISK_GB`, because a render that hits ENOSPC halfway through wastes
