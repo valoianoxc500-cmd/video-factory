@@ -296,6 +296,25 @@ async def run_pipeline(
     completed = set(checkpoint.stages_completed)
     stage_start_time: dict[str, datetime] = {}
 
+    # A checkpoint written before completion became atomic can claim
+    # image_source is done while a required beat has no file. Resuming such a
+    # run skipped sourcing and failed the same validation every time, with no
+    # way forward short of deleting the workspace. Re-open the stage instead:
+    # it is the only stage that can repair the assets.
+    if "image_source" in completed:
+        try:
+            _validate_raw_images(ws, load_script(ws), config)
+        except FileNotFoundError:
+            pass  # no script on disk yet; nothing to check against
+        except Exception as stale:
+            logger.warning(
+                f"checkpoint claims image_source is complete but its assets are "
+                f"not on disk ({stale}); re-running the stage"
+            )
+            completed.discard("image_source")
+            checkpoint.stages_completed = list(completed)
+            save_checkpoint(ws, checkpoint)
+
     # Build the set of stages within the requested range
     start_idx = STAGES.index(start_from) if start_from else 0
     stop_idx = STAGES.index(stop_after) if stop_after else len(STAGES) - 1
@@ -647,6 +666,41 @@ async def run_pipeline(
         }
         pending = set(task_objects.values())
         failed_stages: list[str] = []
+
+        def _validate_stage_outputs(stage: str) -> None:
+            """Check a sourcing stage's required assets are actually on disk.
+
+            Reads `script` from the enclosing scope on purpose: audio_source
+            returns a rebuilt script, and image_source mutates its own in
+            place, so both validations must see the current one.
+            """
+            if stage == "image_source":
+                _validate_raw_images(ws, script, config)
+            elif stage == "audio_source":
+                _validate_audio_outputs(ws, script)
+
+        def _complete_when_outputs_exist(stage: str) -> bool:
+            """Mark a stage complete only if its outputs survived validation.
+
+            A stage used to be recorded as complete and validated afterwards.
+            When validation then failed, the checkpoint already said the stage
+            was done -- so every resume skipped the work and failed at the same
+            line, with `last_error` cleared by the completion that preceded it.
+            """
+            try:
+                _validate_stage_outputs(stage)
+            except Exception as validation_error:
+                logger.error(
+                    f"{stage} finished with incomplete output: {validation_error}"
+                )
+                checkpoint.last_error = str(validation_error)
+                checkpoint.current_stage = stage
+                save_checkpoint(ws, checkpoint)
+                failed_stages.append(stage)
+                return False
+            complete_stage(stage, ended=stage_end_time.get(stage))
+            return True
+
         while pending:
             done, pending = await asyncio.wait(
                 pending,
@@ -672,7 +726,10 @@ async def run_pipeline(
                         if "image_review" in allowed_review_failures:
                             _log_allowed_review_failure("image_review")
                             checkpoint.last_error = None
-                            complete_stage(stage_name, ended=stage_end_time.get(stage_name))
+                            # Waiving the review does not waive the assets:
+                            # the beats still have to exist.
+                            if not _complete_when_outputs_exist(stage_name):
+                                hard_failure = True
                             continue
                     logger.error(f"{stage_name} failed: {result}")
                     checkpoint.last_error = str(result)
@@ -687,7 +744,8 @@ async def run_pipeline(
                     )
                 elif stage_name == "audio_source" and isinstance(result, Script):
                     script = result
-                complete_stage(stage_name, ended=stage_end_time.get(stage_name))
+                if not _complete_when_outputs_exist(stage_name):
+                    hard_failure = True
 
             if hard_failure and pending:
                 for task in pending:
@@ -698,10 +756,8 @@ async def run_pipeline(
         if failed_stages:
             fail_pipeline("Media sourcing failed for stage(s): " + ", ".join(failed_stages))
 
-        if run_images:
-            _validate_raw_images(ws, script, config)
-        if run_audio:
-            _validate_audio_outputs(ws, script)
+        # Both stages validated their own outputs before being marked
+        # complete, so reaching here means the assets are on disk.
 
         if should_stop("image_source") or should_stop("audio_source"):
             logger.info("Stopped after sourcing")

@@ -31,6 +31,7 @@ from core.utils import (
     Script,
     ChannelConfig,
     VisualSlot,
+    expected_sourced_image_slots,
     minimum_visual_slots_for_duration,
     save_script,
     slot_requires_sourced_still,
@@ -60,6 +61,16 @@ _STOCK_DOMAINS = {
 }
 
 _MAX_CONCURRENT_SOURCES = 6
+
+# How long one slot's recovery ladder may run, and how long the whole retry
+# pass may take. A slot walks several queries and pays for a vision review on
+# each, so without a clock a handful of stubborn beats ran back to back for
+# 15 minutes -- twice, because the review gate runs the pass again for
+# whatever it rejects. Anything still unsourced when the clock runs out falls
+# through to generation, coverage and finally the drop, all of which are fast.
+_SLOT_RETRY_TIMEOUT_SECONDS = 180.0
+_RETRY_PASS_TIMEOUT_SECONDS = 600.0
+
 _PEXELS_CANDIDATE_COUNT = 8
 _SERPER_CANDIDATE_COUNT = 8
 _SERPER_MAX_ATTEMPTS = 3
@@ -92,6 +103,22 @@ _PEXELS_CLAIMED_IDS: set[str] = set()
 def _is_blank_media_prompt(text: str) -> bool:
     normalized = str(text or "").strip().lower()
     return normalized in {"", "empty", "none", "null", "n/a", "placeholder"}
+
+
+def _is_usable_asset(path: Path | None) -> bool:
+    """Whether a path is a real file the renderer could actually show.
+
+    Every "this beat is done" decision is checked against this rather than
+    against whatever the sourcing call returned. A generation that was refused,
+    safety-blocked or rate-limited comes back without raising, and a download
+    can leave a zero-byte file behind; both used to count as a sourced beat.
+    """
+    if not path:
+        return False
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def _generation_style(config: ChannelConfig, is_illustration: bool) -> str:
@@ -1095,6 +1122,26 @@ async def source_images(
             gate_name="image_review",
             image_paths=image_paths,
         )
+        # The stage does not get to report success on its own say-so. Every
+        # "this beat is done" decision above is a belief about a file; this
+        # checks the files. A run shipped `image_source` complete with
+        # section_002_01 never written because a rate-limited generation
+        # returned None instead of raising, and the checkpoint then recorded
+        # the stage as done -- so resuming skipped sourcing and failed
+        # validation forever.
+        repaired = await _reconcile_expected_assets(
+            script=script,
+            config=config,
+            descriptors=descriptors,
+            sourcing_log=sourcing_log,
+            seen_hashes=seen_hashes,
+            raw_dir=raw_dir,
+            videos_dir=videos_dir,
+            target_size=target_size,
+            fps=fps,
+        )
+        script_mutated = script_mutated or repaired
+
         result["sourcing_log"] = sourcing_log
         result["asset_provenance"] = list(_ASSET_PROVENANCE.values())
         return result
@@ -1389,162 +1436,230 @@ async def _retry_missed_slots(
     stay identical. The final attempt drops the relevance gate: by then every
     candidate for every query has been rejected, and a top-ranked photo for
     the slot's own topic beats losing the visual beat altogether.
+
+    Slots recover concurrently and under a clock. Walking them one at a time
+    was what made a 35-minute image_source stage: each slot works through a
+    ladder of queries, every attempt pays for a vision review, and seven
+    stubborn slots ran back to back -- twice, because the review gate runs
+    this pass again for whatever it rejects. A slot that cannot finish inside
+    its own budget is left unsourced for the passes below rather than allowed
+    to hold the stage open.
     """
     missed = [d for d in descriptors if not d.get("sourced", True)]
     if not missed:
         return
 
-    logger.info(f"Retrying {len(missed)} unsourced image slot(s) with wider queries")
+    logger.info(
+        f"Retrying {len(missed)} unsourced image slot(s) with wider queries "
+        f"({_MAX_CONCURRENT_SOURCES} at a time)"
+    )
 
-    for desc in missed:
-        section = desc["section"]
-        sub_idx = desc["sub_idx"]
-        slot = desc["slot"]
-        img_path = desc.get("img_path") or (
-            raw_dir / f"section_{section.id:03d}_{sub_idx + 1:02d}.jpg"
+    sem = asyncio.Semaphore(_MAX_CONCURRENT_SOURCES)
+
+    async def _recover_one(desc: dict) -> None:
+        label = (
+            f"Section {desc['section'].id} sub-image "
+            f"{desc.get('sub_idx', 0) + 1}"
         )
-        desc["img_path"] = img_path
+        try:
+            async with sem:
+                await asyncio.wait_for(
+                    _recover_missed_slot(
+                        desc=desc,
+                        script=script,
+                        config=config,
+                        client=client,
+                        seen_hashes=seen_hashes,
+                        sourcing_log=sourcing_log,
+                        raw_dir=raw_dir,
+                    ),
+                    timeout=_SLOT_RETRY_TIMEOUT_SECONDS,
+                )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"{label}: recovery gave up after "
+                f"{_SLOT_RETRY_TIMEOUT_SECONDS}s; leaving the beat for the "
+                f"fallback passes"
+            )
+            desc["sourced"] = False
+        except Exception as exc:
+            logger.warning(f"{label}: recovery raised {type(exc).__name__}: {exc}")
+            desc["sourced"] = False
 
-        tiers = _relaxed_query_tiers(
-            desc, script,
-            web_photos_only=config.image_sourcing.web_photos_only,
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*[_recover_one(desc) for desc in missed]),
+            timeout=_RETRY_PASS_TIMEOUT_SECONDS,
         )
-        # (query, require_relevance_review) -- widen the query first.
-        attempts: list[tuple[str, bool]] = [(q, True) for q in tiers[1:]]
+    except asyncio.TimeoutError:
+        # The pass as a whole is capped too, so a batch of slow slots cannot
+        # add up to a stage that never ends. Whatever is still unsourced falls
+        # through to generation, coverage and finally the drop.
+        logger.warning(
+            f"retry pass hit its {_RETRY_PASS_TIMEOUT_SECONDS}s budget; "
+            f"continuing with the beats it recovered"
+        )
 
-        # Then fall back to the real documented subject inside the request. A
-        # slot can ask for something the archive does not hold -- an action
-        # performed with an object, a quantity of it, a time of day -- while the
-        # subject itself is well documented. Strip the staging and search for
-        # the thing. The relevance gate stays ON for every one of these: this
-        # finds a genuine photograph of the subject, it does not lower the bar
-        # for what counts as one.
-        seen_queries = {q for q, _ in attempts}
-        for tier in tiers:
-            for simplified in _documented_subject_queries(tier):
-                if simplified not in seen_queries:
-                    seen_queries.add(simplified)
-                    attempts.append((simplified, True))
 
-        # Then, only where a wrong-but-present image is better than a missing
-        # beat, try again with the relevance gate off.
-        #
-        # It is not better on a web-photo-only channel. Dropping the gate keeps
-        # whatever search ranked first, and search ranks confidently wrong
-        # things: a Horror run was handed Bigfoot for an investigator, toy
-        # soldiers for parachutes and an icon set for a photograph. Those then
-        # reach the image review gate, which correctly rejects them and -- with
-        # only two attempts -- fails the whole run. The slot is left unsourced
-        # instead, and _drop_unsourced_slots removes the beat; the pacing margin
-        # means a section can afford to lose one.
-        if not config.image_sourcing.web_photos_only:
-            attempts += [(q, False) for q in tiers]
+async def _recover_missed_slot(
+    *,
+    desc: dict,
+    script: Script,
+    config: ChannelConfig,
+    client: httpx.AsyncClient,
+    seen_hashes: set[str],
+    sourcing_log: list[dict],
+    raw_dir: Path,
+) -> None:
+    """One slot's recovery ladder. See `_retry_missed_slots`."""
+    section = desc["section"]
+    sub_idx = desc["sub_idx"]
+    slot = desc["slot"]
+    img_path = desc.get("img_path") or (
+        raw_dir / f"section_{section.id:03d}_{sub_idx + 1:02d}.jpg"
+    )
+    desc["img_path"] = img_path
 
-        for query, require_review in attempts:
-            try:
-                source_used = await _source_single_image(
-                    keywords=query,
-                    prompt=desc.get("prompt", ""),
-                    image_source=_image_source_for_slot(slot, config),
-                    config=config,
-                    output_path=img_path,
-                    client=client,
-                    seen_hashes=seen_hashes,
-                    lane=desc["lane"],
-                    allow_generation_fallback=False,
-                    fallback_to_illustration=False,
-                    require_relevance_review=require_review,
-                    narration=section.narration,
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Section {section.id} sub-image {sub_idx + 1}: "
-                    f"retry {query!r} failed: {e}"
-                )
-                continue
+    tiers = _relaxed_query_tiers(
+        desc, script,
+        web_photos_only=config.image_sourcing.web_photos_only,
+    )
+    # (query, require_relevance_review) -- widen the query first.
+    attempts: list[tuple[str, bool]] = [(q, True) for q in tiers[1:]]
 
-            if not source_used:
-                continue
+    # Then fall back to the real documented subject inside the request. A
+    # slot can ask for something the archive does not hold -- an action
+    # performed with an object, a quantity of it, a time of day -- while the
+    # subject itself is well documented. Strip the staging and search for
+    # the thing. The relevance gate stays ON for every one of these: this
+    # finds a genuine photograph of the subject, it does not lower the bar
+    # for what counts as one.
+    seen_queries = {q for q, _ in attempts}
+    for tier in tiers:
+        for simplified in _documented_subject_queries(tier):
+            if simplified not in seen_queries:
+                seen_queries.add(simplified)
+                attempts.append((simplified, True))
 
-            if require_review:
-                logger.info(
-                    f"Section {section.id} sub-image {sub_idx + 1}: "
-                    f"recovered with query {query!r}"
-                )
-            else:
-                logger.warning(
-                    f"Section {section.id} sub-image {sub_idx + 1}: relevance "
-                    f"gate rejected every candidate; keeping the top-ranked "
-                    f"result for query {query!r}"
-                )
+    # Then, only where a wrong-but-present image is better than a missing
+    # beat, try again with the relevance gate off.
+    #
+    # It is not better on a web-photo-only channel. Dropping the gate keeps
+    # whatever search ranked first, and search ranks confidently wrong
+    # things: a Horror run was handed Bigfoot for an investigator, toy
+    # soldiers for parachutes and an icon set for a photograph. Those then
+    # reach the image review gate, which correctly rejects them and -- with
+    # only two attempts -- fails the whole run. The slot is left unsourced
+    # instead, and _drop_unsourced_slots removes the beat; the pacing margin
+    # means a section can afford to lose one.
+    if not config.image_sourcing.web_photos_only:
+        attempts += [(q, False) for q in tiers]
+
+    for query, require_review in attempts:
+        try:
+            source_used = await _source_single_image(
+                keywords=query,
+                prompt=desc.get("prompt", ""),
+                image_source=_image_source_for_slot(slot, config),
+                config=config,
+                output_path=img_path,
+                client=client,
+                seen_hashes=seen_hashes,
+                lane=desc["lane"],
+                allow_generation_fallback=False,
+                fallback_to_illustration=False,
+                require_relevance_review=require_review,
+                narration=section.narration,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Section {section.id} sub-image {sub_idx + 1}: "
+                f"retry {query!r} failed: {e}"
+            )
+            continue
+
+        if not source_used:
+            continue
+
+        if require_review:
+            logger.info(
+                f"Section {section.id} sub-image {sub_idx + 1}: "
+                f"recovered with query {query!r}"
+            )
+        else:
+            logger.warning(
+                f"Section {section.id} sub-image {sub_idx + 1}: relevance "
+                f"gate rejected every candidate; keeping the top-ranked "
+                f"result for query {query!r}"
+            )
+        sourcing_log.append({
+            "section_id": section.id,
+            "sub_image_index": sub_idx + 1,
+            "file": img_path.name,
+            "keywords": query,
+            "source": f"{source_used}_retry" if require_review
+                      else f"{source_used}_top_ranked",
+        })
+        desc["sourced"] = True
+        break
+
+    # Slots whose policy demands a literal photograph of a specific real
+    # person or event are never generated: an invented image of a real
+    # transfer, match or player IS a fabricated news photograph. Those
+    # slots are dropped instead, and the section renders without them.
+    literal_photo_policy = (slot.visual_policy or "") in {
+        "literal_google_photo",
+        "google_photo_exact_action",
+        "photo_backed_info_slide",
+    }
+
+    # A web-photo-only channel means exactly that: no generated stand-in,
+    # ever. This became reachable once unsourceable slots stopped being
+    # filled with a rejected candidate -- they fell through to here instead
+    # and were quietly illustrated, which is how a Horror run ended up with
+    # three 1344x768 generated images in a run that was supposed to contain
+    # only real photographs. The beat is dropped instead.
+    if config.image_sourcing.web_photos_only:
+        if not desc.get("sourced", True):
+            logger.warning(
+                f"Section {section.id} sub-image {sub_idx + 1}: no real "
+                f"photograph found; dropping the beat rather than "
+                f"generating a stand-in (web_photos_only)"
+            )
+        return
+
+    if not desc.get("sourced", True) and not literal_photo_policy:
+        # Everything real has been tried. Generate a clearly illustrative
+        # stand-in rather than drop the visual beat entirely.
+        try:
+            source_used = await _source_single_image(
+                keywords=tiers[0] if tiers else slot.keywords,
+                prompt=desc.get("prompt", "") or slot.prompt,
+                image_source="ai_gen",
+                config=config,
+                output_path=img_path,
+                client=client,
+                seen_hashes=seen_hashes,
+                lane=desc["lane"],
+                allow_generation_fallback=True,
+                allow_last_resort_generation=True,
+                narration=section.narration,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Section {section.id} sub-image {sub_idx + 1}: "
+                f"last-resort generation failed: {e}"
+            )
+            source_used = None
+        if source_used:
             sourcing_log.append({
                 "section_id": section.id,
                 "sub_image_index": sub_idx + 1,
                 "file": img_path.name,
-                "keywords": query,
-                "source": f"{source_used}_retry" if require_review
-                          else f"{source_used}_top_ranked",
+                "keywords": slot.keywords,
+                "source": "ai_gen_last_resort",
             })
             desc["sourced"] = True
-            break
-
-        # Slots whose policy demands a literal photograph of a specific real
-        # person or event are never generated: an invented image of a real
-        # transfer, match or player IS a fabricated news photograph. Those
-        # slots are dropped instead, and the section renders without them.
-        literal_photo_policy = (slot.visual_policy or "") in {
-            "literal_google_photo",
-            "google_photo_exact_action",
-            "photo_backed_info_slide",
-        }
-
-        # A web-photo-only channel means exactly that: no generated stand-in,
-        # ever. This became reachable once unsourceable slots stopped being
-        # filled with a rejected candidate -- they fell through to here instead
-        # and were quietly illustrated, which is how a Horror run ended up with
-        # three 1344x768 generated images in a run that was supposed to contain
-        # only real photographs. The beat is dropped instead.
-        if config.image_sourcing.web_photos_only:
-            if not desc.get("sourced", True):
-                logger.warning(
-                    f"Section {section.id} sub-image {sub_idx + 1}: no real "
-                    f"photograph found; dropping the beat rather than "
-                    f"generating a stand-in (web_photos_only)"
-                )
-            continue
-
-        if not desc.get("sourced", True) and not literal_photo_policy:
-            # Everything real has been tried. Generate a clearly illustrative
-            # stand-in rather than drop the visual beat entirely.
-            try:
-                source_used = await _source_single_image(
-                    keywords=tiers[0] if tiers else slot.keywords,
-                    prompt=desc.get("prompt", "") or slot.prompt,
-                    image_source="ai_gen",
-                    config=config,
-                    output_path=img_path,
-                    client=client,
-                    seen_hashes=seen_hashes,
-                    lane=desc["lane"],
-                    allow_generation_fallback=True,
-                    allow_last_resort_generation=True,
-                    narration=section.narration,
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Section {section.id} sub-image {sub_idx + 1}: "
-                    f"last-resort generation failed: {e}"
-                )
-                source_used = None
-            if source_used:
-                sourcing_log.append({
-                    "section_id": section.id,
-                    "sub_image_index": sub_idx + 1,
-                    "file": img_path.name,
-                    "keywords": slot.keywords,
-                    "source": "ai_gen_last_resort",
-                })
-                desc["sourced"] = True
 
 
 def minimum_slots_for_section(section, config: ChannelConfig) -> int:
@@ -1810,12 +1925,24 @@ async def _generate_missing_visuals(
     model = getattr(
         sourcing, "generated_fallback_model", "gemini-3.1-flash-lite-image"
     )
+
+    # Addressed by the beat it belongs to, so a generated frame can only ever
+    # mark its own slot sourced. The linear scan this replaces compared
+    # `sub_index` -- a key no descriptor carries -- so it read 0 for every
+    # beat and matched the first unsourced descriptor in the section whenever
+    # the generated slot happened to be slot 1. Correctly generated frames for
+    # any other slot marked nothing at all.
+    by_slot = {
+        (d["section"].id, d.get("sub_idx", 0) + 1): d
+        for d in unsourced
+    }
+
     for item in planned:
         target = item.get("output_path")
         if not target:
             continue
         try:
-            await clients.generate_image_gemini(
+            written = await clients.generate_image_gemini(
                 item["prompt"],
                 Path(target),
                 model=model,
@@ -1824,6 +1951,18 @@ async def _generate_missing_visuals(
         except Exception as exc:
             logger.warning(
                 f"fallback generation failed for section {item['section_id']}: {exc}"
+            )
+            continue
+
+        # A refusal, a safety block and a 429 all come back as None rather
+        # than an exception, and the quota case arrives in a burst -- three
+        # beats in one second. Taking the call as proof of a file is how a run
+        # reported image_source complete with section_002_01 never written.
+        if written is None or not _is_usable_asset(Path(target)):
+            logger.warning(
+                f"fallback generation for section {item['section_id']} "
+                f"sub-image {item['sub_image_index']} produced no usable file; "
+                f"leaving the beat unsourced for the passes below"
             )
             continue
 
@@ -1837,16 +1976,12 @@ async def _generate_missing_visuals(
         )
         sourcing_log.append(visual.to_provenance())
 
-        for descriptor in unsourced:
-            if (
-                descriptor["section"].id == item["section_id"]
-                and descriptor.get("sub_index", 0) + 1 == item["sub_image_index"]
-            ):
-                descriptor["sourced"] = True
-                # Read downstream so a generated frame is never treated as a
-                # sourced photograph.
-                descriptor["generated"] = True
-                break
+        descriptor = by_slot.get((item["section_id"], item["sub_image_index"]))
+        if descriptor is not None:
+            descriptor["sourced"] = True
+            # Read downstream so a generated frame is never treated as a
+            # sourced photograph.
+            descriptor["generated"] = True
 
     if budget.used:
         summary = budget.summary()
@@ -2059,6 +2194,175 @@ def _drop_unsourced_slots(
     return survivor_map
 
 
+def _expected_asset_path(
+    *,
+    section_id: int,
+    sub_idx: int,
+    raw_dir: Path,
+    videos_dir: Path,
+) -> Path | None:
+    """The file a beat actually has, or None.
+
+    Deliberately the same rules core.validator.validate_raw_images applies --
+    a clip counts, and an image counts under any suffix the downloaders write.
+    The sourcer and the validator disagreeing about what "sourced" means is
+    what let a stage report success with a beat the validator then rejected.
+    """
+    stem = f"section_{section_id:03d}_{sub_idx:02d}"
+    clip = videos_dir / f"{stem}.mp4"
+    if _is_usable_asset(clip):
+        return clip
+    for suffix in (".jpg", ".jpeg", ".png", ".webp"):
+        candidate = raw_dir / f"{stem}{suffix}"
+        if _is_usable_asset(candidate):
+            return candidate
+    return None
+
+
+def _missing_expected_slots(
+    script: Script,
+    config: ChannelConfig,
+    raw_dir: Path,
+    videos_dir: Path,
+) -> list[tuple[int, int]]:
+    """Beats the script still promises that have nothing on disk."""
+    return [
+        (section_id, sub_idx)
+        for section_id, sub_idx in expected_sourced_image_slots(script, config)
+        if _expected_asset_path(
+            section_id=section_id,
+            sub_idx=sub_idx,
+            raw_dir=raw_dir,
+            videos_dir=videos_dir,
+        )
+        is None
+    ]
+
+
+async def _reconcile_expected_assets(
+    *,
+    script: Script,
+    config: ChannelConfig,
+    descriptors: list[dict],
+    sourcing_log: list[dict],
+    seen_hashes: set[str],
+    raw_dir: Path,
+    videos_dir: Path,
+    target_size: tuple[int, int],
+    fps: int,
+) -> bool:
+    """Make the stage's success claim match what is on disk, or fail.
+
+    Runs last, after every sourcing pass and the review gate. Each pass above
+    tracks its own belief about whether a beat is done, and a belief can be
+    wrong: a rate-limited generation returns None rather than raising, a
+    download can leave nothing behind, a re-source after the review gate can
+    quietly miss. This pass asks the filesystem instead, and gives every beat
+    that comes up empty the full recovery chain one more time -- widened
+    search, then a generated frame, then a licensed clip or a text card.
+
+    A beat that survives all of that with no file is removed from the script,
+    because the alternative is a stage that reports success and fails
+    validation a moment later. If removal is not possible either, this raises:
+    the stage failing is recoverable, a stage wrongly recorded as complete is
+    not.
+
+    Returns whether the script was changed.
+    """
+    missing = _missing_expected_slots(script, config, raw_dir, videos_dir)
+    if not missing:
+        return False
+
+    logger.warning(
+        f"{len(missing)} beat(s) reported sourced with no file on disk: "
+        + ", ".join(f"section_{s:03d}_{i:02d}" for s, i in missing)
+        + " — running per-asset recovery before the stage can complete"
+    )
+
+    by_slot = {
+        (desc["section"].id, desc.get("sub_idx", 0) + 1): desc
+        for desc in descriptors
+    }
+
+    recoverable: list[dict] = []
+    for section_id, sub_idx in missing:
+        desc = by_slot.get((section_id, sub_idx))
+        if desc is None:
+            # No descriptor to re-source with -- the drop below handles it.
+            continue
+        desc["sourced"] = False
+        if not desc.get("img_path"):
+            desc["img_path"] = raw_dir / f"section_{section_id:03d}_{sub_idx:02d}.jpg"
+        recoverable.append(desc)
+
+    if recoverable:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(60, connect=10),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            follow_redirects=True,
+        ) as client:
+            await _retry_missed_slots(
+                descriptors=recoverable,
+                script=script,
+                config=config,
+                client=client,
+                seen_hashes=seen_hashes,
+                sourcing_log=sourcing_log,
+                raw_dir=raw_dir,
+            )
+
+        # Last resorts, in the order that keeps the most truth: a clearly
+        # non-documentary generated frame, then a licensed clip, then a card
+        # the renderer draws from the beat's own words. Each is gated by the
+        # channel, and generated_visuals still refuses anything that would
+        # fabricate evidence or a real person.
+        await _generate_missing_visuals(
+            descriptors=recoverable,
+            config=config,
+            sourcing_log=sourcing_log,
+        )
+        await _cover_unsourced_slots(
+            descriptors=recoverable,
+            config=config,
+            sourcing_log=sourcing_log,
+            videos_dir=videos_dir,
+            raw_dir=raw_dir,
+            seen_hashes=seen_hashes,
+            target_size=target_size,
+            fps=fps,
+        )
+
+    # Believe the filesystem, not the passes above.
+    still_missing = _missing_expected_slots(script, config, raw_dir, videos_dir)
+    if not still_missing:
+        logger.info("per-asset recovery filled every missing beat")
+        return True
+
+    for section_id, sub_idx in still_missing:
+        desc = by_slot.get((section_id, sub_idx))
+        if desc is not None:
+            desc["sourced"] = False
+
+    survivor_map = _drop_unsourced_slots(descriptors, script)
+    if survivor_map:
+        _renumber_section_media(survivor_map, raw_dir, videos_dir)
+        enforce_minimum_slots(script, config, only_sections=set(survivor_map))
+
+    unresolved = _missing_expected_slots(script, config, raw_dir, videos_dir)
+    if unresolved:
+        raise RuntimeError(
+            "image sourcing cannot complete: no asset for "
+            + ", ".join(f"section_{s:03d}_{i:02d}" for s, i in unresolved)
+            + " and the beat could not be recovered or removed"
+        )
+
+    logger.warning(
+        f"removed {len(still_missing)} unrecoverable beat(s) so the stage "
+        f"completes with every remaining beat backed by a real file"
+    )
+    return True
+
+
 def _renumber_section_media(
     survivor_map: dict[int, list[int]],
     raw_dir: Path,
@@ -2220,12 +2524,19 @@ async def _source_single_image(
             image_size="1K",
             operation_label=request["operation"],
         )
-        if result is not None:
+        # A refusal, a safety block or a 429 comes back as None, and an
+        # interrupted write can leave an empty file; neither is a sourced beat.
+        if result is not None and _is_usable_asset(output_path):
             logger.info(
                 f"Sourced {output_path.name} from ai_gen"
                 f"{'(illustration)' if effective_lane == 'illustration' else ''}"
             )
             return "ai_gen"
+        if result is not None:
+            logger.warning(
+                f"{output_path.name}: ai_gen reported success but wrote no "
+                f"usable file"
+            )
     except Exception as e:
         logger.warning(f"{output_path.name}: ai_gen fallback failed: {e}")
 

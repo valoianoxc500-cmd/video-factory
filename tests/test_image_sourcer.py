@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+from pathlib import Path
 
 import httpx
 import pytest
@@ -2227,6 +2228,9 @@ def test_generation_still_allowed_when_web_photos_only_is_off(monkeypatch, tmp_p
 
     async def fake_generate_image_gemini(prompt, output_path, **kwargs):
         generated.append(str(output_path))
+        # Writes a file, as the real client does. Returning a path without one
+        # is the failure mode `_is_usable_asset` exists to catch.
+        Path(output_path).write_bytes(_jpg_bytes((10, 20, 30)))
         return output_path
 
     async def fake_search_serper(*args, **kwargs):
