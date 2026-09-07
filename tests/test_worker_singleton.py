@@ -196,15 +196,30 @@ def test_a_lock_is_per_path_so_the_two_workers_do_not_block_each_other(tmp_path)
 # --- the workers wire it in ----------------------------------------------
 
 
-def test_the_video_worker_refuses_to_start_when_the_lock_is_held(monkeypatch):
-    """main() must exit 2 with a clear log, not run a second worker."""
+def test_the_video_worker_refuses_to_start_when_the_lock_is_held(
+    monkeypatch, tmp_path
+):
+    """main() must exit 2 with a clear log, not run a second worker.
+
+    Runs against a lock in tmp_path, never the real workspace/.worker.lock:
+    the test must not depend on whether a worker happens to be running on this
+    machine, and must never take a lock a live worker wants.
+    """
     import worker as worker_module
 
-    lock_path = REPO_ROOT / "workspace" / ".worker.lock"
+    lock_path = tmp_path / ".worker.lock"
+    monkeypatch.setattr(
+        worker_module,
+        "worker_lock",
+        lambda: SingleInstanceLock(lock_path, name="video worker"),
+    )
+
     preflight_calls: list[int] = []
     monkeypatch.setattr(
         worker_module, "preflight", lambda: preflight_calls.append(1)
     )
+    # The restart grace exists for a real stop/start; here it is just delay.
+    monkeypatch.setattr(worker_module, "RESTART_GRACE_SECONDS", 0.2)
 
     with SingleInstanceLock(lock_path, name="video worker"):
         assert worker_module.main() == 2
@@ -222,10 +237,10 @@ def test_the_video_worker_lock_and_the_vrf_lock_are_different_files():
     assert worker_module.worker_lock().path != vrf_worker.vrf_lock().path
 
 
-def test_serving_without_the_lock_is_refused():
+def test_serving_without_the_lock_is_refused(tmp_path):
     """A caller that skipped main()'s acquire cannot reach the claim loop."""
     import worker as worker_module
 
-    unheld = SingleInstanceLock(REPO_ROOT / "workspace" / ".unused.lock")
+    unheld = SingleInstanceLock(tmp_path / ".worker.lock")
     with pytest.raises(worker_module.WorkerConfigError):
         worker_module._serve(unheld, once=True)
