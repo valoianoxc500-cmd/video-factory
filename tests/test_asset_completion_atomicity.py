@@ -53,6 +53,9 @@ def _config(**sourcing) -> ChannelConfig:
         },
         thumbnail_strategies=[{"name": "hero", "instruction": "hero"}],
     )
+    # Portrait, like the real channels: the beats here are 1080x1920, and the
+    # minimum-source check is judged against this.
+    config.video.resolution = [1080, 1920]
     for key, value in sourcing.items():
         setattr(config.image_sourcing, key, value)
     return config

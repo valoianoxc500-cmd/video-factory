@@ -311,6 +311,100 @@ def _normalize_photo_bytes_for_target(
     return buffer.getvalue()
 
 
+# Aspect ratios the Gemini image models accept, with their numeric value.
+# Asking for the one that matches the render target is the difference between
+# a native 9:16 frame and a 16:9 frame cropped to a third of its width.
+_GENERATION_ASPECT_RATIOS: tuple[tuple[str, float], ...] = (
+    ("21:9", 21 / 9),
+    ("16:9", 16 / 9),
+    ("3:2", 3 / 2),
+    ("4:3", 4 / 3),
+    ("5:4", 5 / 4),
+    ("1:1", 1.0),
+    ("4:5", 4 / 5),
+    ("3:4", 3 / 4),
+    ("2:3", 2 / 3),
+    ("9:16", 9 / 16),
+)
+
+
+def generation_aspect_ratio(target_size: tuple[int, int]) -> str:
+    """The supported aspect ratio closest to the render target.
+
+    Generated frames used to be requested at the client's 16:9 default whatever
+    the channel rendered at, so a 1080x1920 video got 1376x768 images. Those
+    are landscape, they fail the minimum portrait size, and cropping one to
+    9:16 throws away two thirds of its width -- the picture the model composed
+    is not the picture that survives. Asking for 9:16 up front costs nothing
+    and keeps the whole frame.
+    """
+    width, height = int(target_size[0]), int(target_size[1])
+    if width <= 0 or height <= 0:
+        return "9:16"
+    target = width / height
+    return min(
+        _GENERATION_ASPECT_RATIOS, key=lambda pair: abs(pair[1] - target)
+    )[0]
+
+
+def _conform_image_to_target(
+    path: Path,
+    *,
+    target_size: tuple[int, int],
+    label: str,
+) -> bool:
+    """Make the file at *path* a valid source for *target_size*, or remove it.
+
+    Generated images used to be written straight to the slot's filename by the
+    image client, skipping the validation and reframing every downloaded photo
+    goes through. Five 1376x768 frames reached final validation that way and
+    failed the run on "Raw image(s) too small".
+
+    Returns False when the image cannot be made usable, having deleted it --
+    an invalid file left on disk would be renamed into a surviving slot's
+    position when unsourced beats are dropped.
+    """
+    try:
+        with Image.open(path) as img:
+            width, height = img.size
+    except Exception as exc:
+        logger.warning(f"{label}: generated file is not a readable image ({exc})")
+        path.unlink(missing_ok=True)
+        return False
+
+    if (width, height) == tuple(target_size):
+        return True
+
+    upscale = _reframe_upscale_factor(width, height, target_size)
+    if (
+        not meets_minimum_source_size(width, height, target_size)
+        and upscale > _MAX_REFRAME_UPSCALE
+    ):
+        logger.warning(
+            f"{label}: generated {width}x{height} needs {upscale:.2f}x "
+            f"enlargement to reach {target_size[0]}x{target_size[1]} "
+            f"(max {_MAX_REFRAME_UPSCALE:.1f}x); discarding it"
+        )
+        path.unlink(missing_ok=True)
+        return False
+
+    try:
+        conformed = _normalize_photo_bytes_for_target(
+            path.read_bytes(), target_size=target_size
+        )
+    except Exception as exc:
+        logger.warning(f"{label}: could not reframe the generated image ({exc})")
+        path.unlink(missing_ok=True)
+        return False
+
+    path.write_bytes(conformed)
+    logger.info(
+        f"{label}: reframed generated {width}x{height} into "
+        f"{target_size[0]}x{target_size[1]}"
+    )
+    return True
+
+
 def _generation_prompt(
     *,
     keywords: str,
@@ -1925,6 +2019,7 @@ async def _generate_missing_visuals(
     model = getattr(
         sourcing, "generated_fallback_model", "gemini-3.1-flash-lite-image"
     )
+    target_size = tuple(config.video.resolution)
 
     # Addressed by the beat it belongs to, so a generated frame can only ever
     # mark its own slot sourced. The linear scan this replaces compared
@@ -1946,6 +2041,11 @@ async def _generate_missing_visuals(
                 item["prompt"],
                 Path(target),
                 model=model,
+                # This call used to take the client's 16:9 default, so a
+                # 1080x1920 channel got 1376x768 frames: landscape, under the
+                # minimum portrait size, and straight into final validation.
+                aspect_ratio=generation_aspect_ratio(target_size),
+                image_size="1K",
                 operation_label="generated_fallback",
             )
         except Exception as exc:
@@ -1964,6 +2064,19 @@ async def _generate_missing_visuals(
                 f"sub-image {item['sub_image_index']} produced no usable file; "
                 f"leaving the beat unsourced for the passes below"
             )
+            continue
+
+        # Whatever came back has to fit the frame the renderer will show. An
+        # image that cannot be reframed is deleted here rather than left to
+        # fail validation, and the beat falls through to the passes below.
+        if not _conform_image_to_target(
+            Path(target),
+            target_size=target_size,
+            label=(
+                f"section {item['section_id']} sub-image "
+                f"{item['sub_image_index']}"
+            ),
+        ):
             continue
 
         visual = generated_visuals.record_generated(
@@ -2200,13 +2313,20 @@ def _expected_asset_path(
     sub_idx: int,
     raw_dir: Path,
     videos_dir: Path,
+    target_size: tuple[int, int] | None = None,
 ) -> Path | None:
     """The file a beat actually has, or None.
 
     Deliberately the same rules core.validator.validate_raw_images applies --
-    a clip counts, and an image counts under any suffix the downloaders write.
-    The sourcer and the validator disagreeing about what "sourced" means is
-    what let a stage report success with a beat the validator then rejected.
+    a clip counts, an image counts under any suffix the downloaders write, and
+    when *target_size* is given an image must also be large enough to render
+    from. The sourcer and the validator disagreeing about what "sourced" means
+    is what let a stage report success with a beat the validator then rejected,
+    first on a file that did not exist and later on five 1376x768 frames.
+
+    An image that exists but is too small is deleted, not merely ignored:
+    leaving it on disk would let `_renumber_section_media` rename it into a
+    surviving beat's position once the unsourced one is dropped.
     """
     stem = f"section_{section_id:03d}_{sub_idx:02d}"
     clip = videos_dir / f"{stem}.mp4"
@@ -2214,8 +2334,24 @@ def _expected_asset_path(
         return clip
     for suffix in (".jpg", ".jpeg", ".png", ".webp"):
         candidate = raw_dir / f"{stem}{suffix}"
-        if _is_usable_asset(candidate):
+        if not _is_usable_asset(candidate):
+            continue
+        if target_size is None:
             return candidate
+        try:
+            with Image.open(candidate) as img:
+                width, height = img.size
+        except Exception:
+            candidate.unlink(missing_ok=True)
+            continue
+        if meets_minimum_source_size(width, height, target_size):
+            return candidate
+        min_w, min_h = minimum_source_size(target_size)
+        logger.warning(
+            f"{candidate.name} is {width}x{height}, below the minimum "
+            f"{min_w}x{min_h}; discarding it and re-sourcing the beat"
+        )
+        candidate.unlink(missing_ok=True)
     return None
 
 
@@ -2225,7 +2361,13 @@ def _missing_expected_slots(
     raw_dir: Path,
     videos_dir: Path,
 ) -> list[tuple[int, int]]:
-    """Beats the script still promises that have nothing on disk."""
+    """Beats the script still promises with nothing usable on disk.
+
+    "Usable" is the validator's bar, dimensions included: a beat holding an
+    image too small to render from is treated as unsourced so the recovery
+    chain replaces it, rather than left to fail the stage.
+    """
+    target_size = tuple(config.video.resolution)
     return [
         (section_id, sub_idx)
         for section_id, sub_idx in expected_sourced_image_slots(script, config)
@@ -2234,6 +2376,7 @@ def _missing_expected_slots(
             sub_idx=sub_idx,
             raw_dir=raw_dir,
             videos_dir=videos_dir,
+            target_size=target_size,
         )
         is None
     ]
@@ -2517,16 +2660,29 @@ async def _source_single_image(
         )
         if effective_lane == "illustration":
             logger.info(f"Sourcing illustration for {output_path.name}")
+        target_size = tuple(config.video.resolution)
         result = await clients.generate_image_gemini(
             request["prompt"], output_path,
             model=request["model"],
-            aspect_ratio="16:9",
+            # Match the render target rather than the client's 16:9 default:
+            # a portrait channel was being handed landscape frames that then
+            # failed the minimum source size.
+            aspect_ratio=generation_aspect_ratio(target_size),
             image_size="1K",
             operation_label=request["operation"],
         )
         # A refusal, a safety block or a 429 comes back as None, and an
         # interrupted write can leave an empty file; neither is a sourced beat.
-        if result is not None and _is_usable_asset(output_path):
+        if (
+            result is not None
+            and _is_usable_asset(output_path)
+            # The requested aspect ratio is a request, not a guarantee.
+            and _conform_image_to_target(
+                output_path,
+                target_size=target_size,
+                label=output_path.name,
+            )
+        ):
             logger.info(
                 f"Sourced {output_path.name} from ai_gen"
                 f"{'(illustration)' if effective_lane == 'illustration' else ''}"
