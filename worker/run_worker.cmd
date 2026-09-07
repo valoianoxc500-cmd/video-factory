@@ -15,5 +15,10 @@ set PYTHONIOENCODING=utf-8
 
 echo [%DATE% %TIME%] starting worker >> "logs\worker.log"
 ".venv\Scripts\python.exe" "worker\run_worker.py" >> "logs\worker.log" 2>&1
-echo [%DATE% %TIME%] worker exited with %ERRORLEVEL% >> "logs\worker.log"
-endlocal
+set "RC=%ERRORLEVEL%"
+echo [%DATE% %TIME%] worker exited with %RC% >> "logs\worker.log"
+
+REM Hand the worker's exit code back to Task Scheduler. Without this the
+REM script's own exit code is the echo above -- always 0 -- so a worker that
+REM died reported success, and the task's "restart on failure" never fired.
+endlocal & exit /b %RC%

@@ -33,6 +33,36 @@ python worker/run_worker.py
 
 `--once` processes a single job and exits, which is handy for testing.
 
+### As a Windows scheduled task
+
+Both workers install the same way, one script each. They run at logon as the
+current user — the pipeline authenticates to Google with Application Default
+Credentials from that user's profile, so SYSTEM would not find them, which also
+rules out an at-startup trigger.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File worker\install_windows_service.ps1
+powershell -ExecutionPolicy Bypass -File worker\install_vrf_windows_service.ps1
+```
+
+Each takes `-Uninstall` to remove its task. `VideoFactoryWorker` runs
+`worker\run_worker.cmd`; `ViralReelsFinderWorker` runs
+`worker\run_vrf_worker.cmd` (note `vrf_worker.py` lives at the repository root,
+not under `worker\`, though it reads the same `worker\.env`).
+
+**Recovery is a repeating trigger, not "restart the task if it fails."** That
+setting does not fire for an action that returns non-zero — verified by killing
+the worker and watching the task sit at `LastTaskResult -1` for 200 seconds
+without restarting. Both installers add a `Once` trigger with a start time in
+the past that repeats every minute indefinitely; a dead worker comes back
+within the minute. Every repeat while the worker is healthy is a no-op,
+because `MultipleInstances` is `IgnoreNew` — and the kernel lock refuses
+anything that gets past that.
+
+The launchers hand the worker's exit code back to the scheduler
+(`endlocal & exit /b %RC%`). Without that the script's exit code is its final
+`echo`, always 0, so a worker that died reported success.
+
 ## Requirements
 
 Everything [DEPLOYMENT.md](../DEPLOYMENT.md) lists for the pipeline — Python,
