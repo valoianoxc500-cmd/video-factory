@@ -55,9 +55,27 @@ Arabic-capable font — plus the variables in `.env.example`.
 
 ## Operational notes
 
-- **Single instance only.** The queue has no compare-and-set, and two runs
-  would fight over `workspace/`. On Cloud Run use
-  `--concurrency 1 --max-instances 1`.
+- **Single instance only, and enforced.** The queue has no compare-and-set, and
+  two runs would fight over `workspace/`. Each worker takes an OS-level lock at
+  startup — `workspace/.worker.lock` here, `workspace/.vrf_worker.lock` for
+  `vrf_worker.py` — and a second copy exits 2 with
+
+  ```
+  another video worker is already running (pid 1234, lock: ...\workspace\.worker.lock).
+  ```
+
+  The lock is held by the kernel (`msvcrt.locking` on Windows, `flock`
+  elsewhere), so it is released automatically when the worker exits, is killed,
+  or the machine loses power. There is no stale lock to clear by hand, and a
+  restart straight after a stop waits out the few hundred milliseconds Windows
+  takes to drop a dead process's locks.
+
+  This replaced a PID file that was read, checked, then written: two workers
+  launched in the same second both saw a file nobody held and both started.
+  Do not reintroduce a PID liveness probe — see `worker/singleton.py`.
+
+  The two workers hold *different* locks and are meant to run side by side.
+  On Cloud Run use `--concurrency 1 --max-instances 1`.
 - **Disk.** Each run leaves ~200 MB in `workspace/`. The worker prunes to
   `WORKSPACE_RETENTION` before every job and refuses to start below
   `MIN_FREE_DISK_GB`, because a render that hits ENOSPC halfway through wastes

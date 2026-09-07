@@ -20,9 +20,18 @@ Environment it needs:
 # the deployment to claim a task, so searches queued forever.
 import settings  # noqa: F401
 
+import logging
+import sys
 from pathlib import Path
 
 from viral.runner import main
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "worker"))
+from singleton import (  # noqa: E402
+    RESTART_GRACE_SECONDS,
+    AlreadyRunningError,
+    SingleInstanceLock,
+)
 
 # The worker credentials live in worker/.env, which the video worker already
 # loads through its own launcher. Reading the same file here means both workers
@@ -58,6 +67,35 @@ def _load_worker_env(path: Path = _WORKER_ENV) -> int:
     return loaded
 
 
+def vrf_lock() -> SingleInstanceLock:
+    """The lock that keeps this checkout to one Viral Reels Finder worker.
+
+    Its own lock, not the video worker's: the two poll different queues and
+    are meant to run side by side. What must not happen is two of *this* one,
+    which is what was running here -- both claiming from the same task queue,
+    which has no compare-and-set, so both could take the same task and publish
+    it twice.
+    """
+    return SingleInstanceLock(
+        Path(__file__).resolve().parent / "workspace" / ".vrf_worker.lock",
+        name="Viral Reels Finder worker",
+    )
+
+
 if __name__ == "__main__":
     _load_worker_env()
-    raise SystemExit(main())
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    try:
+        lock = vrf_lock().acquire(RESTART_GRACE_SECONDS)
+    except AlreadyRunningError as exc:
+        logging.getLogger("vrf_worker").error(str(exc))
+        raise SystemExit(2)
+
+    try:
+        code = main()
+    finally:
+        lock.release()
+    raise SystemExit(code)

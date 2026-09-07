@@ -41,6 +41,11 @@ import settings  # noqa: E402,F401
 
 import storage  # noqa: E402
 import diskspace  # noqa: E402
+from singleton import (  # noqa: E402
+    RESTART_GRACE_SECONDS,
+    AlreadyRunningError,
+    SingleInstanceLock,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -694,58 +699,8 @@ def preflight() -> None:
     )
 
 
-def _process_is_alive(pid: int) -> bool:
-    """Whether `pid` is still running, without disturbing it.
-
-    Not os.kill(pid, 0): on Windows CPython maps a non-console signal to
-    TerminateProcess, so the POSIX "signal 0 just tests existence" idiom
-    actually KILLS the process it was meant to probe -- and raises an
-    unhandled SystemError on a stale pid, which stopped the worker booting.
-
-    Fails closed. If liveness cannot be determined the answer is "alive", so
-    an uncertain lock blocks a second worker rather than letting two race for
-    the same disk.
-    """
-    if pid <= 0:
-        return False
-
-    if os.name != "nt":
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True  # exists, owned by another user
-        except OSError:
-            return True
-        return True
-
-    import ctypes
-    from ctypes import wintypes
-
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    STILL_ACTIVE = 259
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    handle = kernel32.OpenProcess(
-        PROCESS_QUERY_LIMITED_INFORMATION, False, pid
-    )
-    if not handle:
-        return False  # no such process: the lock is stale
-    try:
-        code = wintypes.DWORD()
-        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-            return True  # cannot tell; refuse to start a second worker
-        # A process that genuinely exited with 259 reads as alive. That is the
-        # safe direction to be wrong in, and the lock can be deleted by hand.
-        return code.value == STILL_ACTIVE
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-class _SingleWorkerLock:
-    """Refuse to run a second worker against the same checkout.
+def worker_lock() -> SingleInstanceLock:
+    """The lock that keeps this checkout to one pipeline worker.
 
     Disk headroom is checked once per job, so two workers sharing a disk each
     see the other's free space and both decide there is room -- then render
@@ -753,62 +708,54 @@ class _SingleWorkerLock:
     GPU-bound here, so a second process makes both runs slower rather than
     getting more done. One worker per checkout.
 
-    The lock is a file holding a PID. A stale lock left by a killed worker is
-    reclaimed rather than blocking forever.
+    Previously a PID file: read it, probe the pid, write your own. Two workers
+    started in the same second both read a file nobody held and both wrote,
+    which is how this checkout came to be running two of them. The kernel
+    takes the lock now, so the race has nowhere to happen.
     """
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.acquired = False
-
-    def _held_by_live_process(self) -> bool:
-        try:
-            pid = int(self.path.read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            return False
-        if pid == os.getpid():
-            return False
-        return _process_is_alive(pid)
-
-    def __enter__(self) -> "_SingleWorkerLock":
-        if self.path.exists() and self._held_by_live_process():
-            raise WorkerConfigError(
-                f"another worker is already running (lock: {self.path}). "
-                f"Two workers on one disk race for the same free space. "
-                f"Stop the other worker, or delete the lock file if it is stale."
-            )
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(str(os.getpid()), encoding="utf-8")
-        self.acquired = True
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        if self.acquired:
-            try:
-                self.path.unlink(missing_ok=True)
-            except OSError:
-                pass
+    return SingleInstanceLock(
+        REPO_ROOT / "workspace" / ".worker.lock",
+        name="video worker",
+    )
 
 
 def main() -> int:
+    # The lock comes first. Preflight shells out to ffmpeg and node and talks
+    # to storage, and a second worker doing that against a checkout another
+    # one owns is work nobody asked for -- and it is how a duplicate got far
+    # enough to look healthy in the log before it did any damage.
+    lock = worker_lock()
     try:
-        preflight()
-    except WorkerConfigError as exc:
+        lock.acquire(RESTART_GRACE_SECONDS)
+    except AlreadyRunningError as exc:
         logger.error(str(exc))
         return 2
 
-    once = "--once" in sys.argv
-    lock = _SingleWorkerLock(REPO_ROOT / "workspace" / ".worker.lock")
     try:
-        return _serve(lock, once)
-    except WorkerConfigError as exc:
-        # Raised by the lock when another worker already holds it.
-        logger.error(str(exc))
-        return 2
+        try:
+            preflight()
+        except WorkerConfigError as exc:
+            logger.error(str(exc))
+            return 2
+
+        once = "--once" in sys.argv
+        try:
+            return _serve(lock, once)
+        except WorkerConfigError as exc:
+            logger.error(str(exc))
+            return 2
+    finally:
+        lock.release()
 
 
-def _serve(lock: "_SingleWorkerLock", once: bool) -> int:
-    with lock, httpx.Client(timeout=60.0) as client:
+def _serve(lock: SingleInstanceLock, once: bool) -> int:
+    # `lock` is already held by main(), which acquires it before preflight and
+    # releases it in a finally. It is passed in so the serving loop cannot be
+    # called from anywhere that has not taken it.
+    if not lock.held:
+        raise WorkerConfigError("refusing to serve without the worker lock")
+
+    with httpx.Client(timeout=60.0) as client:
         while True:
             try:
                 job = claim_job(client)
