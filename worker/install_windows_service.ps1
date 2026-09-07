@@ -8,7 +8,17 @@
 
     The task runs as the current user on purpose: the pipeline authenticates
     to Google Cloud with Application Default Credentials from this user's
-    profile, so running as SYSTEM would not find them.
+    profile, so running as SYSTEM would not find them. That also rules out an
+    at-startup trigger, which fires before anyone logs on.
+
+    Recovery is the repeating trigger, not the "restart the task if it fails"
+    setting. That setting does not fire for an action that returns non-zero:
+    verified on this machine by killing the worker and watching the task sit at
+    LastTaskResult -1 for 200 seconds without restarting. A Once trigger with a
+    start time in the past and an indefinite one-minute repetition does fire.
+    Each repeat is a no-op while the worker is healthy, because
+    MultipleInstances is IgnoreNew -- and if one ever slipped past that, the
+    kernel lock in worker/singleton.py refuses it.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File worker\install_windows_service.ps1
@@ -55,7 +65,18 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 # quoting swallow the paths and the task exited 1 before producing any log.
 $action = New-ScheduledTaskAction -Execute $launcher -WorkingDirectory $repoRoot
 
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+# 1. At logon, for a fresh session.
+$logon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+
+# 2. The keep-alive. Start boundary in the past so the repetition is already
+#    running rather than waiting for the next logon; -RepetitionInterval is
+#    what creates the Repetition object, and clearing Duration makes it
+#    indefinite ([TimeSpan]::MaxValue serialises to a value the scheduler
+#    rejects as out of range).
+$heartbeat = New-ScheduledTaskTrigger -Once -At (Get-Date).Date `
+    -RepetitionInterval (New-TimeSpan -Minutes 1)
+$heartbeat.Repetition.Duration = ""
+$heartbeat.Repetition.StopAtDurationEnd = $false
 
 # Keep it alive: retry on failure, never stop it for running "too long",
 # and do not let Windows kill it to save battery.
@@ -76,9 +97,10 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
 }
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+Register-ScheduledTask -TaskName $TaskName -Action $action `
+    -Trigger @($logon, $heartbeat) `
     -Settings $settings -Principal $principal `
-    -Description "Video Factory worker: polls the Vercel app and renders videos." | Out-Null
+    -Description "Video Factory worker: polls the Vercel app and renders videos. One instance only; the worker also takes a kernel lock at workspace\.worker.lock." | Out-Null
 
 Start-ScheduledTask -TaskName $TaskName
 
