@@ -1,0 +1,82 @@
+{
+  "assets": [
+    {
+      "stem": "horror_door_creak",
+      "file": "assets\\sfx\\horror\\horror_door_creak.mp3",
+      "kind": "sfx",
+      "mood": "",
+      "platform": "wikimedia_commons",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/7/74/Door_handle_creaking.ogg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "source_page": "https://commons.wikimedia.org/wiki/File:Door_handle_creaking.ogg",
+      "licence": "Public domain",
+      "attribution": "stephan",
+      "attribution_required": false,
+      "title": "Door handle creaking.ogg"
+    },
+    {
+      "stem": "horror_heartbeat",
+      "file": "assets\\sfx\\horror\\horror_heartbeat.mp3",
+      "kind": "sfx",
+      "mood": "",
+      "platform": "wikimedia_commons",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/2/2b/Heartbeat_mitral_valve_150_bpm.ogg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "source_page": "https://commons.wikimedia.org/wiki/File:Heartbeat_mitral_valve_150_bpm.ogg",
+      "licence": "Public domain",
+      "attribution": "ezwa",
+      "attribution_required": false,
+      "title": "Heartbeat mitral valve 150 bpm.ogg"
+    },
+    {
+      "stem": "horror_jarring_hit",
+      "file": "assets\\sfx\\horror\\horror_jarring_hit.mp3",
+      "kind": "sfx",
+      "mood": "",
+      "platform": "wikimedia_commons",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/0/0a/Dreadful_jarring_of_dis.ogg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "source_page": "https://commons.wikimedia.org/wiki/File:Dreadful_jarring_of_dis.ogg",
+      "licence": "Public domain",
+      "attribution": "stephan",
+      "attribution_required": false,
+      "title": "Dreadful jarring of dis.ogg"
+    },
+    {
+      "stem": "horror_dread_low",
+      "file": "assets\\music\\horror_dread_low.mp3",
+      "kind": "music",
+      "mood": "slow, low, oppressive dread for openings and quiet menace",
+      "platform": "wikimedia_commons",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/3e/Alex-Productions_-_Deep_%28Dark_Ambient_Background_music%29.oga?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "source_page": "https://commons.wikimedia.org/wiki/File:Alex-Productions_-_Deep_(Dark_Ambient_Background_music).oga",
+      "licence": "CC BY 3.0",
+      "attribution": "Alex- Productions ( No Copyright Music )",
+      "attribution_required": true,
+      "title": "Alex-Productions - Deep (Dark Ambient Background music).oga"
+    },
+    {
+      "stem": "horror_tension_pulse",
+      "file": "assets\\music\\horror_tension_pulse.mp3",
+      "kind": "music",
+      "mood": "restless investigative tension for the rising middle",
+      "platform": "wikimedia_commons",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/7/70/PeriTune_-_Investigation2%28Suspense-Royalty_Free_Music%29.opus?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "source_page": "https://commons.wikimedia.org/wiki/File:PeriTune_-_Investigation2(Suspense-Royalty_Free_Music).opus",
+      "licence": "CC BY 3.0",
+      "attribution": "PeriTune",
+      "attribution_required": true,
+      "title": "PeriTune - Investigation2(Suspense-Royalty Free Music).opus"
+    },
+    {
+      "stem": "horror_climax_dark",
+      "file": "assets\\music\\horror_climax_dark.mp3",
+      "kind": "music",
+      "mood": "dense, dark intensity for the climax and reveal",
+      "platform": "wikimedia_commons",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/5/55/Dreamstate_Logic_-_Zero_Point_%28space_ambient%2C_dark_ambient%29.ogg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
+      "source_page": "https://commons.wikimedia.org/wiki/File:Dreamstate_Logic_-_Zero_Point_(space_ambient,_dark_ambient).ogg",
+      "licence": "CC BY 3.0",
+      "attribution": "Dreamstate Logic",
+      "attribution_required": true,
+      "title": "Dreamstate Logic - Zero Point (space ambient, dark ambient).ogg"
+    }
+  ]
+}

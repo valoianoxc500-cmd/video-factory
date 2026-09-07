@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import itertools
@@ -563,12 +564,69 @@ def _get_client() -> genai.Client:
             vertexai=True,
             project=settings.google_project_id,
             location=settings.google_cloud_location,
+            # Without an explicit timeout a stalled connection blocks the whole
+            # pipeline indefinitely -- observed hanging a run for 25+ minutes on
+            # a single vision call. A timeout turns that into a normal failure
+            # that _call_model_with_retry can back off and retry.
+            http_options=types.HttpOptions(
+                timeout=settings.gemini_request_timeout_ms,
+            ),
         )
     return _client
 
 
 def _trace_suffix(trace_ref: TraceRef | None) -> str:
     return f' trace={trace_ref.html_rel_path}' if trace_ref else ""
+
+
+_RETRYABLE_STATUS_MARKERS = (
+    "429",
+    "RESOURCE_EXHAUSTED",
+    "503",
+    "UNAVAILABLE",
+    "500",
+    "INTERNAL",
+    "504",
+    "DEADLINE_EXCEEDED",
+)
+# Shared preview-model quota recovers in tens of seconds, not seconds, so the
+# ladder is long and patient: ~4m of waiting beats losing a 25-minute run.
+_MODEL_CALL_MAX_ATTEMPTS = 8
+_MODEL_CALL_BASE_DELAY = 4.0   # seconds; doubled per attempt
+_MODEL_CALL_MAX_DELAY = 60.0   # cap so late attempts stay responsive
+
+
+def _is_retryable_model_error(exc: Exception) -> bool:
+    """Whether a Gemini call failed for a reason that may clear on its own."""
+    text = f"{type(exc).__name__}: {exc}"
+    return any(marker in text for marker in _RETRYABLE_STATUS_MARKERS)
+
+
+async def _call_model_with_retry(operation: str, call):
+    """Await `call()`, retrying quota and transient server errors with backoff.
+
+    Shared quota on preview models produces sporadic 429s; without this a
+    single blip aborts a pipeline run that is otherwise minutes from done.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, _MODEL_CALL_MAX_ATTEMPTS + 1):
+        try:
+            return await call()
+        except Exception as exc:
+            last_exc = exc
+            if attempt == _MODEL_CALL_MAX_ATTEMPTS or not _is_retryable_model_error(exc):
+                raise
+            delay = min(
+                _MODEL_CALL_BASE_DELAY * (2 ** (attempt - 1)),
+                _MODEL_CALL_MAX_DELAY,
+            )
+            logger.warning(
+                f"[gemini] {operation} attempt {attempt}/"
+                f"{_MODEL_CALL_MAX_ATTEMPTS} failed ({str(exc)[:120]}); "
+                f"retrying in {delay:.0f}s"
+            )
+            await asyncio.sleep(delay)
+    raise last_exc  # pragma: no cover - loop always returns or raises
 
 
 async def _generate_text_response(
@@ -613,10 +671,13 @@ async def _generate_text_response(
     started_at = datetime.now()
     t0 = time.perf_counter()
     try:
-        response = await client.aio.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=config,
+        response = await _call_model_with_retry(
+            operation,
+            lambda: client.aio.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=config,
+            ),
         )
     except Exception as exc:
         elapsed = time.perf_counter() - t0
@@ -733,6 +794,218 @@ async def generate_json(
 
 
 # ---------------------------------------------------------------------------
+# Gemini — web-grounded research
+# ---------------------------------------------------------------------------
+
+@cached_json
+async def research_with_search(
+    prompt: str,
+    *,
+    schema_prompt: str = "",
+    system_instruction: str = "",
+    model: str | None = None,
+    temperature: float = 0.2,
+    max_output_tokens: int = 8192,
+    operation_label: str | None = None,
+) -> dict:
+    """Answer a prompt with Google Search grounding, returning parsed JSON.
+
+    News scripts go stale fast: without live search the model happily writes
+    "a possible transfer" about a deal that completed last week. Grounding ties
+    the claims to current sources, and the returned `sources`/`queries` make
+    the provenance auditable in the run's AI trace.
+
+    Done in two passes on purpose. Asking one grounded call to "respond ONLY
+    with JSON" reliably suppresses the search tool -- the model just answers
+    from memory and returns an empty grounding_metadata, which is worse than
+    useless because the output *looks* researched. So pass 1 researches in
+    prose with the tool enabled, and pass 2 (no tools) structures that text.
+    """
+    client = _get_client()
+    model = model or settings.gemini_research_model
+    operation = operation_label or "research_with_search"
+    trace_ref = reserve_trace(
+        operation=operation,
+        service="generate_content",
+        model=model,
+    )
+
+    logger.info(
+        f"[gemini] research_with_search model={model} "
+        f"prompt=\"{prompt[:70].replace(chr(10), ' ')}…\" ({len(prompt)} chars)"
+        f"{_trace_suffix(trace_ref)}"
+    )
+
+    labels = costs.current_billing_labels(operation)
+
+    # Pass 1: research in prose, with search enabled.
+    research_config = types.GenerateContentConfig(
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+    )
+    if system_instruction:
+        research_config.system_instruction = system_instruction
+    if labels:
+        research_config.labels = labels
+    config = research_config
+
+    started_at = datetime.now()
+    t0 = time.perf_counter()
+    try:
+        response = await _call_model_with_retry(
+            operation,
+            lambda: client.aio.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=config,
+            ),
+        )
+    except Exception as exc:
+        if trace_ref:
+            payload = base_payload(
+                trace_ref, started_at=started_at,
+                duration_seconds=time.perf_counter() - t0, status="error",
+            )
+            payload["request"] = {"prompt": prompt}
+            payload["response"] = {"error": str(exc)}
+            write_trace(trace_ref, payload)
+        raise
+
+    elapsed = time.perf_counter() - t0
+    usage = getattr(response, "usage_metadata", None)
+    if usage is not None:
+        costs.record_generate_content_cost(
+            model=model, usage_metadata=usage, operation=operation,
+        )
+
+    text = (response.text or "").strip()
+
+    # Pass 2: turn the grounded prose into the requested JSON. No tools here,
+    # so nothing competes with the structured-output instruction.
+    structure_config = types.GenerateContentConfig(
+        temperature=0.0,
+        # Headroom: a truncated response is unparseable JSON, and the findings
+        # plus the schema can be long.
+        max_output_tokens=max(max_output_tokens, 16384),
+        response_mime_type="application/json",
+    )
+    if labels:
+        structure_config.labels = labels
+    structured = await _call_model_with_retry(
+        f"{operation}_structure",
+        lambda: client.aio.models.generate_content(
+            model=model,
+            contents=(
+                "Convert these research findings into the exact JSON object the "
+                "instructions below ask for. Use ONLY what the findings state; "
+                "do not add facts.\n\n"
+                f"=== FINDINGS ===\n{text}\n\n"
+                f"=== REQUIRED OUTPUT ===\n{schema_prompt or prompt}"
+            ),
+            config=structure_config,
+        ),
+    )
+    if getattr(structured, "usage_metadata", None) is not None:
+        costs.record_generate_content_cost(
+            model=model,
+            usage_metadata=structured.usage_metadata,
+            operation=f"{operation}_structure",
+        )
+    # Structuring is the fragile half: the model can truncate or fence the JSON
+    # oddly. The grounded findings are the valuable part and were already paid
+    # for, so a structuring failure degrades to the prose brief instead of
+    # throwing away verified research.
+    try:
+        parsed = _parse_fenced_json((structured.text or "").strip())
+    except ValueError as exc:
+        logger.warning(
+            f"[gemini] {operation}: could not structure the grounded findings "
+            f"({exc}); falling back to the raw research text"
+        )
+        parsed = {
+            "headline_status": text[:600],
+            "latest_development": "",
+            "verified_facts": [],
+            "key_entities": [],
+            "structuring_failed": True,
+        }
+
+    # Provenance from the grounding metadata, for the trace and the script.
+    queries: list[str] = []
+    sources: list[dict[str, str]] = []
+    try:
+        meta = response.candidates[0].grounding_metadata
+        queries = list(getattr(meta, "web_search_queries", None) or [])
+        for chunk in getattr(meta, "grounding_chunks", None) or []:
+            web = getattr(chunk, "web", None)
+            if web is not None:
+                sources.append({
+                    "title": getattr(web, "title", "") or "",
+                    "uri": getattr(web, "uri", "") or "",
+                })
+    except (AttributeError, IndexError):
+        pass
+
+    if isinstance(parsed, dict):
+        # Overwrite rather than setdefault: provenance comes from the grounded
+        # pass, not from whatever the structuring pass invented.
+        parsed["search_queries"] = queries
+        parsed["sources"] = sources
+        parsed["grounded"] = bool(queries or sources)
+
+    if not (queries or sources):
+        logger.warning(
+            f"[gemini] {operation} returned no grounding metadata — the answer "
+            f"came from training data and may be out of date"
+        )
+
+    logger.info(
+        f"[gemini] research_with_search done — {elapsed:.1f}s, "
+        f"{len(queries)} search(es), {len(sources)} source(s)"
+        f"{_trace_suffix(trace_ref)}"
+    )
+    if trace_ref:
+        payload = base_payload(
+            trace_ref, started_at=started_at,
+            duration_seconds=elapsed, status="ok",
+        )
+        payload["request"] = {
+            "system_instruction": system_instruction,
+            "prompt": prompt,
+        }
+        payload["response"] = {
+            "text": text,
+            "json": parsed,
+            "search_queries": queries,
+            "sources": sources,
+        }
+        write_trace(trace_ref, payload)
+    return parsed
+
+
+def _parse_fenced_json(text: str) -> dict:
+    """Pull a JSON object out of a possibly fenced/prose-wrapped response."""
+    candidate = text.strip()
+    fence = re.search(r"```(?:json)?\s*(.+?)```", candidate, re.S)
+    if fence:
+        candidate = fence.group(1).strip()
+    else:
+        start, end = candidate.find("{"), candidate.rfind("}")
+        if start != -1 and end > start:
+            candidate = candidate[start:end + 1]
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Grounded research did not return JSON: {text[:300]}"
+        ) from e
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Grounded research returned {type(parsed).__name__}, not an object")
+    return parsed
+
+
+# ---------------------------------------------------------------------------
 # Gemini — vision review
 # ---------------------------------------------------------------------------
 
@@ -790,10 +1063,13 @@ async def review_with_vision(
     started_at = datetime.now()
     t0 = time.perf_counter()
     try:
-        response = await client.aio.models.generate_content(
-            model=model,
-            contents=parts,
-            config=config,
+        response = await _call_model_with_retry(
+            operation,
+            lambda: client.aio.models.generate_content(
+                model=model,
+                contents=parts,
+                config=config,
+            ),
         )
     except Exception as exc:
         elapsed = time.perf_counter() - t0
@@ -1091,18 +1367,21 @@ async def generate_speech(
     started_at = datetime.now()
     try:
         t0 = time.perf_counter()
-        response = await client.aio.models.generate_content(
-            model=model,
-            contents=full_prompt,
-            config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                labels=costs.current_billing_labels(operation),
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                            voice_name=voice_name,
+        response = await _call_model_with_retry(
+            operation,
+            lambda: client.aio.models.generate_content(
+                model=model,
+                contents=full_prompt,
+                config=types.GenerateContentConfig(
+                    response_modalities=["AUDIO"],
+                    labels=costs.current_billing_labels(operation),
+                    speech_config=types.SpeechConfig(
+                        voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                voice_name=voice_name,
+                            )
                         )
-                    )
+                    ),
                 ),
             ),
         )

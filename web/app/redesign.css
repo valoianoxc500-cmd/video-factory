@@ -1,0 +1,1363 @@
+/* =====================================================================
+   FirstVideoCheck — visual system
+   ---------------------------------------------------------------------
+   Loaded after auth-styles.css and deliberately retunes it rather than
+   replacing it: every class the components already use keeps its name, so
+   this changes how the product looks without touching what it does.
+
+   The direction comes from the product itself. This tool turns a claim into
+   a checked, narrated video, so the palette is a near-black editing-suite
+   ground with two signals on it: green for verified, violet for generated.
+   Those two meet in the one gradient on the page — the button that starts a
+   generation — and appear nowhere else together.
+   ===================================================================== */
+
+:root {
+  /* Ground. Cool near-black, a touch of blue so the green reads as light
+     rather than paint. */
+  --sa-bg: #05080C;
+  --sa-panel: #0B1015;
+  --sa-panel-2: #111820;
+  --sa-line: rgba(255, 255, 255, 0.07);
+  --sa-line-strong: rgba(255, 255, 255, 0.14);
+
+  --sa-text: #E8EDF3;
+  --sa-dim: #7E8899;
+  --sa-faint: #545E6E;
+
+  /* Verified. */
+  --sa-accent: #14E08C;
+  --sa-accent-soft: rgba(20, 224, 140, 0.12);
+  --sa-accent-line: rgba(20, 224, 140, 0.32);
+
+  /* Generated. */
+  --sa-violet: #7A5CFF;
+  --sa-violet-soft: rgba(122, 92, 255, 0.14);
+  --sa-violet-line: rgba(122, 92, 255, 0.36);
+
+  --sa-danger: #FF5A5A;
+  --sa-ok: #14E08C;
+  --sa-radius: 16px;
+
+  --sa-display: "Plus Jakarta Sans", "Inter", system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --sa-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --sa-script: "Caveat", "Segoe Script", cursive;
+}
+
+body {
+  background: var(--sa-bg);
+  color: var(--sa-text);
+  font-family: var(--sa-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Focus is never removed, only restyled: keyboard users need to see it. */
+:where(a, button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--sa-accent);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── brand lockup ────────────────────────────────────────────── */
+
+.brand { display: flex; align-items: center; gap: 11px; }
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  background: linear-gradient(150deg, #1BF39A 0%, #0BAE6B 100%);
+  color: #04120C;
+  box-shadow: 0 6px 18px rgba(20, 224, 140, 0.28);
+}
+
+.brand-name {
+  font-family: var(--sa-display);
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #fff;
+}
+
+.brand-name .brand-accent { color: var(--sa-accent); }
+
+.brand-badge {
+  display: inline-block;
+  margin-left: 9px;
+  padding: 3px 9px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--sa-line);
+  font-family: var(--sa-body);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--sa-dim);
+  vertical-align: middle;
+}
+
+.brand-tag {
+  display: block;
+  font-size: 9.5px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--sa-faint);
+  margin-top: 3px;
+}
+
+/* ── sidebar ─────────────────────────────────────────────────── */
+
+.dash { display: flex; min-height: 100vh; background: var(--sa-bg); }
+
+.side {
+  width: 292px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 26px 18px 18px;
+  border-right: 1px solid var(--sa-line);
+  background: #070B0F;
+}
+
+.side > a:first-child { padding: 0 8px 22px; display: block; }
+
+.nav { display: flex; flex-direction: column; gap: 3px; flex: 1; overflow-y: auto; }
+
+.nav::-webkit-scrollbar { width: 6px; }
+.nav::-webkit-scrollbar-thumb { background: var(--sa-line); border-radius: 3px; }
+
+.nav a {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  border-radius: 12px;
+  color: var(--sa-dim);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 520;
+  border: 1px solid transparent;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.nav a:hover { background: rgba(255, 255, 255, 0.04); color: var(--sa-text); }
+
+/* The active item is the one violet fill in the chrome — generation is the
+   product's verb, so the thing you are doing is the thing that glows. */
+.nav a.active {
+  background: linear-gradient(100deg, #6B4BFF 0%, #8A6BFF 100%);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 8px 22px rgba(107, 75, 255, 0.32);
+}
+
+.nav a.active svg { color: #fff; }
+
+.nav a .count {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--sa-faint);
+  background: rgba(255, 255, 255, 0.05);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.nav a.active .count { background: rgba(255, 255, 255, 0.18); color: #fff; }
+
+.nav-label {
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--sa-faint);
+  margin: 18px 0 6px;
+  padding: 0 14px;
+}
+
+/* The nav item's own subtitle, as in the reference's "Re-Create" row. */
+.nav-sub {
+  display: block;
+  font-size: 11.5px;
+  font-weight: 420;
+  opacity: 0.72;
+  margin-top: 2px;
+}
+
+.side-foot {
+  border-top: 1px solid var(--sa-line);
+  padding-top: 14px;
+  margin-top: 10px;
+}
+
+.side-user-card {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 12px;
+  border-radius: 14px;
+  background: var(--sa-panel-2);
+  border: 1px solid var(--sa-line);
+}
+
+.side-avatar {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border-radius: 50%;
+  background: linear-gradient(150deg, #6B4BFF, #9B7BFF);
+  color: #fff;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.side-user { font-size: 13.5px; font-weight: 600; color: var(--sa-text); margin: 0; }
+.side-plan { font-size: 11.5px; color: var(--sa-faint); margin: 2px 0 0; }
+
+.side-legal { margin: 12px 0 0; padding: 0 4px; font-size: 11px; color: var(--sa-faint); }
+.side-legal a { color: var(--sa-faint); text-decoration: none; }
+.side-legal a:hover { color: var(--sa-dim); }
+
+/* ── main column ─────────────────────────────────────────────── */
+
+.content { flex: 1; padding: 30px 40px 60px; max-width: 1280px; min-width: 0; }
+
+.page-head { margin-bottom: 26px; }
+
+/*
+ * Section imagery.
+ *
+ * Every major surface gets its own still behind the heading, so Library reads
+ * as Library before you have read the word. Held to 22% and washed through the
+ * ground colour: the picture sets the place, the type stays fully legible, and
+ * nothing here competes with the content below.
+ *
+ * Set `data-art` on the page-head and the image follows.
+ */
+.page-head[data-art] {
+  position: relative;
+  margin: -30px -40px 26px;
+  padding: 38px 40px 30px;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.page-head[data-art]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  background-image: var(--head-art);
+  background-size: cover;
+  background-position: center 38%;
+  filter: saturate(0.7) brightness(0.5);
+  opacity: 0.55;
+}
+
+.page-head[data-art]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    linear-gradient(180deg, rgba(5, 8, 12, 0.55) 0%, rgba(5, 8, 12, 0.88) 62%,
+      var(--sa-bg) 100%),
+    linear-gradient(90deg, rgba(5, 8, 12, 0.7) 0%, transparent 55%);
+}
+
+@media (max-width: 900px) {
+  .page-head[data-art] { margin: -22px -18px 22px; padding: 26px 18px 22px; }
+}
+
+.page-head h1 {
+  font-family: var(--sa-display);
+  font-size: clamp(34px, 4vw, 52px);
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+  margin: 0 0 8px;
+  color: #fff;
+}
+
+.page-head h1 .hl { color: var(--sa-accent); }
+
+.page-head p { color: var(--sa-dim); font-size: 15px; margin: 0; }
+
+/* Topbar: search + notifications, as in the reference. */
+.topbar { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; }
+
+.topsearch {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 46px;
+  padding: 0 16px;
+  border-radius: 12px;
+  background: var(--sa-panel);
+  border: 1px solid var(--sa-line);
+  color: var(--sa-faint);
+}
+
+.topsearch input {
+  flex: 1;
+  background: none;
+  border: 0;
+  color: var(--sa-text);
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.topsearch input::placeholder { color: var(--sa-faint); }
+.topsearch input:focus { outline: none; }
+
+.topbell {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  flex: none;
+  border-radius: 12px;
+  background: var(--sa-panel);
+  border: 1px solid var(--sa-line);
+  color: var(--sa-dim);
+}
+
+.topbell::after {
+  content: "";
+  position: absolute;
+  top: 12px;
+  right: 13px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--sa-danger);
+  border: 2px solid var(--sa-panel);
+}
+
+/* ── mode cards ──────────────────────────────────────────────── */
+
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+  margin-bottom: 34px;
+}
+
+.mode-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 22px;
+  border-radius: 18px;
+  background: var(--sa-panel);
+  border: 1px solid var(--sa-line);
+  text-align: left;
+  width: 100%;
+  cursor: pointer;
+  font-family: inherit;
+  color: var(--sa-text);
+  /* The Re-Create card is a link, and a link underlines its text by default.
+     A card is a surface, not a run of prose -- the whole thing is the target,
+     so the underline only made it look broken. */
+  text-decoration: none;
+  transition: border-color 0.16s ease, transform 0.16s ease;
+}
+
+.mode-card,
+.mode-card:hover,
+.mode-card h3,
+.mode-card p { text-decoration: none; }
+
+.mode-card:hover { transform: translateY(-1px); border-color: var(--sa-line-strong); }
+
+.mode-card .mode-icon {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  flex: none;
+  border-radius: 15px;
+}
+
+.mode-card h3 {
+  font-family: var(--sa-display);
+  font-size: 17px;
+  font-weight: 700;
+  margin: 0 0 5px;
+  color: #fff;
+}
+
+.mode-card p { font-size: 13px; color: var(--sa-dim); margin: 0; line-height: 1.5; }
+
+.mode-card .mode-go { margin-left: auto; color: var(--sa-faint); flex: none; }
+
+/* Selected mode: green for "make it from checked sources". */
+.mode-card.is-on {
+  border-color: var(--sa-accent-line);
+  background:
+    radial-gradient(120% 140% at 0% 0%, rgba(20, 224, 140, 0.10), transparent 60%),
+    var(--sa-panel);
+}
+
+.mode-card.is-on .mode-icon {
+  background: var(--sa-accent-soft);
+  color: var(--sa-accent);
+}
+
+/* The alternate mode: violet for "make it from an existing video". */
+.mode-card.is-alt .mode-icon { background: var(--sa-violet-soft); color: #A98CFF; }
+.mode-card.is-alt:hover { border-color: var(--sa-violet-line); }
+
+/* ── section heading ─────────────────────────────────────────── */
+
+.sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 0 14px;
+}
+
+.sec-head h2 {
+  font-family: var(--sa-display);
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  margin: 0;
+  color: #fff;
+}
+
+.sec-link {
+  font-size: 13.5px;
+  color: var(--sa-violet);
+  text-decoration: none;
+  font-weight: 560;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sec-link:hover { color: #A98CFF; }
+
+/* ── channel picker ──────────────────────────────────────────── */
+
+.chan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 16px;
+  margin-bottom: 30px;
+}
+
+.chan {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  min-height: 200px;
+  padding: 18px;
+  border-radius: 18px;
+  border: 1px solid var(--sa-line);
+  background: var(--sa-panel-2);
+  overflow: hidden;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  color: var(--sa-text);
+  transition: border-color 0.16s ease, transform 0.16s ease;
+}
+
+.chan:hover { transform: translateY(-2px); }
+
+/* Each channel carries its own cinematic still, licensed from Pexels and
+   served from our own origin. Held well back -- the card is a control, so the
+   image sets the subject and the text stays the thing you read. */
+.chan::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: var(--chan-art, none);
+  background-size: cover;
+  background-position: center;
+  filter: saturate(0.85) brightness(0.62);
+  transition: transform 0.4s ease, filter 0.3s ease;
+}
+
+.chan:hover::before { transform: scale(1.04); filter: saturate(0.95) brightness(0.72); }
+
+/* Two stops rather than one: the top veil keeps the glyph legible, the
+   bottom wall carries the title and blurb at full contrast. */
+.chan::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(4, 7, 11, 0.55) 0%, rgba(4, 7, 11, 0.15) 34%,
+      rgba(4, 7, 11, 0.86) 74%, rgba(4, 7, 11, 0.96) 100%);
+}
+
+.chan > * { position: relative; z-index: 1; }
+
+.chan-icon {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: rgba(6, 10, 14, 0.68);
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  margin-bottom: 12px;
+  font-size: 19px;
+}
+
+.chan h3 {
+  font-family: var(--sa-display);
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 4px;
+  color: #fff;
+}
+
+.chan p { font-size: 12.5px; color: #B4BECB; margin: 0; line-height: 1.45; }
+
+.chan.is-on { border-color: var(--sa-violet); box-shadow: 0 0 0 1px var(--sa-violet); }
+
+.chan-check {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--sa-violet);
+  color: #fff;
+}
+
+/* ── credit plans ────────────────────────────────────────────── */
+
+.plan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(272px, 1fr));
+  gap: 18px;
+  align-items: start;
+}
+
+.plan {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 26px 24px;
+  border-radius: 20px;
+  background: var(--sa-panel);
+  border: 1px solid var(--sa-line);
+}
+
+/* One plan is recommended, so exactly one card is lifted. Lifting two would
+   be lifting neither. */
+.plan.is-featured {
+  border-color: var(--sa-accent-line);
+  background:
+    radial-gradient(120% 90% at 50% 0%, rgba(20, 224, 140, 0.09), transparent 60%),
+    var(--sa-panel);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.4);
+}
+
+.plan-flag {
+  position: absolute;
+  top: -11px;
+  left: 24px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  background: var(--sa-accent);
+  color: #04120C;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.plan h3 {
+  font-family: var(--sa-display);
+  font-size: 17px;
+  font-weight: 720;
+  margin: 0 0 6px;
+  color: #fff;
+}
+
+.plan-blurb { font-size: 13px; color: var(--sa-dim); margin: 0 0 20px; line-height: 1.55; min-height: 40px; }
+
+.plan-price {
+  font-family: var(--sa-display);
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: #fff;
+  margin: 0;
+  line-height: 1;
+}
+
+.plan-price span { font-size: 14px; font-weight: 500; color: var(--sa-faint); letter-spacing: 0; }
+
+.plan-credits {
+  font-size: 13px;
+  color: var(--sa-accent);
+  font-weight: 600;
+  margin: 10px 0 20px;
+}
+
+.plan-features { list-style: none; padding: 0; margin: 0 0 24px; flex: 1; }
+
+.plan-features li {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 13px;
+  color: var(--sa-dim);
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
+.plan-features svg { color: var(--sa-accent); flex: none; margin-top: 2px; }
+
+/* ── destination tiles ───────────────────────────────────────── */
+
+/*
+ * What the sidebar used to hold. A tile carries a count or a line of
+ * explanation, which is exactly what a nav row could not, and why moving
+ * these here made the product easier to read rather than just shorter.
+ */
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(216px, 1fr));
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.tile {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 16px;
+  min-height: 76px;
+  border-radius: 15px;
+  background: var(--sa-panel);
+  border: 1px solid var(--sa-line);
+  text-decoration: none;
+  color: var(--sa-text);
+  overflow: hidden;
+  transition: border-color 0.16s ease, transform 0.16s ease;
+}
+
+.tile:hover { transform: translateY(-1px); border-color: var(--sa-line-strong); }
+
+.tile-icon {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: 12px;
+  background: var(--sa-violet-soft);
+  color: #A98CFF;
+}
+
+.tile-body { position: relative; z-index: 1; min-width: 0; }
+
+.tile-body strong {
+  display: block;
+  font-family: var(--sa-display);
+  font-size: 14.5px;
+  font-weight: 660;
+  color: #fff;
+}
+
+.tile-body small {
+  display: block;
+  font-size: 12px;
+  color: var(--sa-dim);
+  margin-top: 3px;
+}
+
+/* A channel tile carries its own still, held further back than the picker
+   card because this one is a link in a list, not the choice itself. */
+.tile-art { min-height: 96px; align-items: flex-end; }
+
+.tile-art::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: var(--tile-art, none);
+  background-size: cover;
+  background-position: center;
+  filter: saturate(0.8) brightness(0.5);
+  transition: transform 0.4s ease;
+}
+
+.tile-art:hover::before { transform: scale(1.05); }
+
+.tile-art::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(4, 7, 11, 0.35) 0%, rgba(4, 7, 11, 0.9) 78%);
+}
+
+/* ── form ────────────────────────────────────────────────────── */
+
+.field { margin-bottom: 18px; }
+
+.field label,
+.opt-label {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 620;
+  color: var(--sa-text);
+  margin-bottom: 9px;
+  font-family: var(--sa-display);
+}
+
+.field input,
+.field select {
+  width: 100%;
+  height: 56px;
+  padding: 0 18px;
+  border-radius: 14px;
+  background: var(--sa-panel);
+  border: 1px solid var(--sa-line);
+  color: var(--sa-text);
+  font-size: 15px;
+  font-family: inherit;
+  transition: border-color 0.15s ease;
+}
+
+.field input::placeholder { color: var(--sa-faint); }
+
+.field input:focus,
+.field select:focus {
+  outline: none;
+  border-color: var(--sa-accent-line);
+  box-shadow: 0 0 0 3px var(--sa-accent-soft);
+}
+
+.field-count {
+  display: block;
+  text-align: right;
+  font-size: 12px;
+  color: var(--sa-faint);
+  margin-top: 7px;
+}
+
+/* Segmented control (script language). */
+.opt-group { margin-bottom: 20px; }
+
+.seg {
+  display: inline-flex;
+  padding: 5px;
+  gap: 5px;
+  border-radius: 14px;
+  background: var(--sa-panel);
+  border: 1px solid var(--sa-line);
+}
+
+.seg-item {
+  padding: 10px 26px;
+  border-radius: 10px;
+  background: none;
+  border: 0;
+  color: var(--sa-dim);
+  cursor: pointer;
+  font-family: inherit;
+  text-align: center;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.seg-item:hover:not(:disabled) { color: var(--sa-text); }
+
+.seg-on {
+  background: linear-gradient(100deg, #6B4BFF, #8A6BFF);
+  color: #fff;
+  box-shadow: 0 6px 16px rgba(107, 75, 255, 0.3);
+}
+
+.seg-native { display: block; font-size: 14.5px; font-weight: 640; }
+.seg-sub { display: block; font-size: 11.5px; opacity: 0.8; margin-top: 2px; }
+.opt-hint { font-size: 12.5px; color: var(--sa-faint); margin: 9px 0 0; line-height: 1.5; }
+
+/* ── buttons ─────────────────────────────────────────────────── */
+
+.btn-primary {
+  width: 100%;
+  height: 52px;
+  padding: 0 22px;
+  border-radius: 13px;
+  border: 0;
+  background: var(--sa-accent);
+  color: #04120C;
+  font-size: 15px;
+  font-weight: 680;
+  font-family: var(--sa-display);
+  cursor: pointer;
+  transition: filter 0.15s ease, transform 0.06s ease;
+}
+
+.btn-primary:hover:not(:disabled) { filter: brightness(1.07); }
+.btn-primary:active:not(:disabled) { transform: translateY(1px); }
+.btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* The one place the two signals meet: verified sources on the left, the
+   generated video on the right, and pressing it is the crossing. Nothing
+   else on the page uses this gradient. */
+.btn-generate {
+  width: 100%;
+  height: 66px;
+  border: 0;
+  border-radius: 16px;
+  background: linear-gradient(90deg, #6B4BFF 0%, #4C8CFF 46%, #14E08C 100%);
+  color: #04120C;
+  font-family: var(--sa-display);
+  font-size: 17px;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  box-shadow: 0 14px 40px rgba(76, 140, 255, 0.26);
+  transition: filter 0.15s ease, transform 0.08s ease;
+}
+
+.btn-generate:hover:not(:disabled) { filter: brightness(1.06); }
+.btn-generate:active:not(:disabled) { transform: translateY(1px); }
+.btn-generate:disabled { opacity: 0.42; cursor: not-allowed; box-shadow: none; }
+
+.btn-ghost {
+  width: 100%;
+  height: 46px;
+  padding: 0 18px;
+  border-radius: 12px;
+  background: var(--sa-panel-2);
+  border: 1px solid var(--sa-line);
+  color: var(--sa-text);
+  font-size: 14px;
+  font-weight: 560;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.btn-ghost:hover { background: #18202A; border-color: var(--sa-line-strong); }
+
+/* ── generation progress ─────────────────────────────────────── */
+
+/*
+ * A run takes minutes, so this screen is mostly seen on the way back to it.
+ * The percentage is therefore the headline and everything else supports it:
+ * which stage is running, and the shape of what is left.
+ */
+.progress-card {
+  margin-top: 20px;
+  padding: 24px;
+  border-radius: 18px;
+  background:
+    radial-gradient(110% 130% at 0% 0%, rgba(107, 75, 255, 0.10), transparent 58%),
+    var(--sa-panel);
+  border: 1px solid var(--sa-violet-line);
+}
+
+.progress-card.is-done {
+  background:
+    radial-gradient(110% 130% at 0% 0%, rgba(20, 224, 140, 0.10), transparent 58%),
+    var(--sa-panel);
+  border-color: var(--sa-accent-line);
+}
+
+.progress-card.is-error { border-color: rgba(255, 90, 90, 0.34); }
+
+.progress-top { display: flex; align-items: center; gap: 20px; }
+
+/* The ring is the number's frame -- a conic sweep driven by --pct, so it
+   moves with the value rather than being a decorative circle. */
+.progress-ring {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 92px;
+  height: 92px;
+  flex: none;
+  border-radius: 50%;
+  background:
+    conic-gradient(
+      var(--sa-violet) calc(var(--pct, 0) * 1%),
+      rgba(255, 255, 255, 0.07) 0
+    );
+  transition: background 0.5s ease;
+}
+
+.progress-card.is-done .progress-ring {
+  background: conic-gradient(var(--sa-accent) 100%, var(--sa-accent) 0);
+}
+
+.progress-ring::after {
+  content: "";
+  position: absolute;
+  inset: 7px;
+  border-radius: 50%;
+  background: var(--sa-panel);
+}
+
+.progress-ring span {
+  position: relative;
+  z-index: 1;
+  font-family: var(--sa-display);
+  font-size: 26px;
+  font-weight: 780;
+  letter-spacing: -0.03em;
+  color: #fff;
+}
+
+.progress-ring span i { font-style: normal; font-size: 13px; opacity: 0.6; margin-left: 1px; }
+
+.progress-meta { min-width: 0; }
+
+.progress-meta h3 {
+  font-family: var(--sa-display);
+  font-size: 19px;
+  font-weight: 720;
+  letter-spacing: -0.02em;
+  margin: 10px 0 4px;
+  color: #fff;
+}
+
+.progress-meta p {
+  font-size: 13.5px;
+  color: var(--sa-dim);
+  margin: 0;
+  line-height: 1.55;
+}
+
+/* The stage list. Done, running, and still to come are three states, and the
+   dot carries the difference so the labels stay quiet. */
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--sa-faint);
+}
+
+.step-dot {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--sa-line);
+  color: #04120C;
+}
+
+.step-dot i {
+  display: block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--sa-faint);
+}
+
+.step.is-done { color: var(--sa-dim); }
+.step.is-done .step-dot { background: var(--sa-accent); border-color: var(--sa-accent); }
+
+.step.is-now { color: #fff; font-weight: 600; }
+.step.is-now .step-dot { background: var(--sa-violet); border-color: var(--sa-violet); }
+.step.is-now .step-dot i { background: #fff; animation: step-pulse 1.4s ease-in-out infinite; }
+
+@keyframes step-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+
+@media (max-width: 560px) {
+  .progress-top { flex-direction: column; align-items: flex-start; gap: 14px; }
+}
+
+/* ── assurance strip ─────────────────────────────────────────── */
+
+.assure {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 22px;
+  margin-top: 34px;
+  padding-top: 28px;
+  border-top: 1px solid var(--sa-line);
+}
+
+.assure-item { display: flex; align-items: center; gap: 12px; }
+
+.assure-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  flex: none;
+  border-radius: 12px;
+  background: var(--sa-accent-soft);
+  color: var(--sa-accent);
+}
+
+.assure-item h4 {
+  font-family: var(--sa-display);
+  font-size: 13.5px;
+  font-weight: 660;
+  margin: 0 0 2px;
+  color: var(--sa-text);
+}
+
+.assure-item p { font-size: 12px; color: var(--sa-faint); margin: 0; }
+
+/* ── the signature: a handwritten aside ──────────────────────── */
+
+/*
+ * The one non-systematic mark on the page. Everything else here is
+ * rectangles and grid; this is a human hand saying what the product is for,
+ * pinned to the top-right of the create screen where a designer would
+ * scribble it on a comp. It appears exactly once.
+ */
+.scribble {
+  position: absolute;
+  top: 8px;
+  right: 0;
+  text-align: center;
+  transform: rotate(-6deg);
+  pointer-events: none;
+  user-select: none;
+}
+
+.scribble span {
+  display: block;
+  font-family: var(--sa-script);
+  font-size: 30px;
+  line-height: 1.02;
+  color: #C9D2DD;
+}
+
+.scribble svg { display: block; margin: 4px auto 0; color: var(--sa-accent); }
+
+.create-head { position: relative; }
+
+@media (max-width: 1100px) { .scribble { display: none; } }
+
+/* ── auth ────────────────────────────────────────────────────── */
+
+.auth-shell {
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr;
+  min-height: 100vh;
+  background: var(--sa-bg);
+}
+
+.auth-aside {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 40px 48px;
+  overflow: hidden;
+  background:
+    radial-gradient(90% 70% at 12% 8%, rgba(20, 224, 140, 0.10), transparent 62%),
+    radial-gradient(80% 60% at 88% 92%, rgba(122, 92, 255, 0.12), transparent 60%),
+    #070B0F;
+}
+
+.auth-aside::after {
+  /* A faint corner sweep, so the panel is not a flat rectangle. */
+  content: "";
+  position: absolute;
+  right: -10%;
+  bottom: -30%;
+  width: 70%;
+  height: 90%;
+  border-radius: 50%;
+  border: 1px solid rgba(20, 224, 140, 0.14);
+  pointer-events: none;
+}
+
+.auth-pitch { position: relative; z-index: 1; max-width: 560px; }
+
+.auth-pitch h2 {
+  font-family: var(--sa-display);
+  font-size: clamp(38px, 4.4vw, 58px);
+  font-weight: 800;
+  line-height: 1.04;
+  letter-spacing: -0.035em;
+  margin: 0 0 16px;
+  color: #fff;
+}
+
+.auth-pitch h2 .hl { color: var(--sa-accent); }
+.auth-pitch p { font-size: 15.5px; color: var(--sa-dim); margin: 0; line-height: 1.6; max-width: 460px; }
+
+/* The four capabilities, as a row of labelled marks. */
+.auth-points {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 20px;
+  list-style: none;
+  padding: 0;
+  margin: 30px 0 0;
+  position: relative;
+  z-index: 1;
+}
+
+.auth-points li { display: flex; align-items: flex-start; gap: 11px; }
+
+.auth-points .pt-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex: none;
+  border-radius: 11px;
+  background: var(--sa-accent-soft);
+  color: var(--sa-accent);
+}
+
+.auth-points strong {
+  display: block;
+  font-family: var(--sa-display);
+  font-size: 13.5px;
+  font-weight: 660;
+  color: var(--sa-text);
+}
+
+.auth-points small { display: block; font-size: 12px; color: var(--sa-faint); margin-top: 2px; }
+
+/* The collage: overlapping stills with a play control, standing in for the
+   videos this product makes. Built from gradients, so it costs no requests. */
+.auth-reel {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  grid-auto-rows: 62px;
+  gap: 10px;
+  margin: 34px 0;
+  max-width: 620px;
+}
+
+.auth-reel i {
+  display: block;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: var(--tile, linear-gradient(150deg, #16202B, #0A0F14));
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.4);
+}
+
+.auth-reel .tile-lead {
+  grid-column: span 3;
+  grid-row: span 3;
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.auth-reel .tile-lead::after {
+  content: "";
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  background:
+    conic-gradient(from -30deg at 56% 50%, rgba(255, 255, 255, 0.95) 0 0) content-box;
+  clip-path: polygon(38% 28%, 38% 72%, 74% 50%);
+  background-color: rgba(255, 255, 255, 0.95);
+  border: 0;
+}
+
+.auth-reel .tile-tall { grid-column: span 2; grid-row: span 2; }
+.auth-reel .tile-wide { grid-column: span 3; grid-row: span 2; }
+.auth-reel .tile-sm { grid-column: span 1; grid-row: span 1; }
+
+.auth-main { display: grid; place-items: center; padding: 40px 44px; }
+
+.auth-card {
+  width: 100%;
+  max-width: 452px;
+  padding: 40px 38px;
+  border-radius: 22px;
+  background: var(--sa-panel);
+  border: 1px solid var(--sa-line);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45);
+}
+
+.auth-card .brand { justify-content: center; margin-bottom: 26px; }
+
+.auth-card h1 {
+  font-family: var(--sa-display);
+  font-size: 28px;
+  font-weight: 780;
+  letter-spacing: -0.025em;
+  text-align: center;
+  margin: 0 0 7px;
+  color: #fff;
+}
+
+.auth-card .auth-sub {
+  text-align: center;
+  color: var(--sa-dim);
+  font-size: 14px;
+  margin: 0 0 26px;
+}
+
+/* Inputs on the auth card carry a leading mark, as in the reference. */
+.field-icon { position: relative; }
+
+.field-icon svg {
+  position: absolute;
+  left: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--sa-faint);
+  pointer-events: none;
+}
+
+.field-icon input { padding-left: 46px; }
+
+.field-reveal {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: none;
+  color: var(--sa-faint);
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.field-reveal:hover { color: var(--sa-dim); }
+
+.auth-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -4px 0 20px;
+}
+
+.auth-remember {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13.5px;
+  color: var(--sa-dim);
+  cursor: pointer;
+}
+
+.auth-remember input { accent-color: var(--sa-accent); width: 17px; height: 17px; }
+
+.auth-row a { color: var(--sa-accent); font-size: 13.5px; text-decoration: none; font-weight: 560; }
+.auth-row a:hover { text-decoration: underline; }
+
+.auth-divider { margin: 22px 0; color: var(--sa-faint); font-size: 11.5px; letter-spacing: 0.08em; }
+.auth-divider::before, .auth-divider::after { background: var(--sa-line); }
+
+.btn-google {
+  background: var(--sa-panel-2);
+  border-color: var(--sa-line);
+  height: 52px;
+  border-radius: 13px;
+  font-family: var(--sa-display);
+  font-weight: 600;
+}
+
+.btn-google:hover:not(:disabled) { background: #18202A; border-color: var(--sa-line-strong); }
+
+.auth-alt { text-align: center; font-size: 13.5px; color: var(--sa-dim); margin: 22px 0 0; }
+.auth-alt a { color: var(--sa-accent); text-decoration: none; font-weight: 640; }
+.auth-alt a:hover { text-decoration: underline; }
+
+.auth-legal { border-color: var(--sa-line); }
+
+@media (max-width: 980px) {
+  .auth-shell { grid-template-columns: 1fr; }
+  .auth-aside { display: none; }
+  .auth-main { padding: 28px 20px; }
+}
+
+/* ── panels, cards and states elsewhere in the product ───────── */
+
+.stat {
+  background: var(--sa-panel);
+  border: 1px solid var(--sa-line);
+  border-radius: 18px;
+  padding: 20px;
+}
+
+.stat .k { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--sa-faint); }
+.stat .v { font-family: var(--sa-display); font-size: 27px; font-weight: 760; color: #fff; margin-top: 6px; }
+
+.vcard { background: var(--sa-panel); border: 1px solid var(--sa-line); border-radius: 18px; overflow: hidden; }
+.vcard:hover { border-color: var(--sa-line-strong); }
+.vtitle { font-family: var(--sa-display); font-weight: 660; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 560;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--sa-line);
+  color: var(--sa-dim);
+}
+
+.chip-ok { background: var(--sa-accent-soft); border-color: var(--sa-accent-line); color: var(--sa-accent); }
+.chip-run { background: var(--sa-violet-soft); border-color: var(--sa-violet-line); color: #A98CFF; }
+.chip-err { background: rgba(255, 90, 90, 0.12); border-color: rgba(255, 90, 90, 0.34); color: #FF8A8A; }
+
+.bar { height: 7px; border-radius: 999px; background: rgba(255, 255, 255, 0.07); overflow: hidden; }
+.bar span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #6B4BFF, #14E08C); }
+
+.notice { border-radius: 13px; padding: 13px 15px; font-size: 13.5px; line-height: 1.55; }
+.notice-error { background: rgba(255, 90, 90, 0.10); border: 1px solid rgba(255, 90, 90, 0.3); color: #FF9B9B; }
+.notice-ok { background: var(--sa-accent-soft); border: 1px solid var(--sa-accent-line); color: var(--sa-accent); }
+
+.empty { border: 1px dashed var(--sa-line-strong); border-radius: 18px; padding: 46px 26px; text-align: center; }
+.empty h3 { font-family: var(--sa-display); font-weight: 700; color: var(--sa-text); }
+
+@media (max-width: 900px) {
+  .dash { flex-direction: column; }
+  .side { width: 100%; border-right: 0; border-bottom: 1px solid var(--sa-line); }
+  .nav { flex-direction: row; flex-wrap: wrap; }
+  .content { padding: 22px 18px 48px; }
+}

@@ -3,11 +3,12 @@
 import logging
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 import clients
 import prompts
 from core.reviewer import review_gate
+from core.thumbnail_text import draw_headline, is_rtl_text
 from core.utils import Script, ChannelConfig, ThumbnailStrategyConfig
 from settings import ASSETS_DIR
 
@@ -15,6 +16,18 @@ from settings import ASSETS_DIR
 logger = logging.getLogger("video_factory")
 
 THUMBNAIL_SIZE = (1280, 720)
+# Vertical thumbnail for channels that publish 9:16 shorts. A 16:9 thumbnail on
+# a vertical video is the one landscape image in the package, and the final
+# review gate blocks on it: "a landscape thumbnail for a vertical Short-form
+# video". Opt-in per channel so an existing channel's thumbnails are unchanged.
+VERTICAL_THUMBNAIL_SIZE = (1080, 1920)
+
+
+def thumbnail_size(config: ChannelConfig) -> tuple[int, int]:
+    """The thumbnail dimensions this channel publishes at."""
+    if config.style.vertical_thumbnail:
+        return VERTICAL_THUMBNAIL_SIZE
+    return THUMBNAIL_SIZE
 
 
 def _thumbnail_strategy_by_name(
@@ -29,7 +42,15 @@ def _thumbnail_strategy_by_name(
 
 
 def _thumbnail_content_context(script: Script) -> str:
+    """Summarise what the video is about, for the generator and the reviewer.
+
+    Leads with the story's named subjects so the thumbnail shows the right
+    people rather than whichever footballer the model finds most iconic.
+    """
     parts: list[str] = []
+    subjects = _story_subjects(script)
+    if subjects:
+        parts.append("This story is about: " + ", ".join(subjects))
     for section in script.sections:
         titles = [
             str(slot.props["title"])
@@ -39,6 +60,31 @@ def _thumbnail_content_context(script: Script) -> str:
         subject = titles[0] if titles else section.narration.split(".", 1)[0]
         parts.append(f"Section {section.id}: {subject}")
     return "; ".join(parts)
+
+
+def _story_subjects(script: Script) -> list[str]:
+    """Proper nouns the script's own image searches were built around.
+
+    The slot keywords already name the exact players, clubs and events the
+    narration covers, so they are the most reliable statement of who the
+    thumbnail should depict.
+    """
+    seen: list[str] = []
+    for section in script.sections:
+        for slot in section.slots:
+            for token in str(slot.keywords or "").split():
+                cleaned = token.strip(".,!?\"'()")
+                # Proper nouns only, and skip the generic search filler.
+                if len(cleaned) < 3 or not cleaned[0].isupper():
+                    continue
+                if cleaned.lower() in {
+                    "photograph", "photo", "football", "soccer", "premier",
+                    "league", "stadium", "match", "official",
+                }:
+                    continue
+                if cleaned not in seen:
+                    seen.append(cleaned)
+    return seen[:10]
 
 
 def _thumbnail_reference_image(strategy: ThumbnailStrategyConfig) -> Path | None:
@@ -157,6 +203,9 @@ async def _generate_ai_thumbnail(
     reference_instruction: str | None = None,
     revision_notes: str = "",
 ) -> None:
+    # Image models cannot spell right-to-left script, so for those languages
+    # the artwork is generated text-free and the headline composited below.
+    overlay_text = is_rtl_text(thumbnail_text)
     prompt = prompts.thumbnail_generation_prompt(
         title=title,
         thumbnail_text=thumbnail_text,
@@ -166,6 +215,7 @@ async def _generate_ai_thumbnail(
         channel_style=config.style.name,
         image_style_prompt_suffix=config.image_sourcing.style_prompt_suffix,
         revision_notes=revision_notes,
+        text_free=overlay_text,
     )
     if reference_image is not None:
         if not reference_instruction:
@@ -184,7 +234,13 @@ async def _generate_ai_thumbnail(
     if result is None or not output_path.exists():
         raise RuntimeError("Gemini thumbnail generation did not produce an image")
 
+    target_size = thumbnail_size(config)
     img = Image.open(output_path).convert("RGB")
-    if img.size != THUMBNAIL_SIZE:
-        img = img.resize(THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
-        img.save(output_path, "PNG")
+    if img.size != target_size:
+        # Cover-crop rather than squash: a generated 16:9 image stretched into
+        # a 9:16 frame distorts the subject's face.
+        img = ImageOps.fit(img, target_size, method=Image.Resampling.LANCZOS)
+    img.save(output_path, "PNG")
+
+    if overlay_text:
+        draw_headline(output_path, thumbnail_text)

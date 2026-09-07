@@ -40,6 +40,9 @@ Four Gemini vision review gates run at script, image, thumbnail, and final
 review. Failures trigger regeneration with feedback up to a configurable retry
 limit.
 
+For production installs -- runtime versions, Google Cloud APIs, IAM roles,
+environment variables, and the startup command -- see [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ## Prerequisites
 
 - Python 3.11+
@@ -48,7 +51,16 @@ limit.
 - Google Cloud project with Application Default Credentials configured
 - Provider keys:
   - **Serper** — web image search
-  - **Pexels** — stock photo and B-roll sourcing
+  - **Pexels** — stock photo and B-roll sourcing (optional)
+
+Background music and transition SFX are read from `assets/music/*.mp3` and
+`assets/sfx/transitions/*.mp3`, which are gitignored. Generate placeholders so
+a fresh checkout produces a complete mix, then swap in licensed tracks keeping
+the stem names listed in each channel's `video.music_pool`:
+
+```bash
+python tools/make_default_audio_assets.py
+```
 
 ## Setup
 
@@ -155,7 +167,15 @@ video-factory/
 
 **Image sourcing** — Each slot is sourced in parallel from Serper web search, Pexels stock photos, Pexels B-roll, or Gemini image generation depending on the slot type. A vision review gate checks relevance before processing.
 
-**Audio sourcing** — Per-section TTS via Gemini with word-level timestamps from Google Cloud STT. Background music is selected from the channel's music pool.
+Set `image_sourcing.web_photos_only: true` for news and documentary channels.
+Every photographic slot then comes from web image search, AI image generation
+is never used as a fallback, and the script gate allows real people's names in
+narration and search keywords (they are what make the search find the right
+photograph). Slots that still cannot be sourced after a widened-query retry are
+dropped from the section rather than failing the run — a section that loses
+every slot still fails loudly.
+
+**Audio sourcing** — Per-section TTS via Gemini with word-level timestamps from Google Cloud STT. Recognition walks a per-language model ladder (Arabic uses `chirp_2` with the `ar-EG` locale — Speech-to-Text V2 serves no `ar-SA` variant). If no model can transcribe the audio, word timings are derived deterministically from the narration text and the measured section duration, so captions are always produced. Background music is selected from the channel's music pool.
 
 **Process** — OpenCV face detection for smart crop. Resizes all images to target resolution (default 1920×1080).
 
@@ -179,7 +199,7 @@ Each channel is a JSON file in `config/channels/`. Key sections:
 | `video` | Target duration, resolution, FPS, transitions, music pool, B-roll ratio |
 | `video_types` | Listicle, narrative, explainer — pacing, style, and allowed thumbnail strategies |
 | `voice` | TTS voice name, language, voice prompt |
-| `image_sourcing` | Gemini image model and style prompt suffix |
+| `image_sourcing` | Gemini image model, style prompt suffix, and `web_photos_only` |
 | `youtube` | Category, tags, title formats, and description styles |
 | `script_style` | Tone and writing instructions for the scriptwriter |
 | `business_strategy` | Optional: channel goal, content families, CTA rules, and offer ladder |
@@ -195,7 +215,12 @@ Each channel is a JSON file in `config/channels/`. Key sections:
 | `GOOGLE_CLOUD_LOCATION` | Vertex AI region (default: global) |
 | `GOOGLE_STT_LOCATION` | Speech-to-Text region (default: us-central1) |
 | `SERPER_API_KEY` | Web image search |
-| `PEXELS_API_KEY` | Stock photo fallback |
+| `PEXELS_API_KEY` | Stock photo fallback (optional; must be ASCII) |
+| `GEMINI_PRIMARY_MODEL` | Planning/script model (default `gemini-3.1-pro-preview`) |
+| `GEMINI_REVIEW_MODEL` | Vision review model |
+| `GEMINI_TTS_MODEL` | Narration TTS model |
+| `REMOTION_REQUIRE_GPU` | `false` to allow software Chromium rendering |
+| `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` | Optional CA bundle for Speech-to-Text |
 
 ## GCP Services
 

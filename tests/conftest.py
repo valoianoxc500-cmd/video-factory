@@ -47,3 +47,34 @@ def workspace_script(latest_workspace):
     if not script_path.exists():
         pytest.skip("No script.json in workspace")
     return load_script(latest_workspace)
+
+
+@pytest.fixture
+def completed_stages(latest_workspace):
+    """Stages that finished in the latest workspace, from its checkpoint."""
+    checkpoint = latest_workspace / "checkpoint.json"
+    if not checkpoint.exists():
+        return set()
+    try:
+        data = json.loads(checkpoint.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return set()
+    return set(data.get("stages_completed") or [])
+
+
+@pytest.fixture
+def require_stage(latest_workspace, completed_stages):
+    """Skip an invariant test whose stage never ran in this workspace.
+
+    These tests assert against real pipeline output. A run that stopped early
+    (or was aborted) has no artifacts for the later stages, and that failure
+    was already reported when the run itself failed -- re-reporting it as a
+    test failure says nothing about the code under test.
+    """
+    def _require(stage: str) -> None:
+        if stage not in completed_stages:
+            pytest.skip(
+                f"Stage '{stage}' did not complete in {latest_workspace.name}; "
+                f"no output to validate"
+            )
+    return _require

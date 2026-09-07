@@ -858,6 +858,18 @@ def script_revision_prompt(
             - Every slot should include visual_policy.
             - Allowed visual_policy values are source_as_written, photo_backed_info_slide, google_photo_exact_action, literal_google_photo, and single_pose_ai_photo.
             - visual_policy is not the same as visual. Do not output visual_policy values like google_photo, stock_photo, ai_photo, info_slide, or b_roll.
+            - "visual" is a TYPE NAME from the allowed list, never a description.
+              Put the description in "prompt" and the search terms in "keywords".
+              WRONG: {"visual": "Group photo of the hikers in winter gear"}
+              RIGHT: {"visual": "google_photo",
+                      "prompt": "Group photo of the hikers in winter gear",
+                      "keywords": "Dyatlov group expedition photograph"}
+            - Every slot that shows a picture needs BOTH "prompt" and non-empty
+              "keywords" -- google_photo, stock_photo, b_roll, info_card,
+              info_slide, title_card, title_banner, fact_highlight and
+              subscribe_cta alike. Image search is given the keywords, not the
+              prompt; a slot with empty keywords cannot be sourced at all.
+              For subscribe_cta, both describe its background image.
             - Keep enough slots in every revised section so no visual beat stays up too long; if you add narration to a section, add slots too.
         """),
     )

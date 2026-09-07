@@ -12,15 +12,19 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 from core.utils import (
+    REUSED_MEDIA_KEY,
     Script,
     ScriptSection,
     ChannelConfig,
@@ -61,7 +65,7 @@ def _probe_video_duration(path: Path) -> float:
         "-of", "default=noprint_wrappers=1:nokey=1",
         str(path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         logger.warning(f"ffprobe failed for {path.name}, using scheduled duration")
         return 0.0
@@ -94,7 +98,8 @@ _BACKDROP_FIGURE_COMPONENTS = _VS.BACKDROP_FIGURE_TYPES
 def _check_remotion_ready() -> None:
     """Verify Node.js and Remotion project are available."""
     result = subprocess.run(
-        ["node", "--version"], capture_output=True, text=True, shell=_SHELL,
+        ["node", "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+        shell=_SHELL,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -139,7 +144,8 @@ def _stage_static_asset(
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists():
         shutil.copy2(source, destination)
-    return f"{static_prefix}/{target_name.replace('\\', '/')}"
+    normalized_name = target_name.replace(chr(92), chr(47))
+    return f"{static_prefix}/{normalized_name}"
 
 
 def _frame_sequence_pad_length(duration_frames: int) -> int:
@@ -193,7 +199,22 @@ def _parse_remotion_gpu_output(output: str) -> dict[str, str]:
 
 
 def _check_windows_gpu_preflight() -> dict[str, str]:
-    """Ensure Windows section rendering will use a hardware-accelerated Chromium path."""
+    """Report whether Windows section rendering will be hardware accelerated.
+
+    Raises when the Chromium GPU report is missing or shows software
+    rendering, so a silent 10x-slower render is never mistaken for a normal
+    one. Hosts without a usable GPU (headless CI, VMs, remote desktops) opt
+    out with REMOTION_REQUIRE_GPU=false, which downgrades every failure below
+    to a warning and lets the render proceed on the software path.
+    """
+    required = settings.remotion_require_gpu
+
+    def _fail(message: str) -> dict[str, str]:
+        if required:
+            raise RuntimeError(message)
+        logger.warning(f"{message}; continuing with software rendering")
+        return {}
+
     cmd = _build_remotion_gpu_cmd(
         chrome_mode=_WINDOWS_REMOTION_CHROME_MODE,
         gl_backend=_WINDOWS_REMOTION_GL,
@@ -206,30 +227,31 @@ def _check_windows_gpu_preflight() -> dict[str, str]:
         cmd,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=str(REMOTION_DIR),
     )
     combined_output = "\n".join(
         part for part in (result.stdout.strip(), result.stderr.strip()) if part
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            "Windows Remotion GPU preflight failed: "
-            + combined_output[-500:]
+        return _fail(
+            "Windows Remotion GPU preflight failed: " + combined_output[-500:]
         )
 
     statuses = _parse_remotion_gpu_output(combined_output)
     if not statuses:
-        raise RuntimeError(
+        return _fail(
             "Windows Remotion GPU preflight returned no parseable status output"
         )
 
     failures = []
-    for feature, required in _WINDOWS_GPU_REQUIRED_STATUSES.items():
+    for feature, expected in _WINDOWS_GPU_REQUIRED_STATUSES.items():
         actual = statuses.get(feature)
-        if actual != required:
-            failures.append(f"{feature}={actual or 'missing'} (expected {required})")
+        if actual != expected:
+            failures.append(f"{feature}={actual or 'missing'} (expected {expected})")
     if failures:
-        raise RuntimeError(
+        return _fail(
             "Windows Remotion GPU preflight reported software rendering: "
             + "; ".join(failures)
         )
@@ -248,6 +270,66 @@ def _expected_section_clip_duration(
 ) -> float:
     target_duration = section.actual_duration_seconds or section.estimated_duration_seconds
     return target_duration + (xfade_pad_frames / fps)
+
+
+# Marks a beat as re-showing an earlier beat's sourced file. Shared with
+# core.utils so the ready-image validator does not expect a file for it.
+_REUSED_MEDIA_KEY = REUSED_MEDIA_KEY
+
+
+def _reuse_slots_to_hold_the_cap(
+    section: ScriptSection,
+    *,
+    max_seconds: float,
+    crossfade: float,
+) -> None:
+    """Re-show an existing image rather than hold one past the cap.
+
+    A section is planned with enough visual beats, but sourcing can drop some:
+    on a web-photo-only channel a slot no real photograph can satisfy is
+    dropped rather than filled with a wrong or generated image. Lose enough of
+    them and the survivors have to cover the section between them -- a 26.37s
+    section came out of sourcing with four slots and wanted to hold the first
+    for 6.82s against a 5.0s cap.
+
+    Cutting back to an image already used in this section is what a documentary
+    editor does, and it costs nothing: the image is real, it is already through
+    the review gate, and its provenance is already recorded. Nothing new is
+    sourced, invented, or held too long.
+
+    Repeats cycle from the start of the section rather than sitting beside
+    their original, so a subject is returned to later instead of stuttering on
+    consecutive beats.
+    """
+    visible = section.non_overlay_slots
+    if not visible:
+        return
+
+    duration = section.actual_duration_seconds or section.estimated_duration_seconds
+    required = minimum_visual_slots_for_duration(duration, max_seconds, crossfade)
+    if len(visible) >= required:
+        return
+
+    overlays = [s for s in section.slots if s not in visible]
+    expanded = list(visible)
+    source_index = 0
+    while len(expanded) < required:
+        origin = source_index % len(visible)
+        copy = visible[origin].model_copy(deep=True)
+        # The sourced file is named for the beat that fetched it, so the repeat
+        # has to point back at that beat rather than at its own position --
+        # otherwise it looks for a section_003_04.png that was never sourced.
+        copy.props = {**(copy.props or {}), _REUSED_MEDIA_KEY: origin}
+        expanded.append(copy)
+        source_index += 1
+
+    logger.info(
+        f"Section {section.id}: {len(visible)} sourced visual(s) for a "
+        f"{duration:.2f}s section needs {required} beats; re-showing "
+        f"{required - len(visible)} existing image(s) rather than holding one "
+        f"past {max_seconds:.1f}s"
+    )
+    section.slots = expanded + overlays
 
 
 def _validate_max_visual_hold(
@@ -380,6 +462,8 @@ def _build_remotion_render_cmd(
         ])
     else:
         cmd.extend(["--gl", _DEFAULT_REMOTION_GL])
+    if settings.remotion_browser_concurrency > 0:
+        cmd.extend(["--concurrency", str(settings.remotion_browser_concurrency)])
     cmd.extend([
         "--duration", str(duration_frames),
         "--log", "error",
@@ -387,20 +471,139 @@ def _build_remotion_render_cmd(
     return cmd
 
 
-async def _run_remotion_render(cmd: list[str], cwd: Path) -> None:
-    """Run a Remotion CLI command and raise on failure."""
+class RemotionTimeout(RuntimeError):
+    """A section render exceeded its time budget and was killed."""
+
+
+def _kill_process_tree(proc: "asyncio.subprocess.Process") -> None:
+    """End a stalled render and the browser processes it spawned.
+
+    Killing the shell alone leaves headless Chrome running: it is a
+    grandchild, it holds the GPU context, and enough orphans will wedge every
+    later render too. On Windows only taskkill /T walks the tree, so it is
+    used when available and the direct kill is the fallback.
+    """
+    if proc.returncode is not None:
+        return
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=30,
+            )
+            return
+        except Exception as exc:  # fall through to the plain kill
+            logger.debug(f"taskkill failed for pid {proc.pid}: {exc}")
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+
+
+async def _run_remotion_render(
+    cmd: list[str],
+    cwd: Path,
+    *,
+    timeout_seconds: float | None = None,
+    label: str = "section",
+) -> None:
+    """Run a Remotion CLI command, bounded in time, and raise on failure.
+
+    The timeout is the point of this function. Remotion drives headless
+    Chrome, and a wedged renderer does not exit non-zero -- it hangs, and an
+    unbounded `communicate()` hangs with it. A job was found sitting at
+    "Rendering, 85%" for thirty-six minutes with no process left alive to
+    finish it, because nothing here ever gave up.
+    """
+    budget = (
+        settings.remotion_render_timeout_seconds
+        if timeout_seconds is None
+        else timeout_seconds
+    )
     cmd_str = _format_subprocess_cmd(cmd)
     logger.debug(f"Remotion cmd: {cmd_str}")
+
+    started = time.monotonic()
     proc = await asyncio.create_subprocess_shell(
         cmd_str,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=str(cwd),
     )
-    _, stderr = await proc.communicate()
+
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=budget)
+    except asyncio.TimeoutError:
+        _kill_process_tree(proc)
+        # Reap the killed process so it does not linger as a zombie.
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=30)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            pass
+        elapsed = time.monotonic() - started
+        raise RemotionTimeout(
+            f"{label} render exceeded {budget:.0f}s (ran {elapsed:.0f}s) and "
+            f"was killed. Remotion drives headless Chrome; a stalled GPU "
+            f"context or a browser that never started looks exactly like "
+            f"this. Raise REMOTION_RENDER_TIMEOUT_SECONDS if renders are "
+            f"legitimately slower than this on your machine."
+        ) from None
+
     if proc.returncode != 0:
-        stderr_text = stderr.decode(errors="replace") if stderr else ""
-        raise RuntimeError(stderr_text[-500:])
+        stderr_text = (stderr.decode(errors="replace") if stderr else "").strip()
+        # Keep the head as well as the tail: Remotion prints the actual cause
+        # first and a long stack after it, so tail-only truncation threw away
+        # the only useful line.
+        if len(stderr_text) > 1200:
+            stderr_text = (
+                stderr_text[:700] + "\n  … …\n" + stderr_text[-500:]
+            )
+        raise RuntimeError(stderr_text)
+
+    logger.debug(f"{label} render finished in {time.monotonic() - started:.0f}s")
+
+
+def _rmtree_with_retry(path: Path, attempts: int = 5) -> None:
+    """Delete a directory tree, tolerating Windows' delayed handle release.
+
+    A frame sequence is thousands of files that Remotion and FFmpeg have just
+    finished with. On Windows a handle can outlive the process briefly -- the
+    search indexer or an AV scanner also opens them -- and the delete then
+    fails with "[WinError 145] The directory is not empty" even though every
+    entry was removed. Re-rendering a section that already had frames on disk
+    died there, which meant a resumed run could never re-render.
+
+    Read-only files are also cleared: FFmpeg occasionally leaves them, and
+    rmtree cannot remove those on Windows at all.
+    """
+    def _on_error(func, target, _exc):
+        try:
+            os.chmod(target, stat.S_IWRITE)
+            func(target)
+        except OSError:
+            pass
+
+    last: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path, onerror=_on_error)
+            if not path.exists():
+                return
+            last = OSError(f"{path} still present after rmtree")
+        except OSError as exc:
+            last = exc
+        if attempt < attempts - 1:
+            time.sleep(0.25 * (attempt + 1))
+
+    # Out of retries: rendering into a stale directory would mix old frames
+    # into the new clip, so move it aside instead of pressing on.
+    fallback = path.with_name(f"{path.name}.stale-{int(time.time())}")
+    try:
+        path.rename(fallback)
+        logger.warning(f"Could not delete {path.name} ({last}); moved to {fallback.name}")
+    except OSError:
+        raise RuntimeError(f"Could not clear frame directory {path}: {last}") from last
 
 
 def _build_section_encode_cmd(
@@ -445,7 +648,7 @@ def _encode_section_frames(
         sequence_image_format,
     )
     logger.debug(f"Section encode cmd: {_format_subprocess_cmd(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         raise RuntimeError(f"Section encode failed: {result.stderr[-500:]}")
 
@@ -467,7 +670,7 @@ async def _render_remotion_scene(
     if image_sequence:
         frames_dir = output_path.parent / f"{output_path.stem}_frames"
         if frames_dir.exists():
-            shutil.rmtree(frames_dir)
+            _rmtree_with_retry(frames_dir)
         render_target = frames_dir
     else:
         frames_dir = None
@@ -486,12 +689,38 @@ async def _render_remotion_scene(
         sequence_jpeg_quality=sequence_jpeg_quality,
     )
 
-    try:
-        await _run_remotion_render(cmd, REMOTION_DIR)
-    except RuntimeError as exc:
-        raise RuntimeError(
-            f"Remotion render failed for {component}: {str(exc)[-500:]}"
-        ) from exc
+    # Retry the section rather than lose the run. A hang or a browser that
+    # failed to start is usually transient; a genuine composition error fails
+    # the same way every time, so a real fault still surfaces after the last
+    # attempt with its own message intact.
+    attempts = max(1, int(settings.remotion_render_attempts))
+    for attempt in range(1, attempts + 1):
+        try:
+            await _run_remotion_render(
+                cmd, REMOTION_DIR, label=f"{component} (attempt {attempt}/{attempts})"
+            )
+            break
+        except RemotionTimeout as exc:
+            logger.warning(f"{exc}")
+            if attempt == attempts:
+                raise RuntimeError(
+                    f"Remotion render timed out for {component} after "
+                    f"{attempts} attempt(s): {exc}"
+                ) from exc
+            # A wedged Chrome can leave the frame directory half-written;
+            # clearing it stops the retry mixing old frames with new.
+            if frames_dir is not None and frames_dir.exists():
+                _rmtree_with_retry(frames_dir)
+            backoff = min(30.0, 5.0 * attempt)
+            logger.info(
+                f"retrying {component} in {backoff:.0f}s "
+                f"(attempt {attempt + 1}/{attempts})"
+            )
+            await asyncio.sleep(backoff)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Remotion render failed for {component}: {str(exc)[-500:]}"
+            ) from exc
 
     if frames_dir is not None:
         _encode_section_frames(
@@ -567,6 +796,45 @@ def _image_motion_profile(section_id: int, sub_idx: int) -> tuple[str, str]:
     slot_hash = hash((section_id, sub_idx))
     return PRESETS[slot_hash % len(PRESETS)], DIRECTIONS[slot_hash % len(DIRECTIONS)]
 
+# Prop-name variants models reach for instead of the documented "text".
+_TEXT_PROP_ALIASES = ("main_text", "body", "content", "body_text", "description")
+
+
+def _normalize_component_props(
+    slot: _VS,
+    props: dict,
+    section_id: int,
+    sub_idx: int,
+) -> dict:
+    """Fill in the props a component requires but the script may have named differently.
+
+    InfoCard/InfoSlide call text.split(); a missing "text" throws inside
+    Remotion and fails the whole section render, not just the slot.
+    """
+    if slot.visual not in {"info_card", "info_slide"}:
+        return props
+
+    if not str(props.get("text") or "").strip():
+        for alias in _TEXT_PROP_ALIASES:
+            value = str(props.get(alias) or "").strip()
+            if value:
+                logger.warning(
+                    f"s{section_id}.{sub_idx + 1} {slot.visual}: props.{alias} "
+                    f"used instead of the documented props.text; remapping"
+                )
+                props["text"] = value
+                break
+        else:
+            fallback = str(props.get("title") or slot.prompt or "").strip()
+            logger.warning(
+                f"s{section_id}.{sub_idx + 1} {slot.visual}: no props.text; "
+                f"falling back to {'title' if props.get('title') else 'slot prompt'}"
+            )
+            props["text"] = fallback
+
+    return props
+
+
 def _build_slot(
     slot,
     sub_idx: int,
@@ -579,17 +847,25 @@ def _build_slot(
     config: ChannelConfig,
     section_id: int,
     static_prefix: str = "_sections",
+    media_idx: int | None = None,
 ) -> dict | None:
     """Build a single slot dict for the SectionComposition props.
 
     Returns None if no media is available for this sub-slot.
+
+    `media_idx` is the beat whose sourced file this slot shows, which is the
+    slot's own index except when the beat is a re-show of an earlier image (see
+    `_reuse_slots_to_hold_the_cap`). Timing still follows `sub_idx`; only the
+    filename follows `media_idx`.
     """
-    file_label = f"section_{section_id:03d}_{sub_idx + 1:02d}"
+    file_label = f"section_{section_id:03d}_{(sub_idx if media_idx is None else media_idx) + 1:02d}"
     component = _VISUAL_TO_COMPONENT.get(slot.visual)
 
     # 1. Component slots (charts, cards, slides) — rendered inline by Remotion
     if slot.visual in _VS.COMPONENT_TYPES:
-        props = dict(slot.props)
+        props = _normalize_component_props(
+            slot, dict(slot.props), section_id, sub_idx
+        )
 
         if slot.visual in _BACKDROP_FIGURE_COMPONENTS:
             img_path = None
@@ -831,6 +1107,12 @@ def _build_section_composition_entry(
     rd = config.rendering_defaults
     intra_crossfade = rd.intra_slot_crossfade
 
+    _reuse_slots_to_hold_the_cap(
+        section,
+        max_seconds=rd.max_visual_hold_seconds,
+        crossfade=intra_crossfade,
+    )
+
     num_slots = section.sub_slot_count
     sub_durations = compute_sub_durations(
         section,
@@ -867,6 +1149,7 @@ def _build_section_composition_entry(
             config,
             section_id=section.id,
             static_prefix=static_prefix,
+            media_idx=(visual_slot.props or {}).get(_REUSED_MEDIA_KEY),
         )
         if built:
             slots.append(built)
@@ -1128,3 +1411,4 @@ async def render_sections(
         )
 
     return {"rendered": len(results), "failed": 0, "details": results}
+

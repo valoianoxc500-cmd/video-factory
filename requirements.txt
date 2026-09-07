@@ -5,12 +5,15 @@ google-cloud-bigquery>=3.27
 
 # Video & Image Processing
 Pillow>=11.0
+arabic-reshaper>=3.0
+python-bidi>=0.4
 opencv-python>=4.10
 numpy>=2.0
 
 # HTTP & Async
 httpx>=0.27
 aiofiles>=24.0
+truststore>=0.10
 
 # CLI & Output
 click>=8.1

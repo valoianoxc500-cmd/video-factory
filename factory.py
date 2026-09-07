@@ -12,10 +12,12 @@ Usage:
 import asyncio
 import json
 import logging
+import os
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import click
 from rich.console import Console
@@ -116,6 +118,31 @@ def _review_log_entry(
     return entry
 
 
+# Hex highlights the reviewer can be asked about by name. A vision model judges
+# "red" far more reliably than "#E23B3B", so the name leads and the hex backs it
+# up. Anything unlisted is described by hex alone rather than guessed at.
+_HIGHLIGHT_COLOUR_NAMES = {
+    "#ffe500": "yellow",
+    "#ffd23f": "yellow",
+    "#ffff00": "yellow",
+    "#e23b3b": "red",
+    "#ff0000": "red",
+    "#ff6b35": "orange",
+    "#00d4ff": "cyan",
+}
+
+
+def _caption_highlight_name(config: ChannelConfig) -> str:
+    """Describe this channel's active-word highlight for the review gate."""
+    raw = str(
+        (config.style.subtitle_highlight or {}).get("color", "")
+    ).strip().lower()
+    if not raw:
+        return "yellow"
+    name = _HIGHLIGHT_COLOUR_NAMES.get(raw)
+    return f"{name} ({raw})" if name else raw
+
+
 def _parse_allowed_review_failures(raw: str | None) -> set[str]:
     if not raw:
         return set()
@@ -180,6 +207,7 @@ async def run_pipeline(
     workspace_path: Path | None = None,
     preview_remotion: bool = False,
     allow_review_failures: set[str] | None = None,
+    language: str | None = None,
 ) -> None:
     """Run the full video factory pipeline."""
     logger = setup_logging(channel_slug)
@@ -187,8 +215,14 @@ async def run_pipeline(
     if preview_remotion:
         allowed_review_failures.update({"script_review", "image_review"})
 
-    config = load_channel_config(channel_slug, overrides=overrides)
-    logger.info(f"Channel: {config.channel_name}")
+    # A language variant swaps the narration language, the voice and the
+    # script instructions together; they cannot move independently.
+    config = load_channel_config(
+        channel_slug, overrides=overrides, language=language
+    )
+    logger.info(
+        f"Channel: {config.channel_name} (script language: {config.language})"
+    )
 
     # Explicit workspace path overrides all auto-detection
     if workspace_path:
@@ -356,15 +390,103 @@ async def run_pipeline(
 
         override_type = (plan_overrides or {}).get("video_type")
         override_content_family = (plan_overrides or {}).get("content_family")
+        override_topic = (plan_overrides or {}).get("topic")
         with costs.bound_context(stage="planning"):
             plan = await plan_video(
                 config,
                 channel_slug,
                 override_type=override_type,
                 override_content_family=override_content_family,
+                override_topic=override_topic,
             )
         checkpoint.topic = plan["topic"]
         checkpoint.video_type = plan["video_type"]
+
+        # Establish what is actually true about the topic right now. The
+        # scripter already consumes plan["research_context"]; without this it
+        # writes from training data and can describe a completed transfer as a
+        # possible one.
+        from core.researcher import research_topic, save_research
+        with costs.bound_context(stage="planning"):
+            research = await research_topic(
+                topic=plan["topic"],
+                angle=plan.get("angle", ""),
+                config=config,
+            )
+        # Match Analysis engines anchor the script to a verified scoreline and
+        # event timeline before the general brief. Gated on the channel
+        # declaring match_footage, so engines without it -- Football News --
+        # never reach this and are unaffected.
+        match_brief = ""
+        if getattr(config, "match_footage", None) and config.match_footage.get(
+            "enabled"
+        ):
+            from core.match_data import fetch_match_facts, research_brief
+
+            with costs.bound_context(stage="planning"):
+                facts = await fetch_match_facts(plan["topic"])
+            match_brief = research_brief(facts)
+            plan["match_facts"] = {
+                "identified": facts.identified,
+                "label": facts.label,
+                "provider": facts.provider,
+                "note": facts.note,
+                "moments": [
+                    {"label": m.label, "minute": m.minute, "description": m.description}
+                    for m in facts.to_moments()
+                ],
+            }
+            logger.info(
+                f"match analysis: "
+                f"{facts.label or 'unidentified'} "
+                f"({len(facts.major_events())} major event(s))"
+            )
+
+        # Engine sub-mode. Horror uses it to decide how truth is handled --
+        # a true case is sourced and claim-tagged, folklore is attributed,
+        # fiction is never dressed as documentary. Engines that do not set
+        # plan.story_type (Football News) get an empty prefix and are
+        # unaffected.
+        story_type = str(plan.get("story_type") or "").strip()
+        story_directive = (
+            f"STORY TYPE: {story_type}\n"
+            "Follow the story-type rules in the channel's script instructions "
+            "exactly. Do not present fiction, folklore or an unverified claim "
+            "as an established fact.\n"
+            if story_type
+            else ""
+        )
+
+        if research.get("brief"):
+            plan["research_context"] = (
+                story_directive
+                + (f"{match_brief}\n\n" if match_brief else "")
+                + research["brief"]
+            )
+            plan["research_entities"] = research.get("key_entities", [])
+            save_research(ws, research)
+        else:
+            # No verified brief. Silence here is dangerous: the model fills the
+            # gap from training data and states old or invented transfers as
+            # today's news, which is exactly the failure research exists to
+            # prevent. Say so explicitly instead.
+            plan["research_context"] = story_directive + (
+                "NO VERIFIED CURRENT INFORMATION IS AVAILABLE for this topic.\n"
+                "You therefore MUST NOT state any specific recent transfer, "
+                "scoreline, injury, appointment or sacking as fact, and MUST NOT "
+                "present anything as breaking news, 'today', or 'the latest'.\n"
+                "Write the video as durable background instead: established "
+                "history, rules, and long-settled facts about the subject that do "
+                "not depend on this week's events. Prefer facts that were already "
+                "true a year ago and will still be true next year."
+            )
+            plan["research_entities"] = []
+            if research.get("rejected_reason"):
+                logger.warning(
+                    f"Scripting without a verified brief: "
+                    f"{research['rejected_reason']}"
+                )
+
         (ws / "plan.json").write_text(
             json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -416,6 +538,82 @@ async def run_pipeline(
             return
     else:
         script = load_script(ws)
+
+    # Match footage, before media sourcing so that a slot backed by an
+    # authorized clip is skipped by the image sourcer rather than sourced
+    # twice. Gated on the channel declaring match_footage, so Football News
+    # never reaches it. Every failure inside leaves the slot without a clip,
+    # which the photo pipeline then covers.
+    if (
+        should_run("image_source")
+        and getattr(config, "match_footage", None)
+        and config.match_footage.enabled
+    ):
+        # Imported before the try so the handler below can name it even if the
+        # rest of the stage fails to import.
+        from core.footage_stage import FootageAnalysisError
+
+        try:
+            from core.footage import MatchMoment
+            from core.footage_stage import analysis_gate, build_match_clips
+
+            moments = [
+                MatchMoment(
+                    label=m.get("label", ""),
+                    minute=int(m.get("minute", 0)),
+                    description=m.get("description", ""),
+                )
+                for m in (plan.get("match_facts", {}) or {}).get("moments", [])
+            ]
+            # MATCH_FOOTAGE_DIR wins over the channel config so an operator
+            # can point a run at a folder without editing JSON.
+            footage_dir_raw = (
+                os.environ.get("MATCH_FOOTAGE_DIR", "").strip()
+                or (config.match_footage.footage_dir or "").strip()
+            )
+            footage_path = Path(footage_dir_raw) if footage_dir_raw else None
+            # Supplied footage must analyse successfully before the run
+            # continues. Building a video around a guessed timestamp is worse
+            # than stopping, so this raises rather than degrading.
+            gate_ok, gate_reason = analysis_gate(footage_path)
+            logger.info(f"clip analysis gate: {gate_reason}")
+            if not gate_ok:
+                # Deliberately not swallowed by the handler below: the run is
+                # supposed to stop when supplied footage cannot be analysed,
+                # rather than quietly producing a photo video the operator did
+                # not ask for.
+                raise FootageAnalysisError(
+                    f"match footage was supplied but no event could be "
+                    f"identified in it ({gate_reason}). Declare the timestamp "
+                    f"in a sidecar (event_offset_seconds) or enable the vision "
+                    f"provider with CLIP_ANALYSIS_VISION=1."
+                )
+
+            placements = build_match_clips(
+                workspace=ws,
+                script=script,
+                moments=moments,
+                footage_dir=footage_path,
+                allow_licensed_stock=config.match_footage.allow_licensed_stock,
+                target_size=tuple(config.video.resolution),
+                fps=config.video.fps,
+            )
+            if placements:
+                console.print(
+                    Panel(
+                        f"Match footage: {len(placements)} moment clip(s) cut "
+                        f"from authorized footage",
+                        style="bold cyan",
+                    )
+                )
+        except FootageAnalysisError:
+            raise
+        except Exception as exc:
+            # Footage is an enhancement. Losing it must never cost the run.
+            logger.warning(
+                f"match footage stage failed ({exc}); continuing with the "
+                f"photo pipeline"
+            )
 
     run_images = should_run("image_source")
     run_audio = should_run("audio_source")
@@ -549,8 +747,20 @@ async def run_pipeline(
         from core.thumbnailer import create_thumbnail
 
         async def _run_thumbnail_task():
+            # The thumbnail runs concurrently with section rendering. If this
+            # task raises while the render is still in flight, the failure
+            # tears down the render too -- a run died with the sections
+            # cancelled mid-frame and Remotion reporting 404s on staged images,
+            # when the only real problem was a thumbnail the review gate
+            # disliked. When the gate is allowed to fail, return the error
+            # instead of raising so the render is never disturbed by it.
             with costs.bound_context(stage="thumbnail"):
-                return await create_thumbnail(script, config, ws)
+                try:
+                    return await create_thumbnail(script, config, ws)
+                except ReviewGateError as exc:
+                    if "thumbnail_review" in allowed_review_failures:
+                        return exc
+                    raise
 
         thumbnail_task = asyncio.create_task(_run_thumbnail_task())
 
@@ -594,6 +804,10 @@ async def run_pipeline(
         thumbnail_allowed_failure = False
         try:
             thumb_result = await thumbnail_task
+            # An allowed gate failure comes back as a value rather than an
+            # exception, so the render could not be caught in its blast radius.
+            if isinstance(thumb_result, ReviewGateError):
+                raise thumb_result
         except ReviewGateError as e:
             checkpoint.review_log["thumbnail_review"] = _review_log_entry(
                 e.result,
@@ -608,7 +822,7 @@ async def run_pipeline(
             checkpoint.last_error = None
             thumbnail_allowed_failure = True
         from core.validator import validate_thumbnail, run_validation
-        run_validation("thumbnail", validate_thumbnail(ws / "thumbnail.png"))
+        run_validation("thumbnail", validate_thumbnail(ws / "thumbnail.png", config))
         if not thumbnail_allowed_failure:
             checkpoint.review_log["thumbnail_review"] = _review_log_entry(thumb_result)
         complete_stage("thumbnail")
@@ -719,6 +933,11 @@ async def _run_final_review(
             tags=script.tags,
             video_type=script.video_type,
             narration_summary=narration_summary,
+            # The gate judges captions and subject matter against this
+            # channel's own spec. Hardcoding Football News' yellow highlight
+            # rejected a Horror package for using the red its config asks for.
+            caption_highlight=_caption_highlight_name(config),
+            subject_domain=config.niche.category,
         )
 
     try:
@@ -801,6 +1020,9 @@ def _apply_settings_overrides(overrides: list[str]) -> None:
 
 @click.command()
 @click.option("--channel", required=True, help="Channel slug (e.g. demo_channel)")
+@click.option("--language", default=None,
+              help="Script language for narration and captions (e.g. ar, en). "
+                   "Must be one the channel declares in language_variants.")
 @click.option("--stage", "stage_spec", default=None, help="Run specific stage(s): 'script', 'process..thumbnail', '..script'")
 @click.option("--workspace", type=click.Path(exists=True, file_okay=False), default=None, help="Target a specific workspace (skips auto-detection)")
 @click.option("--fixtures", type=click.Choice(["record", "replay"]), default=None, help="Record or replay API responses via .fixtures/")
@@ -811,7 +1033,8 @@ def _apply_settings_overrides(overrides: list[str]) -> None:
     default="",
     help="Comma-separated review gates to continue after max retries (e.g. image_review,thumbnail,final_review)",
 )
-def main(channel, stage_spec, workspace, fixtures, overrides, preview_remotion, allow_review_failures):
+def main(channel, language, stage_spec, workspace, fixtures, overrides,
+         preview_remotion, allow_review_failures):
     """Video Factory — Autonomous YouTube video pipeline."""
     if fixtures:
         from clients import set_mode
@@ -846,6 +1069,7 @@ def main(channel, stage_spec, workspace, fixtures, overrides, preview_remotion, 
             workspace_path=workspace_path,
             preview_remotion=preview_remotion,
             allow_review_failures=allowed_review_failures,
+            language=language,
         ))
     except Exception:
         failed_ws = workspace_path or find_latest_workspace(channel)

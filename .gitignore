@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+!**/.env.example
 __pycache__/
 *.pyc
 .venv/
@@ -41,3 +42,33 @@ rendering/remotion/public/preview_manifest.json
 # Local Codex scratch output
 .codex-preview-test.log
 .cleanup_stash/
+
+# Secrets and credentials (never commit)
+.env.local
+.env.production
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+client_secret*.json
+service-account*.json
+service_account*.json
+application_default_credentials.json
+gcloud-key*.json
+*-key.json
+
+# Generated runtime artifacts
+data/system_roots.pem
+*.log
+*.wav
+assets/music/
+assets/sfx/
+
+# Editor / agent scratch debris
+*_backup.py
+*_backup[0-9].py
+*.BACKUP.py
+*.orig
+*.rej
+*.bak

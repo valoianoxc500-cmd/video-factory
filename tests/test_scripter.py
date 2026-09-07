@@ -80,6 +80,14 @@ def _script_stage_config() -> ChannelConfig:
             "description_styles": [{"name": "a", "instruction": "a"}],
         },
         thumbnail_strategies=[{"name": "hero", "instruction": "Make a hero thumbnail"}],
+        # Pinned to the pre-density pacing so these tests keep exercising the
+        # generate/review/revision control flow rather than the slot-density
+        # rule. Density itself is covered by the pacing tests, which pass
+        # max_visual_hold_seconds explicitly.
+        rendering_defaults={
+            "max_visual_hold_seconds": 16.0,
+            "image_slot_min_duration": 5.0,
+        },
     )
 
 
@@ -317,11 +325,13 @@ def test_script_prompt_limits_visible_slot_hold_time():
         ],
         numbering_order="ascending",
     )
-    assert "use its word count to decide how many slots it needs" in prompt
-    assert "Keep every visible beat under 16 seconds" in prompt
-    assert "Aim for roughly 5-16 seconds per visible beat" in prompt
-    assert "roughly 50-70 narration words usually needs about 3+ slots" in prompt
-    assert "would need more than 5 visible beats should usually be split" in prompt
+    assert "ONE slot per distinct" in prompt
+    assert "Every visible beat must stay under 5 seconds" in prompt
+    assert "Aim for roughly 2.5-5 seconds per visible beat" in prompt
+    # A long section must gain slots rather than hold one image longer, and
+    # neighbouring slots must not repeat the same subject.
+    assert "A long section needs MORE SLOTS, not a longer hold" in prompt
+    assert "must be different from its neighbours" in prompt
 
 
 def test_script_prompt_does_not_ask_llm_for_duration_fields():
@@ -718,15 +728,15 @@ def test_generate_script_rejects_invalid_review_output_without_silent_normalizat
 
 def test_script_review_prompt_rejects_overlong_visual_holds():
     prompt = script_review_prompt("{}", numbering_order="ascending")
-    assert "longer than about 16 seconds" in prompt
+    assert "longer than about 5 seconds" in prompt
     assert "add more visual slots or split the section" in prompt
 
 
 def test_script_word_budget_errors_rejects_overlong_script():
     script_data = {
         "sections": [
-            {"narration": "word " * 200, "slots": [{"visual": "google_photo"}]},
-            {"narration": "word " * 150, "slots": [{"visual": "google_photo"}]},
+            {"narration": "word " * 200, "slots": [{"visual": "google_photo", "prompt": "a photo", "keywords": "photo subject"}]},
+            {"narration": "word " * 150, "slots": [{"visual": "google_photo", "prompt": "a photo", "keywords": "photo subject"}]},
         ]
     }
 
@@ -749,8 +759,8 @@ def test_script_word_budget_errors_rejects_overlong_script():
 def test_script_word_budget_errors_accepts_target_range():
     script_data = {
         "sections": [
-            {"narration": "word " * 60, "slots": [{"visual": "google_photo"}]},
-            {"narration": "word " * 60, "slots": [{"visual": "google_photo"}]},
+            {"narration": "word " * 60, "slots": [{"visual": "google_photo", "prompt": "a photo", "keywords": "photo subject"}]},
+            {"narration": "word " * 60, "slots": [{"visual": "google_photo", "prompt": "a photo", "keywords": "photo subject"}]},
         ]
     }
 
@@ -818,8 +828,8 @@ def test_script_visual_pacing_errors_rejects_under_slotted_section():
                 "id": 1,
                 "narration": "word " * 70,
                 "slots": [
-                    {"visual": "google_photo"},
-                    {"visual": "stock_photo"},
+                    {"visual": "google_photo", "prompt": "a photo", "keywords": "photo subject"},
+                    {"visual": "stock_photo", "prompt": "a photo", "keywords": "photo subject"},
                 ],
             }
         ]
@@ -848,8 +858,8 @@ def test_script_visual_pacing_issues_include_required_slot_budget():
                 "id": 2,
                 "narration": "word " * 120,
                 "slots": [
-                    {"visual": "google_photo"},
-                    {"visual": "stock_photo"},
+                    {"visual": "google_photo", "prompt": "a photo", "keywords": "photo subject"},
+                    {"visual": "stock_photo", "prompt": "a photo", "keywords": "photo subject"},
                     {"visual": "b_roll"},
                 ],
             }

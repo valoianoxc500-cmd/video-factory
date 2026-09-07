@@ -11,7 +11,12 @@
       "title_position": "bottom_center",
       "title_size_ratio": 0.06,
       "title_accent_color": "#2E86DE",
-      "section_color_palette": ["#2E86DE", "#00A676", "#F5A623", "#D64550"]
+      "section_color_palette": [
+        "#2E86DE",
+        "#00A676",
+        "#F5A623",
+        "#D64550"
+      ]
     },
     "subtitle_highlight": {
       "enabled": true,
@@ -19,8 +24,15 @@
       "keywords_per_phrase": 2
     },
     "video": {
-      "background_color": [12, 16, 24],
-      "transition_pool": ["fade", "dissolve"]
+      "background_color": [
+        12,
+        16,
+        24
+      ],
+      "transition_pool": [
+        "fade",
+        "dissolve"
+      ]
     },
     "watermark": {
       "enabled": false
@@ -45,7 +57,10 @@
   },
   "video": {
     "target_duration_minutes": 8,
-    "resolution": [1920, 1080],
+    "resolution": [
+      1920,
+      1080
+    ],
     "fps": 30,
     "transition_duration_seconds": 0.8,
     "background_music_volume": 0.12,
@@ -68,7 +83,9 @@
       "pacing": "Hook the idea, show the example, explain why it matters, then give one practical takeaway.",
       "example": "5 Small Choices That Make Digital Tools Easier to Use",
       "numbering_order": "ascending",
-      "allowed_thumbnail_strategies": ["demo_thumbnail"],
+      "allowed_thumbnail_strategies": [
+        "demo_thumbnail"
+      ],
       "narrative_hooks": [
         "Tease the most surprising item in the opening hook, then deliver the list in order.",
         "Frame the list as a practical checklist viewers can apply immediately.",
@@ -80,7 +97,9 @@
       "section_style": "A clear question broken into causes, examples, and practical implications.",
       "pacing": "Question -> context -> example -> takeaway.",
       "example": "Why Simple Systems Are Easier to Maintain",
-      "allowed_thumbnail_strategies": ["demo_thumbnail"],
+      "allowed_thumbnail_strategies": [
+        "demo_thumbnail"
+      ],
       "narrative_hooks": [
         "Start with a familiar problem, then explain the hidden mechanism behind it.",
         "Open with a simple question and build toward one useful mental model.",
@@ -92,7 +111,9 @@
       "section_style": "Story-driven explanation with a problem, discovery, and useful conclusion.",
       "pacing": "Relatable setup -> failed approach -> better system -> practical lesson.",
       "example": "The Simple Workflow That Saved an Afternoon",
-      "allowed_thumbnail_strategies": ["demo_thumbnail"],
+      "allowed_thumbnail_strategies": [
+        "demo_thumbnail"
+      ],
       "narrative_hooks": [
         "Start with a relatable moment of friction, then follow the fix.",
         "Tell the story as a before-and-after change in how a task gets done.",
@@ -112,7 +133,7 @@
     ]
   },
   "image_sourcing": {
-    "generation_model": "gemini-3.1-flash-image-preview",
+    "generation_model": "gemini-2.5-flash-image",
     "generate_info_slide_illustrations": true,
     "generate_info_card_illustrations": true,
     "style_prompt_suffix": "clean editorial photo, natural lighting, uncluttered composition, modern educational media style",
@@ -129,13 +150,28 @@
       "design"
     ],
     "title_formats": [
-      {"name": "question", "instruction": "Title MUST be a clear question."},
-      {"name": "numbered_list", "instruction": "Title MUST start with a number."},
-      {"name": "hook", "instruction": "Title MUST use a practical curiosity hook."}
+      {
+        "name": "question",
+        "instruction": "Title MUST be a clear question."
+      },
+      {
+        "name": "numbered_list",
+        "instruction": "Title MUST start with a number."
+      },
+      {
+        "name": "hook",
+        "instruction": "Title MUST use a practical curiosity hook."
+      }
     ],
     "description_styles": [
-      {"name": "short_clear", "instruction": "Write 2-3 concise sentences about what the video covers and end with a simple subscribe CTA."},
-      {"name": "timestamps", "instruction": "Write one short paragraph, then list section timestamps in 00:00 format."}
+      {
+        "name": "short_clear",
+        "instruction": "Write 2-3 concise sentences about what the video covers and end with a simple subscribe CTA."
+      },
+      {
+        "name": "timestamps",
+        "instruction": "Write one short paragraph, then list section timestamps in 00:00 format."
+      }
     ]
   },
   "script_style": {
@@ -189,7 +225,7 @@
     "max_visual_hold_seconds": 16.0,
     "intra_slot_crossfade": 0.3,
     "sfx_volume": 0.15,
-    "sfx_boundary_coverage": 0.70,
+    "sfx_boundary_coverage": 0.7,
     "render_concurrency": 4,
     "frame_sequence_image_format": "jpeg",
     "frame_sequence_jpeg_quality": 80

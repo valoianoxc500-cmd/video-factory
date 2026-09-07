@@ -24,6 +24,7 @@ async def plan_video(
     *,
     override_type: str | None = None,
     override_content_family: str | None = None,
+    override_topic: str | None = None,
 ) -> dict:
     """Select a topic and video type for the next video."""
     history = load_topic_history(channel_slug)
@@ -89,6 +90,7 @@ async def plan_video(
         sections_range=sections_range,
         content_families=content_families,
         preferred_content_family=preferred_content_family,
+        requested_topic=(override_topic or "").strip(),
     )
 
     result = await clients.generate_json(
@@ -97,6 +99,10 @@ async def plan_video(
         temperature=0.9,
         operation_label="planning_topic_selection",
     )
+
+    if override_topic and override_topic.strip():
+        result["topic"] = override_topic.strip()
+        logger.info(f"Topic overridden to: {result['topic']}")
 
     if override_type and override_type in video_types:
         result["video_type"] = override_type

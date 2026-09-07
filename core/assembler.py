@@ -1,4 +1,4 @@
-"""Stage 4: Video assembly — section concat + audio mix.
+﻿"""Stage 4: Video assembly â€” section concat + audio mix.
 
 Assembles the final video from pre-rendered section clips (produced by
 render_sections via Remotion SectionComposition). Two-phase pipeline:
@@ -32,9 +32,14 @@ def _build_color_filter(name: str, opacity: float = 1.0) -> str | None:
     return f"colorchannelmixer={values}"
 
 
-# ── Transition name mapping ──────────────────────────────────────
+# â”€â”€ Transition name mapping â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # style.json uses friendly names; FFmpeg xfade uses internal names.
-_TRANSITION_MAP = {"crossfade": "fade"}
+#
+# `dissolve` is a real xfade mode, but it is a random-pixel dissolve: on a
+# 1080x1920 photo cut it reads as harsh static rather than a blend, and it does
+# not match the smooth dissolve the Remotion path renders inside a section.
+# Both sides of a boundary should feel the same, so it resolves to a blend.
+_TRANSITION_MAP = {"crossfade": "fade", "dissolve": "fade"}
 
 
 def _parse_section_id(path: Path) -> int | None:
@@ -48,7 +53,7 @@ def _parse_section_id(path: Path) -> int | None:
     return None
 
 
-# ── Duration probe ────────────────────────────────────────────────
+# â”€â”€ Duration probe â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _probe_duration(path: Path) -> float:
     """Get actual duration of a media file via ffprobe."""
@@ -58,14 +63,14 @@ def _probe_duration(path: Path) -> float:
         "-of", "default=noprint_wrappers=1:nokey=1",
         str(path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         logger.warning(f"ffprobe failed for {path.name}, estimating duration")
         return 0.0
     return float(result.stdout.strip())
 
 
-# ── Crossfade concatenation ───────────────────────────────────────
+# â”€â”€ Crossfade concatenation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _xfade_concat(
     clip_paths: list[Path],
@@ -96,7 +101,7 @@ def _xfade_concat(
     xfade_dur = min(crossfade_dur, min_dur * 0.5) if min_dur > 0 else crossfade_dur
 
     if xfade_dur < 0.05:
-        # Durations too short for xfade — use concat demuxer instead
+        # Durations too short for xfade â€” use concat demuxer instead
         return _concat_demuxer_fallback(clip_paths, output_path)
 
     # Build xfade filter chain
@@ -134,12 +139,16 @@ def _xfade_concat(
         *inputs,
         "-filter_complex", filter_complex,
         "-map", "[vout]",
-        "-c:v", "h264_nvenc", "-preset", "p1", "-rc", "vbr", "-cq", "10",
-        "-pix_fmt", "yuv420p", "-an",
+        # The mux step copies this stream rather than re-encoding, so these
+        # are the delivered video's settings. Encoding at cq 10 with no
+        # ceiling produced a 16 Mbps, 119 MB file for one minute, which the
+        # object store rejected outright as too large.
+        *_delivery_video_encode(),
+        "-an",
         str(output_path),
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         logger.warning(f"xfade concat failed, falling back to demuxer: {result.stderr[-300:]}")
         return _concat_demuxer_fallback(clip_paths, output_path)
@@ -158,12 +167,14 @@ def _concat_demuxer_fallback(clip_paths: list[Path], output_path: Path) -> Path:
     cmd = [
         settings.ffmpeg_path, "-y",
         "-f", "concat", "-safe", "0", "-i", str(list_file),
-        "-c:v", "h264_nvenc", "-preset", "p1", "-rc", "vbr", "-cq", "10",
-        "-pix_fmt", "yuv420p", "-an",
+        # Same as the xfade path: this stream is copied into the final mux,
+        # so it must carry the delivery bitrate ceiling.
+        *_delivery_video_encode(),
+        "-an",
         str(output_path),
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     list_file.unlink(missing_ok=True)
     if result.returncode != 0:
         raise RuntimeError(f"Concat demuxer fallback also failed: {result.stderr[-300:]}")
@@ -171,10 +182,29 @@ def _concat_demuxer_fallback(clip_paths: list[Path], output_path: Path) -> Path:
     return output_path
 
 
-# ── Audio loudness normalization ──────────────────────────────────
+# â”€â”€ Audio loudness normalization â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 # YouTube recommends -14 LUFS integrated loudness, -1.5 dBTP true peak.
 _LOUDNORM = "loudnorm=I=-14:TP=-1.5:LRA=11"
+
+
+
+def _delivery_video_encode() -> list[str]:
+    """Video encoder args for the delivered MP4.
+
+    Capped VBR rather than pure constant-quality: a hard ceiling keeps a busy
+    scene from ballooning the file, which matters when the output is uploaded
+    to metered object storage on every run.
+    """
+    return [
+        "-c:v", "h264_nvenc",
+        "-preset", "p4",
+        "-rc", "vbr",
+        "-cq", str(settings.video_quality_cq),
+        "-maxrate", settings.video_max_bitrate,
+        "-bufsize", settings.video_buffer_size,
+        "-pix_fmt", "yuv420p",
+    ]
 
 
 def _build_audio_filter(
@@ -184,10 +214,20 @@ def _build_audio_filter(
     video_duration: float,
     transitions_idx: int | None = None,
     sfx_volume: float = 0.15,
+    ambience_idx: int | None = None,
+    ambience_volume: float = 0.16,
+    scene_sfx_idx: int | None = None,
+    scene_sfx_volume: float = 0.34,
 ) -> tuple[str | None, str]:
     """Build audio filter chain with loudness normalization.
 
     Returns (filter_part_or_None, audio_map_label).
+
+    Up to five layers, each kept as its own input and its own volume so a mix
+    can be reasoned about and changed one layer at a time: narration, the
+    music bed, the transition track, and -- when the channel enables scene
+    audio -- per-scene ambience and per-scene cues. The two scene layers
+    arrive already timed and faded, so all that is needed here is a level.
     """
     parts: list[str] = []
 
@@ -212,11 +252,27 @@ def _build_audio_filter(
     else:
         return None, ""
 
-    # Mix in transition SFX if available
+    # Every remaining layer is trimmed to length, levelled, and mixed in one
+    # pass. One amix rather than a chain of them: repeated pairwise mixing
+    # attenuates the earlier layers each time.
+    extra: list[tuple[int, float, str]] = []
     if transitions_idx is not None:
+        extra.append((transitions_idx, sfx_volume, "sfx"))
+    if ambience_idx is not None:
+        extra.append((ambience_idx, ambience_volume, "amb"))
+    if scene_sfx_idx is not None:
+        extra.append((scene_sfx_idx, scene_sfx_volume, "scenesfx"))
+
+    if extra:
+        labels = []
+        for index, volume, name in extra:
+            parts.append(
+                f"[{index}:a]atrim=0:{video_duration:.3f},volume={volume}[{name}]"
+            )
+            labels.append(f"[{name}]")
         parts.append(
-            f"[{transitions_idx}:a]atrim=0:{video_duration:.3f},volume={sfx_volume}[sfx];"
-            f"{mix_label}[sfx]amix=inputs=2:duration=longest:normalize=0,"
+            f"{mix_label}{''.join(labels)}"
+            f"amix=inputs={len(labels) + 1}:duration=longest:normalize=0,"
             f"{_LOUDNORM}[aout]"
         )
     else:
@@ -225,7 +281,7 @@ def _build_audio_filter(
     return ";".join(parts), "[aout]"
 
 
-# ── Audio mix + visual effects ────────────────────────────────────
+# â”€â”€ Audio mix + visual effects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _mix_audio_and_effects(
     video_path: Path,
@@ -238,18 +294,24 @@ def _mix_audio_and_effects(
     target_size: tuple[int, int],
     transitions_path: Path | None = None,
     sfx_volume: float = 0.15,
+    ambience_path: Path | None = None,
+    ambience_volume: float = 0.16,
+    scene_sfx_path: Path | None = None,
+    scene_sfx_volume: float = 0.34,
 ) -> Path:
     """Merge audio mix and video overlays into one FFmpeg command."""
     color_filter_name = effects.get("color_filter")
     color_filter_opacity = effects.get("color_filter_opacity", 1.0)
     color_filter_value = _build_color_filter(color_filter_name, color_filter_opacity) if color_filter_name else None
-    has_audio = (
-        (narration_path and narration_path.exists())
-        or (music_path and music_path.exists())
-        or (transitions_path and transitions_path.exists())
+    has_audio = any(
+        path and path.exists()
+        for path in (
+            narration_path, music_path, transitions_path,
+            ambience_path, scene_sfx_path,
+        )
     )
 
-    # ── Resolve overlay video files ────────────────────────────────
+    # â”€â”€ Resolve overlay video files â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     overlay_configs = effects.get("overlays", [])
     overlays = []
     for ov in overlay_configs:
@@ -265,7 +327,7 @@ def _mix_audio_and_effects(
 
     has_overlays = bool(overlays)
 
-    # ── Build inputs ───────────────────────────────────────────────
+    # â”€â”€ Build inputs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     inputs = ["-i", str(video_path)]
     next_idx = 1
     narration_idx = None
@@ -288,6 +350,20 @@ def _mix_audio_and_effects(
         transitions_idx = next_idx
         next_idx += 1
 
+    # The two per-scene layers arrive already timed and faded by the audio
+    # director, so they need an input slot and a level and nothing else.
+    ambience_idx = None
+    if ambience_path and ambience_path.exists():
+        inputs.extend(["-i", str(ambience_path)])
+        ambience_idx = next_idx
+        next_idx += 1
+
+    scene_sfx_idx = None
+    if scene_sfx_path and scene_sfx_path.exists():
+        inputs.extend(["-i", str(scene_sfx_path)])
+        scene_sfx_idx = next_idx
+        next_idx += 1
+
     overlay_start_idx = next_idx
     for ov in overlays:
         inputs.extend([
@@ -296,7 +372,7 @@ def _mix_audio_and_effects(
             "-i", str(ov["resolved_path"]),
         ])
 
-    # ── Build filter_complex ───────────────────────────────────────
+    # â”€â”€ Build filter_complex â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     filter_complex_parts = []
     map_args = []
     w, h = target_size
@@ -330,13 +406,14 @@ def _mix_audio_and_effects(
             )
             current_label = out_label
 
-        v_enc = ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "18",
-                 "-pix_fmt", "yuv420p"]
+        v_enc = _delivery_video_encode()
 
         if has_audio:
             audio_filt, audio_map = _build_audio_filter(
                 narration_idx, music_idx, music_volume, video_duration,
                 transitions_idx, sfx_volume=sfx_volume,
+                ambience_idx=ambience_idx, ambience_volume=ambience_volume,
+                scene_sfx_idx=scene_sfx_idx, scene_sfx_volume=scene_sfx_volume,
             )
             if audio_filt:
                 filter_complex_parts.append(audio_filt)
@@ -349,7 +426,7 @@ def _mix_audio_and_effects(
                 "-filter_complex", filter_complex,
                 *map_args,
                 *v_enc,
-                "-c:a", "aac", "-b:a", "192k",
+                "-c:a", "aac", "-b:a", settings.audio_bitrate,
                 str(output_path),
             ]
         else:
@@ -371,13 +448,14 @@ def _mix_audio_and_effects(
         if color_filter_value:
             fc_parts.append(f"[0:v]{color_filter_value}[vout]")
         v_map = "[vout]" if color_filter_value else "0:v"
-        v_enc = (["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "18",
-                  "-pix_fmt", "yuv420p"] if color_filter_value
+        v_enc = (_delivery_video_encode() if color_filter_value
                  else ["-c:v", "copy"])
 
         audio_filt, a_map = _build_audio_filter(
             narration_idx, music_idx, music_volume, video_duration,
             transitions_idx, sfx_volume=sfx_volume,
+            ambience_idx=ambience_idx, ambience_volume=ambience_volume,
+            scene_sfx_idx=scene_sfx_idx, scene_sfx_volume=scene_sfx_volume,
         )
         if audio_filt:
             fc_parts.append(audio_filt)
@@ -389,7 +467,7 @@ def _mix_audio_and_effects(
                 "-filter_complex", ";".join(fc_parts),
                 "-map", v_map, "-map", a_map,
                 *v_enc,
-                "-c:a", "aac", "-b:a", "192k",
+                "-c:a", "aac", "-b:a", settings.audio_bitrate,
                 str(output_path),
             ]
         else:
@@ -398,7 +476,7 @@ def _mix_audio_and_effects(
                 *inputs,
                 "-map", "0:v", "-map", a_map,
                 "-c:v", "copy",
-                "-c:a", "aac", "-b:a", "192k",
+                "-c:a", "aac", "-b:a", settings.audio_bitrate,
                 str(output_path),
             ]
     else:
@@ -408,24 +486,35 @@ def _mix_audio_and_effects(
                 settings.ffmpeg_path, "-y",
                 *inputs,
                 "-vf", color_filter_value,
-                "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "18",
-                "-pix_fmt", "yuv420p", "-an",
+                *_delivery_video_encode(), "-an",
                 str(output_path),
             ]
         else:
-            # No overlays, no audio, no color filter — just copy
-            shutil.copy2(video_path, output_path)
-            return output_path
+            # No overlays, no audio, no color filter â€” stream-copy, but still
+            # remux so the output is progressive-download friendly.
+            cmd = [
+                settings.ffmpeg_path, "-y",
+                "-i", str(video_path),
+                "-c", "copy",
+                str(output_path),
+            ]
+
+    # Put the moov atom in front of the media data. Without this a browser
+    # has to download the entire file before it can start playing, which for a
+    # ~100 MB short means the <video> element simply gives up.
+    # Metadata relocation only: the encoded streams are untouched.
+    if cmd and cmd[-1] == str(output_path):
+        cmd = cmd[:-1] + ["-movflags", "+faststart", str(output_path)]
 
     logger.info(f"Final encode: watermarks={'yes' if has_overlays else 'no'}, audio={'yes' if has_audio else 'no'}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         raise RuntimeError(f"Final encode failed: {result.stderr[-500:]}")
 
     return output_path
 
 
-# ── Main assembly ─────────────────────────────────────────────────
+# â”€â”€ Main assembly â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def assemble_video(
     script: Script,
@@ -455,7 +544,7 @@ def assemble_video(
     transition_dur = config.video.transition_duration_seconds
     music_volume = config.video.background_music_volume
 
-    # ── Phase 1: Load pre-rendered section clips ─────────────────
+    # â”€â”€ Phase 1: Load pre-rendered section clips â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Only include sections that exist in the current script to avoid
     # stale clips from earlier pipeline runs in the same workspace.
     sections_dir = workspace / "videos" / "sections"
@@ -473,7 +562,7 @@ def assemble_video(
 
     logger.info(f"Concatenating {len(section_clip_paths)} sections")
 
-    # ── Phase 2: Inter-section xfade concatenation ───────────────
+    # â”€â”€ Phase 2: Inter-section xfade concatenation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Build per-section transition list from LLM values
     sorted_sections = sorted(script.sections, key=lambda s: s.id)
     section_transitions = []
@@ -485,12 +574,17 @@ def assemble_video(
     inter_dur = transition_dur
     _xfade_concat(section_clip_paths, video_only, inter_dur, fps, transitions=section_transitions)
 
-    # ── Phase 3: Audio + effects ─────────────────────────────────
+    # â”€â”€ Phase 3: Audio + effects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     narration_path = audio_dir / "narration_full.wav"
     music_path = audio_dir / "background_music.mp3"
     transitions_path = audio_dir / "transitions.wav"
     video_duration = _probe_duration(video_only)
     sfx_volume = config.rendering_defaults.sfx_volume
+
+    # Written by the audio director when the channel enables scene audio.
+    # Absent otherwise, and the mix is then exactly what it was before.
+    ambience_path = audio_dir / "ambience.wav"
+    scene_sfx_path = audio_dir / "scene_sfx.wav"
 
     _mix_audio_and_effects(
         video_path=video_only,
@@ -503,9 +597,11 @@ def assemble_video(
         target_size=(w, h),
         transitions_path=transitions_path if transitions_path.exists() else None,
         sfx_volume=sfx_volume,
+        ambience_path=ambience_path if ambience_path.exists() else None,
+        scene_sfx_path=scene_sfx_path if scene_sfx_path.exists() else None,
     )
 
-    # ── Cleanup ──────────────────────────────────────────────────
+    # â”€â”€ Cleanup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
         shutil.rmtree(clips_dir)
     except Exception as e:

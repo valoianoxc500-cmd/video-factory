@@ -148,7 +148,7 @@ def test_run_pipeline_persists_image_review_feedback_on_success(monkeypatch, tmp
         return review_result
 
     monkeypatch.setattr("factory.setup_logging", lambda channel_slug: logger)
-    monkeypatch.setattr("factory.load_channel_config", lambda channel_slug, overrides=None: config)
+    monkeypatch.setattr("factory.load_channel_config", lambda channel_slug, overrides=None, language=None: config)
     monkeypatch.setattr("factory._validate_raw_images", lambda ws, script, config: None)
     monkeypatch.setattr("factory.console.print", lambda *args, **kwargs: None)
     monkeypatch.setattr("core.image_sourcer.source_images", fake_source_images)
@@ -551,7 +551,7 @@ def test_run_pipeline_preview_remotion_skips_heavy_stages(monkeypatch, tmp_path)
         raise AssertionError("Heavy stage should not run in preview mode")
 
     monkeypatch.setattr("factory.setup_logging", lambda channel_slug: logger)
-    monkeypatch.setattr("factory.load_channel_config", lambda channel_slug, overrides=None: config)
+    monkeypatch.setattr("factory.load_channel_config", lambda channel_slug, overrides=None, language=None: config)
     monkeypatch.setattr("factory.console.print", lambda *args, **kwargs: None)
     monkeypatch.setattr("factory._validate_ready_images", lambda *args, **kwargs: None)
     monkeypatch.setattr("factory._validate_audio_outputs", lambda *args, **kwargs: None)
@@ -673,7 +673,7 @@ def test_run_pipeline_preview_remotion_auto_allows_failed_script_and_image_revie
         preview_calls["launched"] = True
 
     monkeypatch.setattr("factory.setup_logging", lambda channel_slug: logger)
-    monkeypatch.setattr("factory.load_channel_config", lambda channel_slug, overrides=None: config)
+    monkeypatch.setattr("factory.load_channel_config", lambda channel_slug, overrides=None, language=None: config)
     monkeypatch.setattr("factory.console.print", lambda *args, **kwargs: None)
     monkeypatch.setattr("factory._validate_raw_images", lambda ws, script, config: None)
     monkeypatch.setattr("factory._validate_audio_outputs", lambda ws, script: None)
@@ -838,7 +838,7 @@ def test_run_pipeline_allows_failed_image_review(monkeypatch, tmp_path):
         return script_arg
 
     monkeypatch.setattr("factory.setup_logging", lambda channel_slug: logger)
-    monkeypatch.setattr("factory.load_channel_config", lambda channel_slug, overrides=None: config)
+    monkeypatch.setattr("factory.load_channel_config", lambda channel_slug, overrides=None, language=None: config)
     monkeypatch.setattr("factory._validate_raw_images", lambda ws, script, config: None)
     monkeypatch.setattr("factory._validate_audio_outputs", lambda ws, script: None)
     monkeypatch.setattr("factory.console.print", lambda *args, **kwargs: None)
@@ -919,7 +919,7 @@ def test_run_pipeline_cancels_audio_when_image_source_hard_fails(monkeypatch, tm
         return script_arg
 
     monkeypatch.setattr("factory.setup_logging", lambda channel_slug: logger)
-    monkeypatch.setattr("factory.load_channel_config", lambda channel_slug, overrides=None: config)
+    monkeypatch.setattr("factory.load_channel_config", lambda channel_slug, overrides=None, language=None: config)
     monkeypatch.setattr("factory.console.print", lambda *args, **kwargs: None)
     monkeypatch.setattr("core.image_sourcer.source_images", fake_source_images)
     monkeypatch.setattr("core.audio_sourcer.source_audio", fake_source_audio)
@@ -992,12 +992,16 @@ def test_run_pipeline_allows_failed_thumbnail_review(monkeypatch, tmp_path):
         raise factory_module.ReviewGateError("thumbnail_review", review_result)
 
     monkeypatch.setattr("factory.setup_logging", lambda channel_slug: logger)
-    monkeypatch.setattr("factory.load_channel_config", lambda channel_slug, overrides=None: config)
+    monkeypatch.setattr("factory.load_channel_config", lambda channel_slug, overrides=None, language=None: config)
     monkeypatch.setattr("factory.console.print", lambda *args, **kwargs: None)
     monkeypatch.setattr("factory._validate_ready_images", lambda ws, script, config: None)
     monkeypatch.setattr("factory._validate_audio_outputs", lambda ws, script: None)
     monkeypatch.setattr("core.thumbnailer.create_thumbnail", fake_create_thumbnail)
-    monkeypatch.setattr("core.validator.validate_thumbnail", lambda path: [])
+    # Takes the channel config too: expected dimensions are per-channel, since
+    # a 9:16 channel publishes a vertical thumbnail.
+    monkeypatch.setattr(
+        "core.validator.validate_thumbnail", lambda path, config=None: []
+    )
     monkeypatch.setattr("core.validator.run_validation", lambda name, issues: None)
 
     asyncio.run(
@@ -1075,7 +1079,7 @@ def test_run_pipeline_allows_failed_final_review(monkeypatch, tmp_path):
         raise factory_module.ReviewGateError("final_review", review_result)
 
     monkeypatch.setattr("factory.setup_logging", lambda channel_slug: logger)
-    monkeypatch.setattr("factory.load_channel_config", lambda channel_slug, overrides=None: config)
+    monkeypatch.setattr("factory.load_channel_config", lambda channel_slug, overrides=None, language=None: config)
     monkeypatch.setattr("factory.console.print", lambda *args, **kwargs: None)
     monkeypatch.setattr("factory._run_final_review", fake_final_review)
 

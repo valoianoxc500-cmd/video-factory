@@ -17,17 +17,54 @@ from pathlib import Path
 
 import numpy as np
 
+from google.api_core.exceptions import InvalidArgument
 from google.cloud.speech_v2 import SpeechClient
 from google.cloud.speech_v2.types import cloud_speech
 
 import clients
 from core import costs
+from core.caption_integrity import (
+    describe_drift,
+    drifted_indices as _drifted_indices,
+    repair_word_timestamps,
+)
 from core.utils import Script, ScriptSection, ChannelConfig, save_script
+
+
+def contains_drift(words: list[dict]) -> bool:
+    """Whether any transcript token left the Arabic script."""
+    return bool(_drifted_indices(words or []))
 from settings import settings, PROJECT_ROOT, ASSETS_DIR
 
 logger = logging.getLogger("video_factory")
 
-_STT_LOCALE_MAP = {"es": "es-US", "es-419": "es-US", "en": "en-US", "pt": "pt-BR"}
+def _is_arabic(locale: str) -> bool:
+    """Whether a resolved STT locale is an Arabic one."""
+    return str(locale or "").lower().startswith("ar")
+
+
+_STT_LOCALE_MAP = {
+    "es": "es-US", "es-419": "es-US", "en": "en-US", "pt": "pt-BR",
+    # Speech-to-Text V2 recognizes no ar-SA variant in any region. ar-EG is
+    # the Modern Standard Arabic locale that is served, and it transcribes
+    # MSA narration produced for ar-SA voices correctly.
+    "ar": "ar-EG", "ar-SA": "ar-EG", "ar-AE": "ar-EG", "ar-XA": "ar-EG",
+}
+
+# Recognition models to try, in order, per language prefix. "long" has no
+# Arabic coverage; chirp_2 does (us-central1). Falling through the list keeps
+# a region/model change from breaking a language outright.
+_STT_MODEL_LADDER: dict[str, tuple[str, ...]] = {
+    "ar": ("chirp_2", "long", "short"),
+}
+_STT_DEFAULT_MODELS = ("long", "short", "chirp_2")
+
+# Resolved (location, language) -> model, so the ladder is walked once per run.
+_STT_MODEL_CACHE: dict[tuple[str, str], str] = {}
+
+
+def _stt_models_for_language(stt_lang: str) -> tuple[str, ...]:
+    return _STT_MODEL_LADDER.get(stt_lang.split("-")[0], _STT_DEFAULT_MODELS)
 
 
 # ---------------------------------------------------------------------------
@@ -174,16 +211,17 @@ def _transcribe_with_timestamps(
     )
 
     stt_lang = _STT_LOCALE_MAP.get(language, language)
-
-    config = cloud_speech.RecognitionConfig(
-        auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
-        language_codes=[stt_lang],
-        model="long",
-        features=cloud_speech.RecognitionFeatures(
-            enable_word_time_offsets=True,
-        ),
-    )
     recognizer = f"projects/{project}/locations/{location}/recognizers/_"
+
+    def _config_for(model_name: str) -> cloud_speech.RecognitionConfig:
+        return cloud_speech.RecognitionConfig(
+            auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
+            language_codes=[stt_lang],
+            model=model_name,
+            features=cloud_speech.RecognitionFeatures(
+                enable_word_time_offsets=True,
+            ),
+        )
 
     # Read WAV parameters
     with wave.open(str(wav_path), "rb") as wf:
@@ -205,34 +243,121 @@ def _transcribe_with_timestamps(
         time_offset = start_frame / framerate
         chunks.append((chunk_idx, chunk_raw, time_offset))
 
-    # Transcribe all chunks in parallel
-    results_by_idx: dict[int, list[dict]] = {}
-    with ThreadPoolExecutor(max_workers=_STT_MAX_WORKERS) as pool:
-        futures = {
-            pool.submit(
-                _transcribe_single_chunk,
-                client, recognizer, config,
-                chunk_raw, wav_path, idx,
-                nchannels, sampwidth, framerate, time_offset,
-            ): idx
-            for idx, chunk_raw, time_offset in chunks
-        }
-        for future in as_completed(futures):
-            idx = futures[future]
-            results_by_idx[idx] = future.result()
+    def _run_all_chunks(recognition_config: cloud_speech.RecognitionConfig) -> list[dict]:
+        results_by_idx: dict[int, list[dict]] = {}
+        with ThreadPoolExecutor(max_workers=_STT_MAX_WORKERS) as pool:
+            futures = {
+                pool.submit(
+                    _transcribe_single_chunk,
+                    client, recognizer, recognition_config,
+                    chunk_raw, wav_path, idx,
+                    nchannels, sampwidth, framerate, time_offset,
+                ): idx
+                for idx, chunk_raw, time_offset in chunks
+            }
+            for future in as_completed(futures):
+                results_by_idx[futures[future]] = future.result()
+        merged: list[dict] = []
+        for idx in range(len(chunks)):
+            merged.extend(results_by_idx[idx])
+        return merged
 
-    # Merge in chunk order
-    all_words: list[dict] = []
-    for idx in range(len(chunks)):
-        all_words.extend(results_by_idx[idx])
-
-    logger.info(f"STT transcribed {len(all_words)} words in {len(chunks)} chunk(s)")
-    costs.record_stt_cost(
-        model="long",
-        audio_seconds=audio_seconds,
-        operation="stt_transcribe",
+    # Walk the model ladder: a model/locale/region combination that the API
+    # rejects outright (InvalidArgument) is skipped rather than failing the run.
+    cache_key = (location, stt_lang)
+    candidates = (
+        (_STT_MODEL_CACHE[cache_key],)
+        if cache_key in _STT_MODEL_CACHE
+        else _stt_models_for_language(stt_lang)
     )
-    return all_words
+
+    last_error: Exception | None = None
+    drifted_fallback: list[dict] | None = None
+    for model in candidates:
+        try:
+            all_words = _run_all_chunks(_config_for(model))
+        except InvalidArgument as e:
+            last_error = e
+            logger.warning(
+                f"STT model '{model}' rejected {stt_lang} in {location}: "
+                f"{str(e).strip()[:160]}"
+            )
+            continue
+
+        # An Arabic transcript containing Persian/Urdu letters means the
+        # recognizer changed language mid-audio. Prefer another model over
+        # accepting it -- but keep the result, because the ladder may have
+        # nothing better and a repaired transcript still beats no timings.
+        if _is_arabic(stt_lang) and contains_drift(all_words):
+            logger.warning(
+                f"STT model '{model}' drifted out of Arabic: "
+                f"{describe_drift(all_words)}"
+            )
+            if drifted_fallback is None:
+                drifted_fallback = all_words
+            # Do not cache a model that produced drift.
+            _STT_MODEL_CACHE.pop(cache_key, None)
+            continue
+
+        _STT_MODEL_CACHE[cache_key] = model
+        logger.info(
+            f"STT transcribed {len(all_words)} words in {len(chunks)} chunk(s) "
+            f"(model={model}, lang={stt_lang})"
+        )
+        costs.record_stt_cost(
+            model=model,
+            audio_seconds=audio_seconds,
+            operation="stt_transcribe",
+        )
+        return all_words
+
+    if drifted_fallback is not None:
+        # Every model that ran drifted. Hand the best one back so the caller
+        # can repair it against the narration rather than losing STT timings
+        # altogether.
+        logger.warning(
+            f"every STT model drifted out of Arabic for {stt_lang}; "
+            f"returning the transcript for repair against the narration"
+        )
+        return drifted_fallback
+
+    raise RuntimeError(
+        f"No Speech-to-Text model supports {stt_lang} in {location} "
+        f"(tried {', '.join(candidates)}): {last_error}"
+    )
+
+
+def _estimate_word_timestamps(
+    narration: str,
+    audio_duration: float,
+) -> list[dict]:
+    """Derive word timings from the narration text and the measured duration.
+
+    Deterministic fallback for when Speech-to-Text is unavailable. The audio is
+    a reading of exactly this text, so spreading it proportionally to word
+    length (plus a fixed per-word cost for the gap between words) tracks real
+    speech far better than an even split, and the phrase boundaries the
+    subtitle component derives from it stay on the narration.
+    """
+    words = narration.split()
+    if not words or audio_duration <= 0:
+        return []
+
+    per_word_cost = 1.0  # constant "slot" per word, in character-equivalents
+    weights = [len(w) + per_word_cost for w in words]
+    total_weight = sum(weights)
+
+    timestamps: list[dict] = []
+    cursor = 0.0
+    for word, weight in zip(words, weights):
+        span = audio_duration * weight / total_weight
+        end = min(cursor + span, audio_duration)
+        timestamps.append({"word": word, "start": cursor, "end": end})
+        cursor = end
+
+    # Absorb float drift into the final word so captions end with the audio.
+    timestamps[-1]["end"] = audio_duration
+    return timestamps
 
 
 def _transcribe_section(
@@ -246,14 +371,44 @@ def _transcribe_section(
     Word timestamps are shifted by cumulative_offset so they represent
     absolute time in the final concatenated narration.
     """
-    words = _transcribe_with_timestamps(wav_path, language)
     section_dur = _wav_duration(wav_path)
-
     script_word_count = len(section.narration.split())
-    if len(words) < script_word_count * 0.5:
+
+    try:
+        words = _transcribe_with_timestamps(wav_path, language)
+        if script_word_count and len(words) < script_word_count * 0.5:
+            raise RuntimeError(
+                f"STT returned {len(words)} words but narration has "
+                f"{script_word_count} "
+                f"({100 * len(words) // script_word_count}% coverage)"
+            )
+    except Exception as exc:
+        logger.warning(
+            f"Section s{section.id:03d}: STT unusable, deriving timings from "
+            f"narration text instead: {exc}"
+        )
+        words = _estimate_word_timestamps(section.narration, section_dur)
+
+    # Last line of defence for the captions. Every STT model may have drifted,
+    # or drift may survive a model that otherwise looked fine, and corrupted
+    # text must never reach the screen: repair the affected span against the
+    # narration, and derive every timing from the text if it cannot be
+    # anchored. The audio is untouched either way.
+    if _is_arabic(_STT_LOCALE_MAP.get(language, language)) and contains_drift(words):
+        logger.warning(
+            f"Section s{section.id:03d}: {describe_drift(words)}"
+        )
+        words, replaced = repair_word_timestamps(words, section.narration)
+        if not replaced or contains_drift(words):
+            logger.warning(
+                f"Section s{section.id:03d}: caption repair could not clear the "
+                f"drift; deriving every timing from the narration text"
+            )
+            words = _estimate_word_timestamps(section.narration, section_dur)
+
+    if script_word_count and not words:
         raise RuntimeError(
-            f"Section {section.id} STT returned {len(words)} words but narration "
-            f"has {script_word_count} ({100 * len(words) // script_word_count}% coverage)"
+            f"Section {section.id}: no word timestamps could be produced"
         )
 
     # Shift timestamps to absolute narration time
@@ -433,7 +588,24 @@ async def source_audio(
         total_duration=total_duration,
         output_path=transitions_path,
         sfx_boundary_coverage=config.rendering_defaults.sfx_boundary_coverage,
+        sfx_pool=config.video.sfx_pool,
     )
+
+    # ── Per-scene ambience and cues ───────────────────────────────
+    # Two extra layers, rendered full-length so the assembler only gains two
+    # inputs. Never fatal: a run without ambience is a worse video, a run that
+    # died sourcing ambience is no video.
+    if config.image_sourcing.scene_audio:
+        try:
+            from core.audio_director import build_scene_audio
+
+            plan = await build_scene_audio(script, workspace, total_duration)
+            logger.info(
+                f"Scene audio: {sum(1 for c in plan.cues if c.sourced)}"
+                f"/{len(plan.cues)} cues across {len(plan.ambience)} scene(s)"
+            )
+        except Exception as exc:
+            logger.warning(f"Scene audio unavailable: {exc}")
 
     _save_audio_manifest(sections_dir, manifest)
     save_script(workspace, script)
@@ -499,17 +671,37 @@ def _build_transition_track(
     total_duration: float,
     output_path: Path,
     sfx_boundary_coverage: float = 0.70,
+    sfx_pool: list[str] | None = None,
 ) -> bool:
     """Build a WAV track with transition SFX placed at section boundaries.
 
     Places short whoosh/riser sounds centered at the boundary between sections.
     ~70% of boundaries get a transition sound (randomized) to avoid predictability.
-    Uses bundled clips from assets/sfx/transitions/.
+
+    `sfx_pool` names the stems this channel may use. It exists because the SFX
+    directories are shared: without it, adding a horror one-shot to the assets
+    tree would start dropping it into every other channel's videos. An empty
+    pool keeps the original behaviour of using every bundled transition clip.
     """
-    sfx_dir = ASSETS_DIR / "sfx" / "transitions"
-    pool = sorted(sfx_dir.glob("*.mp3")) if sfx_dir.exists() else []
+    sfx_dirs = [ASSETS_DIR / "sfx" / "transitions", ASSETS_DIR / "sfx" / "horror"]
+    pool = sorted(
+        p for d in sfx_dirs if d.exists() for p in d.glob("*.mp3")
+    )
+    if sfx_pool:
+        wanted = {name.lower() for name in sfx_pool}
+        pool = [p for p in pool if p.stem.lower() in wanted]
+        missing = wanted - {p.stem.lower() for p in pool}
+        if missing:
+            logger.warning(
+                f"SFX in the channel pool are missing from assets/sfx/: "
+                f"{', '.join(sorted(missing))}"
+            )
+    else:
+        # No pool declared: keep the historical set only, so newly added
+        # channel-specific one-shots cannot leak into an existing channel.
+        pool = [p for p in pool if p.parent.name == "transitions"]
     if not pool:
-        logger.info("No transition SFX found in assets/sfx/transitions/, skipping")
+        logger.info("No transition SFX available for this channel, skipping")
         return False
 
     num_boundaries = len(section_durations) - 1

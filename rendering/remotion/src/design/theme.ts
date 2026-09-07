@@ -16,6 +16,11 @@ export const theme = {
   font: {
     sans: "Inter, Arial, sans-serif",
     mono: "'JetBrains Mono', 'Courier New', monospace",
+    // Faces that actually ship Arabic glyphs, in Windows/macOS/Linux order.
+    // Inter has none, so Arabic text must not fall back to the sans stack.
+    arabic:
+      "'Segoe UI', 'Noto Naskh Arabic', 'Noto Sans Arabic', Tahoma, " +
+      "'Geeza Pro', 'Arabic Typesetting', Arial, sans-serif",
   },
   scrim: {
     center: "rgba(0,0,0,0.55)",

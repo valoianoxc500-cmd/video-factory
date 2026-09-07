@@ -25,7 +25,7 @@ def probe_media(path: Path) -> dict:
         "-show_format", "-show_streams",
         str(path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe failed for {path}: {result.stderr.strip()}")
     return json.loads(result.stdout)
@@ -185,15 +185,20 @@ def validate_video(path: Path, config: ChannelConfig) -> list[str]:
     decode_cmd = [
         "ffmpeg", "-v", "error", "-i", str(path), "-f", "null", "-",
     ]
-    decode_result = subprocess.run(decode_cmd, capture_output=True, text=True)
+    decode_result = subprocess.run(decode_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if decode_result.stderr.strip():
         errors.append(f"Decode errors: {decode_result.stderr.strip()[:200]}")
 
     return errors
 
 
-def validate_thumbnail(path: Path) -> list[str]:
-    """Validate thumbnail image."""
+def validate_thumbnail(path: Path, config: ChannelConfig | None = None) -> list[str]:
+    """Validate thumbnail image.
+
+    The expected size comes from the channel when one is given: a channel
+    publishing 9:16 shorts renders a vertical thumbnail, and checking it
+    against a hardcoded 1280x720 failed a correct one.
+    """
     errors = []
     if not path.exists():
         errors.append(f"Thumbnail missing: {path.name}")
@@ -201,10 +206,16 @@ def validate_thumbnail(path: Path) -> list[str]:
     if path.stat().st_size < 10_000:
         errors.append(f"Thumbnail too small: {path.stat().st_size} bytes (expected > 10KB)")
 
+    expected = THUMBNAIL_SIZE
+    if config is not None:
+        from core.thumbnailer import thumbnail_size
+
+        expected = thumbnail_size(config)
+
     img = Image.open(path)
     w, h = img.size
-    if (w, h) != THUMBNAIL_SIZE:
-        errors.append(f"Thumbnail dimensions: {w}x{h} (expected {THUMBNAIL_SIZE[0]}x{THUMBNAIL_SIZE[1]})")
+    if (w, h) != expected:
+        errors.append(f"Thumbnail dimensions: {w}x{h} (expected {expected[0]}x{expected[1]})")
 
     return errors
 

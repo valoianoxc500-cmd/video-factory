@@ -16,9 +16,11 @@ from core.utils import ChannelConfig, Script, ScriptSection, VisualSlot
 
 
 class _FakeResponse:
-    def __init__(self, *, json_data=None, content: bytes = b""):
+    def __init__(self, *, json_data=None, content: bytes = b"", status_code: int = 200):
         self._json_data = json_data
         self.content = content
+        self.status_code = status_code
+        self.text = ""
 
     def raise_for_status(self):
         return None
@@ -31,10 +33,14 @@ class _FakeClient:
     def __init__(self, images: dict[str, bytes]):
         self.images = images
         self.search_params = None
+        # A beat searches a ladder of queries now, not one, so the whole grid
+        # is recorded rather than just the last call.
+        self.searches: list[dict] = []
 
     async def get(self, url: str, **kwargs):
         if url == "https://api.pexels.com/v1/search":
             self.search_params = kwargs.get("params")
+            self.searches.append(kwargs.get("params") or {})
             return _FakeResponse(
                 json_data={
                     "photos": [
@@ -77,10 +83,12 @@ class _FakeVideoClient:
     def __init__(self):
         self.requested_url = None
         self.requested_params = None
+        self.searches: list[dict] = []
 
     async def get(self, url: str, **kwargs):
         self.requested_url = url
         self.requested_params = kwargs.get("params")
+        self.searches.append(kwargs.get("params") or {})
         return _FakeResponse(json_data={"videos": []})
 
 
@@ -144,11 +152,17 @@ def test_search_pexels_uses_vision_selected_candidate(monkeypatch, tmp_path):
 
     assert result is True
     assert output_path.read_bytes() == second
-    assert client.search_params == {
-        "query": "senior man seated knee extension chair exercise",
-        "per_page": image_sourcer._PEXELS_CANDIDATE_COUNT,
-        "orientation": "landscape",
+    queried = [search["query"] for search in client.searches]
+    # The beat's own brief leads the ladder, and every rung is searched in
+    # both orientations.
+    assert queried[0] == "senior man seated knee extension chair exercise"
+    assert {search["orientation"] for search in client.searches} == {
+        "portrait", "landscape",
     }
+    assert all(
+        search["per_page"] == image_sourcer._PEXELS_PER_QUERY_PAGE
+        for search in client.searches
+    )
     assert len(review_calls) == 1
     assert "body position and exercise type must match" in review_calls[0][0]
     assert len(seen_hashes) == 1
@@ -318,11 +332,20 @@ def test_search_pexels_video_uses_documented_v1_endpoint(monkeypatch, tmp_path):
 
     assert result is False
     assert client.requested_url == "https://api.pexels.com/v1/videos/search"
-    assert client.requested_params == {
-        "query": "senior standing up from bed",
-        "per_page": 5,
-        "orientation": "landscape",
+
+    # The video path searches the same query ladder the photo path uses, in
+    # both orientations, so there is no single request to assert on. What this
+    # test still owns is the shape of each one: the documented endpoint above,
+    # the brief leading the ladder, and a page size per request.
+    ladder = image_sourcer.pexels_query_ladder("senior standing up from bed")
+    assert ladder[0] == "senior standing up from bed"
+    assert [search["query"] for search in client.searches] == [
+        query for query in ladder for _ in ("portrait", "landscape")
+    ]
+    assert {search["orientation"] for search in client.searches} == {
+        "portrait", "landscape",
     }
+    assert {search["per_page"] for search in client.searches} == {5}
 
 
 def test_search_pexels_video_returns_false_on_http_error(monkeypatch, tmp_path):
@@ -422,7 +445,10 @@ def test_image_review_prompt_uses_tagged_sections_and_failure_types():
     assert "<examples>" in prompt
     assert "<schema>" in prompt
     assert "<input>" in prompt
-    assert '"failure_type": "wrong_subject" | "pose_mismatch" | "anatomy_error" | "weak_match"' in prompt
+    assert (
+        '"failure_type": "wrong_subject" | "pose_mismatch" | "anatomy_error" '
+        '| "weak_match" | "conflicting_branding"'
+    ) in prompt
     assert "When approved is false, failure_type is REQUIRED." in prompt
     assert "Section opener: no" in prompt
     assert "Text-only component: no" in prompt
@@ -801,8 +827,13 @@ def test_source_images_fails_on_anatomy_rejection(monkeypatch, tmp_path):
             )
         )
 
-    assert len(review_prompts) == 1
-    assert len(generate_calls) == 1
+    # The gate re-sources the rejected slot and reviews again before failing
+    # closed. An image rejected for broken anatomy is regenerated, so there is
+    # one generation per attempt. Tied to the configured budget rather than a
+    # literal so the two cannot drift apart.
+    attempts = _image_source_config().review_thresholds.image_review_max_attempts
+    assert len(review_prompts) == attempts
+    assert len(generate_calls) == attempts
     assert generate_calls[0]["model"] == "gemini-test"
     assert generate_calls[0]["operation_label"] == "image_generate"
     assert generate_calls[0]["aspect_ratio"] == "16:9"
@@ -1020,8 +1051,12 @@ def test_source_images_fails_failed_exercise_demo_without_rescue(monkeypatch, tm
             )
         )
 
-    assert len(generate_calls) == 1
-    assert len(review_prompts) == 1
+    # Re-sourced and re-reviewed once before failing closed. The slot is an
+    # ai_photo, so the retry regenerates rather than reaching for the web --
+    # serper stays untouched.
+    attempts = _image_source_config().review_thresholds.image_review_max_attempts
+    assert len(generate_calls) == attempts
+    assert len(review_prompts) == attempts
     assert serper_calls == []
     slot = script.sections[0].slots[0]
     assert slot.visual == "ai_photo"
@@ -1939,4 +1974,282 @@ def test_image_review_rejection_keeps_previous_asset_and_fails_gate(monkeypatch,
 
     raw_image = tmp_path / "images" / "raw" / "section_001_01.jpg"
     assert raw_image.exists()
-    assert review_paths == [["section_001_01.jpg"]]
+    # Every pass reviews the same slot: the rejected file is re-sourced in
+    # place, so the asset kept on disk stays section_001_01.jpg throughout.
+    attempts = _image_source_config().review_thresholds.image_review_max_attempts
+    assert review_paths == [["section_001_01.jpg"]] * attempts
+
+
+@pytest.mark.parametrize(
+    "suggestion,expected",
+    [
+        # The schema asks the reviewer to quote the query it wants.
+        ("Search for 'Anfield stadium crowd' instead", "Anfield stadium crowd"),
+        ('Use "Alexander Isak Liverpool debut" instead', "Alexander Isak Liverpool debut"),
+        # Unquoted prose: strip the instruction wrapper, keep the subject.
+        ("Find a photograph of Portman Road", "Portman Road"),
+        ("Use a real photo of Alexander Isak celebrating", "Alexander Isak celebrating"),
+        # Already a bare query -- leave it alone.
+        ("Anfield stadium crowd photograph", "Anfield stadium crowd photograph"),
+        # Vague prose is not a query; fall back to the normal tiers.
+        ("Try to source an image that better represents the specific moment "
+         "described in the narration segment above.", ""),
+        ("", ""),
+    ],
+)
+def test_query_from_suggestion(suggestion, expected):
+    """The reviewer's suggestion is prose for a human, not a search query.
+
+    Passing it verbatim searched for the sentence rather than the subject: a
+    rejected slot was re-queried with "Search for a high-quality image of a
+    ticking clock face...", which matched worse than the query that had
+    already failed.
+    """
+    assert image_sourcer._query_from_suggestion(suggestion) == expected
+
+
+def test_cached_images_are_still_reachable_by_the_review_gate(monkeypatch, tmp_path):
+    """An image already on disk must still be re-sourceable when rejected.
+
+    On a resumed run every image is cached, so the sourcing pass built no
+    descriptors at all. The review gate then had nothing to re-source: it
+    re-reviewed byte-identical files until the retry budget ran out and failed
+    the run, with no way for the operator to make progress.
+    """
+    source_calls: list[str] = []
+
+    async def fake_source_single_image(**kwargs):
+        out = kwargs["output_path"]
+        out.parent.mkdir(parents=True, exist_ok=True)
+        source_calls.append(out.name)
+        shade = 40 + 30 * len(source_calls)
+        Image.new("RGB", (1920, 1080), (shade, shade, shade)).save(out, format="JPEG")
+        return "serper"
+
+    async def fake_review_with_vision(prompt, image_paths, **kwargs):
+        return {
+            "approved": False,
+            "image_results": [{
+                "section_id": 1,
+                "sub_image_index": 1,
+                "approved": False,
+                "failure_type": "wrong_subject",
+                "severity": "error",
+                "issues": ["infographic, not a photo"],
+                "suggestion": "Anfield stadium crowd photograph",
+            }],
+            "feedback": "Image 1.1 is a subject mismatch.",
+        }
+
+    monkeypatch.setattr(image_sourcer, "_source_single_image", fake_source_single_image)
+    monkeypatch.setattr(image_sourcer.clients, "review_with_vision", fake_review_with_vision)
+
+    # Pre-place the image, exactly as a resumed run would find it.
+    raw_dir = tmp_path / "images" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (1920, 1080), (10, 10, 10)).save(
+        raw_dir / "section_001_01.jpg", format="JPEG"
+    )
+
+    script = Script(
+        title="Deadline day",
+        video_type="listicle",
+        sections=[
+            ScriptSection(
+                id=1,
+                narration="Anfield reacted.",
+                slots=[VisualSlot(visual="google_photo", keywords="Anfield crowd",
+                                  prompt="Stadium crowd.")],
+            )
+        ],
+    )
+
+    with pytest.raises(reviewer.ReviewGateError):
+        asyncio.run(image_sourcer.source_images(script, _image_source_config(), tmp_path))
+
+    assert source_calls, (
+        "a cached image rejected by the review gate was never re-sourced; "
+        "the gate had no descriptor to act on"
+    )
+
+
+def test_rejected_filenames_survive_slot_renumbering():
+    """Reviewer indices must resolve through filenames, not descriptor order.
+
+    Reproduces the renumbering case: section 3's first slot went unsourced and
+    was dropped, so the survivors were renumbered and the file the reviewer
+    calls "3.2" is section_003_03.jpg on disk. Index-based matching resolved
+    this to nothing, so the gate re-reviewed identical images until its retry
+    budget ran out and then failed the run.
+    """
+    sections_context = [
+        {"section_id": 3, "sub_image_index": 1, "image_filename": "section_003_02.jpg"},
+        {"section_id": 3, "sub_image_index": 2, "image_filename": "section_003_03.jpg"},
+    ]
+    rejected = {(3, 2): "Anfield stadium crowd photograph"}
+
+    resolved = image_sourcer._rejected_filenames(rejected, sections_context)
+
+    assert resolved == {"section_003_03.jpg": "Anfield stadium crowd photograph"}
+
+
+def test_rejected_filenames_ignores_unknown_keys():
+    """A reviewer index with no matching context entry must not raise."""
+    resolved = image_sourcer._rejected_filenames(
+        {(9, 9): "something"},
+        [{"section_id": 1, "sub_image_index": 1, "image_filename": "section_001_01.jpg"}],
+    )
+    assert resolved == {}
+
+
+def test_image_review_regeneration_targets_the_rejected_slot(monkeypatch, tmp_path):
+    """A rejected image must actually be re-sourced, not just re-reviewed.
+
+    The reviewer numbers images the way sections_context lists them, which is
+    assigned after unsourced slots are dropped and survivors renumbered -- so
+    it does not track each descriptor's original sub_idx. Matching on that
+    index resolved every rejection to zero targets: the gate burned its whole
+    retry budget re-reviewing the identical files and then failed the run.
+    Resolution goes through the filename, so this asserts a real re-source.
+    """
+    source_calls: list[str] = []
+
+    async def fake_source_single_image(**kwargs):
+        out = kwargs["output_path"]
+        out.parent.mkdir(parents=True, exist_ok=True)
+        source_calls.append(out.name)
+        # Vary the pixels so the retry is not rejected as a duplicate hash.
+        shade = 40 + 30 * len(source_calls)
+        Image.new("RGB", (1920, 1080), (shade, shade, shade)).save(out, format="JPEG")
+        return "serper"
+
+    async def fake_review_with_vision(prompt, image_paths, **kwargs):
+        return {
+            "approved": False,
+            "image_results": [
+                {
+                    "section_id": 2,
+                    "sub_image_index": 1,
+                    "approved": False,
+                    "failure_type": "wrong_subject",
+                    "severity": "error",
+                    "issues": ["shows an infographic, not the stadium"],
+                    "suggestion": "Anfield stadium crowd photograph",
+                }
+            ],
+            "feedback": "Image 2.1 is a subject mismatch.",
+        }
+
+    monkeypatch.setattr(image_sourcer, "_source_single_image", fake_source_single_image)
+    monkeypatch.setattr(image_sourcer.clients, "review_with_vision", fake_review_with_vision)
+
+    script = Script(
+        title="Deadline day",
+        video_type="listicle",
+        sections=[
+            ScriptSection(
+                id=1,
+                narration="The window shut at eleven.",
+                slots=[VisualSlot(visual="google_photo", keywords="transfer deadline clock",
+                                  prompt="Deadline day clock.")],
+            ),
+            ScriptSection(
+                id=2,
+                narration="Anfield reacted.",
+                slots=[VisualSlot(visual="google_photo", keywords="Anfield crowd",
+                                  prompt="Stadium crowd.")],
+            ),
+        ],
+    )
+
+    with pytest.raises(reviewer.ReviewGateError):
+        asyncio.run(image_sourcer.source_images(script, _image_source_config(), tmp_path))
+
+    # Section 2's file is sourced once on the first pass and again on the
+    # retry; section 1 was approved and must not be re-sourced.
+    assert source_calls.count("section_002_01.jpg") == 2, (
+        f"rejected slot was not re-sourced; calls={source_calls}"
+    )
+    assert source_calls.count("section_001_01.jpg") == 1, (
+        f"approved slot should not be re-sourced; calls={source_calls}"
+    )
+
+
+def _web_photos_only_config() -> ChannelConfig:
+    config = _image_source_config()
+    config.image_sourcing.web_photos_only = True
+    return config
+
+
+def test_web_photos_only_never_falls_back_to_generation(monkeypatch, tmp_path):
+    """A web-photos-only channel must never produce an AI-generated visual.
+
+    Regression: b-roll descriptors omitted allow_generation_fallback, so the
+    `.get(..., True)` default re-enabled image generation for those slots and
+    an AI image reached the render.
+    """
+    generated: list[str] = []
+
+    async def fake_generate_image_gemini(prompt, output_path, **kwargs):
+        generated.append(str(output_path))
+        return output_path
+
+    async def fake_search_serper(*args, **kwargs):
+        return False  # every web search misses
+
+    monkeypatch.setattr(
+        image_sourcer.clients, "generate_image_gemini", fake_generate_image_gemini
+    )
+    monkeypatch.setattr(image_sourcer, "_search_serper", fake_search_serper)
+
+    result = asyncio.run(
+        image_sourcer._source_single_image(
+            keywords="stadium crowd",
+            prompt="a stadium crowd",
+            image_source="serper",
+            config=_web_photos_only_config(),
+            output_path=tmp_path / "section_001_02.jpg",
+            client=object(),
+            seen_hashes=set(),
+            lane="photo",
+            # The b-roll fallback path used to arrive here with True.
+            allow_generation_fallback=True,
+        )
+    )
+
+    assert result is None
+    assert generated == [], "web_photos_only must not generate images"
+
+
+def test_generation_still_allowed_when_web_photos_only_is_off(monkeypatch, tmp_path):
+    """The guard must not disable generation for ordinary channels."""
+    generated: list[str] = []
+
+    async def fake_generate_image_gemini(prompt, output_path, **kwargs):
+        generated.append(str(output_path))
+        return output_path
+
+    async def fake_search_serper(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(
+        image_sourcer.clients, "generate_image_gemini", fake_generate_image_gemini
+    )
+    monkeypatch.setattr(image_sourcer, "_search_serper", fake_search_serper)
+
+    result = asyncio.run(
+        image_sourcer._source_single_image(
+            keywords="stadium crowd",
+            prompt="a stadium crowd",
+            image_source="serper",
+            config=_image_source_config(),
+            output_path=tmp_path / "section_001_02.jpg",
+            client=object(),
+            seen_hashes=set(),
+            lane="photo",
+            allow_generation_fallback=True,
+        )
+    )
+
+    assert result == "ai_gen"
+    assert len(generated) == 1

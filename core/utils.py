@@ -227,6 +227,21 @@ class ImageSourcingConfig(BaseModel):
     # people and events. When true, every photo-lane slot is sourced from web
     # image search and AI image generation is never used as a fallback.
     web_photos_only: bool = False
+    # Ask Pixabay, Unsplash and Wikimedia Commons for a beat the configured
+    # source could not fill, before falling back to a generated image.
+    #
+    # Off by default so no channel gains three new upstreams by upgrading, and
+    # so a test run never reaches for the network. The channels that want more
+    # real photographs opt in. Each catalogue carries its own licence, and the
+    # candidate's licence and credit are recorded with it.
+    open_library_fallback: bool = False
+    # Per-scene ambience and sound cues, sourced from Freesound and generated
+    # by ElevenLabs when no recording fits. Adds two mixed layers alongside
+    # the music bed and transition track, which are unchanged.
+    #
+    # Off by default: it costs API calls and a little generation credit, so a
+    # channel opts in rather than inheriting it.
+    scene_audio: bool = False
     # Last-resort cover for a run that would otherwise be stopped.
     #
     # `web_photos_only` still governs ordinary sourcing: every photo-lane slot
@@ -243,6 +258,19 @@ class ImageSourcingConfig(BaseModel):
     # This is a ceiling on how much of a video may be motion footage, not a
     # target. Photographs still carry the facts -- b-roll is atmosphere, and
     # the review gate holds it to the scene rather than the topic.
+    # Finish the video rather than abandon it.
+    #
+    # When a section still lacks photographs after every sourcing tier, the
+    # default is to stop the run: for a news channel a thin video is worse
+    # than no video. A storytelling channel trades the other way -- a beat
+    # carried by a licensed clip or a text card is still the story, and losing
+    # eight minutes of narration and rendering to two unfindable photographs
+    # is not.
+    #
+    # What this never does: reuse an image across unrelated beats, invent
+    # evidence, or relax the relevance gate. It changes what happens to a beat
+    # nothing could be found for, not the standard for finding it.
+    complete_over_coverage: bool = False
     allow_video_broll: bool = False
     max_broll_ratio: float = 0.34
     allow_generated_fallback: bool = False

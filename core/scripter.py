@@ -397,6 +397,181 @@ def _destage_slot_briefs(script_data: dict, *, web_photos_only: bool) -> None:
                     slot[field] = cleaned
 
 
+# Words that carry no search value once a prompt becomes a query.
+_KEYWORD_STOPWORDS = frozenset("""
+a an the of in on at to from with and or for by as is are was were be being been
+this that these those its it his her their there here into onto over under above
+showing shows show seen looking view shot image photo photograph picture close
+up wide angle scene depicting depicts featuring feature featured
+""".split())
+
+# A `visual` value long enough to be prose rather than a type name.
+_PROSE_VISUAL_RE = re.compile(r"\s")
+
+# Slots whose picture is found by searching, so they need search keywords as
+# well as a prompt. ai_photo and ai_illustration are deliberately absent: they
+# are generated from the prompt, and demanding keywords for them would fail
+# scripts on the channels that use an AI lane.
+_SEARCHED_VISUAL_TYPES = frozenset(
+    VisualSlot.SOURCEABLE_TYPES - {"ai_photo", "ai_illustration"}
+)
+
+
+# Mood, style and atmosphere words. They describe how a picture should feel,
+# which image search cannot act on: "eerie" matches horror-poster artwork, and
+# "cinematic" matches stills from films. Both then fail the relevance gate for
+# not being real photographs of the subject.
+#
+# Deliberately conservative. A word stays off this list if it can name
+# something concrete -- "dark room", "desolate landscape" and "abandoned
+# factory" are all searchable places, so dark/desolate/abandoned are absent.
+_MOOD_STYLE_WORDS = frozenset("""
+strange eerie eerily creepy spooky haunting hauntingly mysterious mystery
+ominous sinister chilling unsettling unnerving foreboding uncanny
+dramatic dramatically cinematic cinematically atmospheric moody
+stylized stylised artistic aesthetic epic breathtaking stunning
+beautiful gorgeous majestic serene tranquil peaceful idyllic
+striking evocative haunted ghostly spectral surreal ethereal dreamlike
+otherworldly nostalgic melancholy melancholic somber sombre
+tense suspenseful thrilling terrifying frightening scary horrifying
+grim bleak forlorn desolation gloom gloomy foreboding
+vivid vibrant dreamy magical mystical whimsical
+""".split())
+
+# Weather and season written as a feeling rather than a thing. The setting is
+# real and worth searching for; the adjective form is not what a caption says.
+_ATMOSPHERE_NOUNS = {
+    "snowy": "snow",
+    "snow-covered": "snow",
+    "foggy": "fog",
+    "misty": "mist",
+    "rainy": "rain",
+    "stormy": "storm",
+    "windy": "wind",
+    "cloudy": "cloud",
+    "wintry": "winter",
+}
+
+
+def strip_mood_words(keywords: str) -> str:
+    """Reduce a search brief to the concrete things in it.
+
+    Subjects, places, objects, people, documents and events survive. Mood and
+    style words are dropped, and weather written as an adjective becomes the
+    thing itself ("snowy" -> "snow") so it still narrows the search.
+
+    Returns "" only when the input held nothing concrete at all; callers keep
+    the original in that case rather than shipping an empty brief.
+    """
+    text = re.sub(r"[^\w\s-]", " ", str(keywords or ""))
+    kept: list[str] = []
+    for word in text.split():
+        lowered = word.lower()
+        if lowered in _MOOD_STYLE_WORDS:
+            continue
+        kept.append(_ATMOSPHERE_NOUNS.get(lowered, word))
+    return " ".join(kept)
+
+
+def _derive_keywords(prompt: str, *, limit: int = 8) -> str:
+    """Turn a visual prompt into a search query.
+
+    Not a summary -- just the prompt's content words in order, which is what a
+    human writes when they turn a description into a search. Punctuation and
+    filler go; the subject survives in the order the prompt named it.
+    """
+    text = re.sub(r"[^\w\s-]", " ", str(prompt or ""))
+    words: list[str] = []
+    for word in text.split():
+        lowered = word.lower()
+        if lowered in _KEYWORD_STOPWORDS or len(lowered) < 2:
+            continue
+        words.append(word)
+        if len(words) >= limit:
+            break
+    return " ".join(words)
+
+
+def _repair_slot_fields(script_data: dict) -> None:
+    """Put misplaced slot fields where the schema expects them.
+
+    Two shapes the model produces that are perfectly usable but structurally
+    wrong, and that used to burn an entire generation before anyone noticed:
+
+    1. The description lands in `visual` instead of `prompt`. A Dyatlov run
+       failed both revision attempts this way, every slot reading
+
+           "visual": "Group photo of the Dyatlov hikers, smiling and posing…"
+
+       The content was fine; only the field was wrong. It is moved to `prompt`
+       and the slot is typed as a sourced photograph.
+
+    2. `prompt` is written but `keywords` is left empty. Image search is given
+       the keywords, not the prompt, so such a slot cannot be sourced at all --
+       two info_slides shipped that way and took their beats down with them.
+       The keywords are derived from the prompt.
+
+    Repairing here rather than failing keeps validation strict: the rules do
+    not move, the model's output is put into the shape the rules already
+    expect. Anything that cannot be repaired still fails.
+    """
+    for section in script_data.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for slot in section.get("slots") or []:
+            if not isinstance(slot, dict):
+                continue
+
+            visual = str(slot.get("visual") or "").strip()
+
+            # 1. A description in the type field.
+            if visual and visual not in _ALLOWED_SLOT_VISUALS and _PROSE_VISUAL_RE.search(visual):
+                if not str(slot.get("prompt") or "").strip():
+                    slot["prompt"] = visual
+                # google_photo is the safest landing place: it is a sourced
+                # photograph on every channel, and the photo-only channels
+                # route it through web search exactly as they would have.
+                slot["visual"] = "google_photo"
+                visual = "google_photo"
+                logger.info(
+                    "Slot carried its description in the \"visual\" field; "
+                    "moved it to \"prompt\" and typed the slot google_photo"
+                )
+
+            # 2. Keywords derived from the prompt when the model omitted them.
+            if visual in _SEARCHED_VISUAL_TYPES:
+                keywords = str(slot.get("keywords") or "").strip()
+                prompt = str(slot.get("prompt") or "").strip()
+                if not keywords and prompt:
+                    derived = _derive_keywords(prompt)
+                    if derived:
+                        keywords = derived
+                        slot["keywords"] = derived
+                        logger.info(
+                            f"Slot had no search keywords; derived "
+                            f"{derived!r} from its prompt"
+                        )
+
+                # 3. Mood and style words removed from whatever the keywords
+                #    now are. Image search cannot act on "eerie" or
+                #    "cinematic"; they pull in artwork and film stills, which
+                #    the relevance gate then rejects for not being real
+                #    photographs. Stripping them here means the slot is
+                #    searched for its subject instead of failing.
+                #
+                #    Never blanked: a brief made only of mood words keeps its
+                #    original text so validation can report it rather than the
+                #    repair silently emptying the field.
+                if keywords:
+                    concrete = strip_mood_words(keywords)
+                    if concrete and concrete.lower() != keywords.lower():
+                        slot["keywords"] = concrete
+                        logger.info(
+                            f"Removed mood/style words from slot keywords: "
+                            f"{keywords!r} -> {concrete!r}"
+                        )
+
+
 def _coerce_slot_keywords(script_data: dict) -> None:
     """Flatten list-shaped slot keywords into the search string the model owes us.
 
@@ -679,22 +854,38 @@ def _script_validation_errors(
                 errors.append(
                     f"Section {section_id} slot {slot_index}: info_slide requires an image prompt; do not use image-less text slides."
                 )
-            # A prompt without keywords is not sourceable. The prompt is what
-            # the review gate judges against; the keywords are what image
-            # search is actually given. A Dyatlov run shipped two info_slides
-            # with a full prompt and an empty keywords field, so search was
-            # handed nothing, both beats were dropped, and the run died two
-            # slots short of its minimum.
-            if visual in ("info_slide", "info_card") and not str(
-                slot.get("keywords", "")
-            ).strip():
-                errors.append(
-                    f"Section {section_id} slot {slot_index}: {visual} has an "
-                    f"empty \"keywords\" field. Image search is given the "
-                    f"keywords, not the prompt, so this beat cannot be sourced "
-                    f"at all. Add concrete search keywords naming the real "
-                    f"subject to photograph."
+            # Every slot that gets an image needs both halves of the contract:
+            # the prompt is what the review gate judges the picture against,
+            # the keywords are what image search is actually given. A slot
+            # missing either cannot be sourced -- two info_slides shipped with
+            # an empty keywords field and took their beats down with them.
+            #
+            # `_repair_slot_fields` derives keywords from the prompt before
+            # this runs, so reaching here means neither field was usable.
+            if visual in _SEARCHED_VISUAL_TYPES:
+                what = (
+                    "background image" if visual == "subscribe_cta" else "image"
                 )
+                # info_slide already has its own prompt check above; emitting a
+                # second one for the same slot gives the model two
+                # instructions for one problem.
+                if visual != "info_slide" and not str(
+                    slot.get("prompt", "")
+                ).strip():
+                    errors.append(
+                        f"Section {section_id} slot {slot_index}: {visual} has "
+                        f"an empty \"prompt\" field. Describe the {what} to "
+                        f"source; the review gate judges the picture against "
+                        f"this description."
+                    )
+                if not str(slot.get("keywords", "")).strip():
+                    errors.append(
+                        f"Section {section_id} slot {slot_index}: {visual} has "
+                        f"an empty \"keywords\" field. Image search is given "
+                        f"the keywords, not the prompt, so this beat cannot be "
+                        f"sourced at all. Add concrete {what} search keywords "
+                        f"naming the real subject to photograph."
+                    )
             # On a web-photo-only channel the keywords are the whole contract
             # with image search: if they name something no photograph or
             # archival document contains, every candidate is rejected and the
@@ -925,6 +1116,12 @@ async def generate_script(
     def _validate_generated_script(
         content: dict,
     ) -> tuple[list[str], list[dict], int, int, int, int]:
+        # Normalise before judging. The model sometimes puts the description
+        # in `visual` or omits `keywords` entirely -- both usable content in
+        # the wrong shape, and both previously fatal. Repairing first means the
+        # validator judges the script's substance rather than its typing.
+        _coerce_slot_keywords(content)
+        _repair_slot_fields(content)
         _apply_word_based_duration_estimates(
             content,
             timing_profile=timing_profile,

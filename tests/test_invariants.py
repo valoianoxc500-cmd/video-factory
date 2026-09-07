@@ -20,25 +20,35 @@ def test_script_structure(workspace_script):
     assert errors == [], errors
 
 
-def test_all_images_present(latest_workspace, workspace_script, channel_config):
+def test_all_images_present(
+    latest_workspace, workspace_script, channel_config, require_stage
+):
+    require_stage("process")
     errors = validate_ready_images(latest_workspace, workspace_script, channel_config)
     assert errors == [], errors
 
 
-def test_audio_sections_match_script(latest_workspace, workspace_script):
+def test_audio_sections_match_script(
+    latest_workspace, workspace_script, require_stage
+):
+    require_stage("audio_source")
     errors = validate_audio(latest_workspace, workspace_script)
     assert errors == [], errors
 
 
-def test_thumbnail_dimensions(latest_workspace):
+def test_thumbnail_dimensions(latest_workspace, require_stage, channel_config):
+    """Expected dimensions are per-channel: a 9:16 channel publishes a vertical
+    thumbnail, so checking against a fixed 1280x720 fails a correct one."""
+    require_stage("thumbnail")
     thumb = latest_workspace / "thumbnail.png"
     if not thumb.exists():
         pytest.skip("No thumbnail in workspace")
-    errors = validate_thumbnail(thumb)
+    errors = validate_thumbnail(thumb, channel_config)
     assert errors == [], errors
 
 
-def test_video_has_correct_streams(latest_workspace, channel_config):
+def test_video_has_correct_streams(latest_workspace, channel_config, require_stage):
+    require_stage("assemble")
     videos = list(latest_workspace.glob("*.mp4"))
     if not videos:
         pytest.skip("No video in workspace")
@@ -48,7 +58,8 @@ def test_video_has_correct_streams(latest_workspace, channel_config):
     assert stream_errors == [], stream_errors
 
 
-def test_video_resolution_matches_config(latest_workspace, channel_config):
+def test_video_resolution_matches_config(latest_workspace, channel_config, require_stage):
+    require_stage("assemble")
     videos = list(latest_workspace.glob("*.mp4"))
     if not videos:
         pytest.skip("No video in workspace")
@@ -57,7 +68,8 @@ def test_video_resolution_matches_config(latest_workspace, channel_config):
     assert res_errors == [], res_errors
 
 
-def test_video_has_no_decode_errors(latest_workspace, channel_config):
+def test_video_has_no_decode_errors(latest_workspace, channel_config, require_stage):
+    require_stage("assemble")
     videos = list(latest_workspace.glob("*.mp4"))
     if not videos:
         pytest.skip("No video in workspace")

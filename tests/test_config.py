@@ -1,11 +1,14 @@
 """Config loading, schema validation, and utility tests."""
 
 import os
+import re
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from core import assembler
+from settings import settings
 from core.utils import (
     ChannelConfig,
     Checkpoint,
@@ -195,7 +198,9 @@ def test_demo_channel_business_strategy_has_three_content_families():
 
 
 def test_all_channels_use_single_image_generation_model(channel_config):
-    assert channel_config.image_sourcing.generation_model == "gemini-3.1-flash-image-preview"
+    # Pinned to the configured default rather than a literal, so migrating the
+    # image model in settings/.env doesn't require editing every channel test.
+    assert channel_config.image_sourcing.generation_model == settings.gemini_image_model
 
 
 def test_demo_channel_enables_inline_component_art():
@@ -331,6 +336,69 @@ def test_demo_channel_no_sepia_filter():
 def test_channel_styles_have_transition_pool(channel_config):
     pool = channel_config.style.video.get("transition_pool")
     assert pool and len(pool) >= 1, "style.video.transition_pool must be a non-empty list"
+
+
+# Phrases that only ever came from demo_channel's productivity-explainer copy.
+# A football channel carrying these is steering its planner and scripter with
+# the wrong exemplars, which surfaces later as off-topic scripts and image
+# queries that no football photo can satisfy.
+_DEMO_LEFTOVER_MARKERS = (
+    "everyday habits",
+    "design choices that make tools easier",
+    "simple systems are easier to maintain",
+    "The Simple Workflow That Saved an Afternoon",
+    "Digital Tools Easier to Use",
+)
+
+
+@pytest.mark.parametrize("marker", _DEMO_LEFTOVER_MARKERS)
+def test_football_config_has_no_demo_channel_leftovers(marker):
+    """football_news must not inherit demo_channel's example content.
+
+    These fields are prompt inputs, not documentation: example_topics,
+    video_types[*].example and script_style all reach the model.
+    """
+    raw = (
+        Path(__file__).resolve().parents[1]
+        / "config" / "channels" / "football_news.json"
+    ).read_text(encoding="utf-8")
+    assert marker.lower() not in raw.lower(), (
+        f"football_news.json still contains demo_channel copy: {marker!r}"
+    )
+
+
+def _remotion_supported_transitions() -> set[str]:
+    """Transition names the Remotion renderer can actually draw.
+
+    Read out of transitions.ts rather than duplicated here, so adding a
+    transition on one side and forgetting the other is caught.
+    """
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "rendering" / "remotion" / "src" / "lib" / "transitions.ts"
+    ).read_text(encoding="utf-8")
+    # The declared type contains "=>", so scan lazily to the opening brace
+    # rather than trying to bracket-match the generic.
+    body = re.search(r"const TRANSITIONS\b.*?=\s*\{(.*?)\n\};", src, re.S)
+    assert body, "could not locate the TRANSITIONS record in transitions.ts"
+    return set(re.findall(r"^\s*(\w+)\s*[,:]", body.group(1), re.M))
+
+
+def test_transition_pool_names_are_renderable(channel_config):
+    """Every configured transition must exist in both render paths.
+
+    `dissolve` sat in the football pool while transitions.ts implemented only
+    fade/wipeleft/cut, so every Remotion boundary quietly rendered a plain
+    fade. Nothing failed -- the videos just silently lost half their
+    transition variety.
+    """
+    supported = _remotion_supported_transitions() | set(assembler._TRANSITION_MAP)
+    pool = channel_config.style.video.get("transition_pool") or []
+    unknown = sorted(set(pool) - supported)
+    assert not unknown, (
+        f"transition_pool references {unknown}, which no render path implements. "
+        f"Supported: {sorted(supported)}"
+    )
 
 
 # ── Script structure diversification ─────────────────────────────

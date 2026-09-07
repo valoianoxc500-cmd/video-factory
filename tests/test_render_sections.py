@@ -150,6 +150,70 @@ def test_transition_crossfade_mapped_to_fade():
     assert t["type"] == "fade"
 
 
+# A spread of real football subjects: transfers, results, explainers, and
+# stories, in both languages the channel produces. Section titles are what the
+# transition hash keys on, so this is the axis along which behaviour can vary
+# from topic to topic.
+FOOTBALL_SECTION_TITLES = [
+    "صفقة الانتقال الأغلى في تاريخ النادي",
+    "ما الذي حسم مباراة دوري الأبطال",
+    "كيف يعمل اللعب المالي النظيف",
+    "قصة عودة لن ينساها الجمهور",
+    "الحكم المساعد بالفيديو وقرار مثير للجدل",
+    "Record Transfer Fee Explained",
+    "What Decided The Champions League Tie",
+    "Why This Manager Was Sacked",
+    "The Comeback That Shocked Football",
+    "Financial Fair Play In Plain Arabic",
+]
+
+
+def test_football_transitions_are_renderable_across_topics():
+    """Every topic must resolve to a transition both render paths implement.
+
+    `dissolve` was in the football pool while the Remotion renderer knew only
+    fade/wipeleft/cut, so roughly half of all section boundaries silently
+    degraded to a plain fade. Nothing errored, which is why it went unnoticed
+    -- hence checking the resolved name rather than the configured one.
+    """
+    from core import assembler
+    from core.utils import load_channel_config
+    from tests.test_config import _remotion_supported_transitions
+
+    config = load_channel_config("football_news")
+    supported = _remotion_supported_transitions() | set(assembler._TRANSITION_MAP)
+
+    for title in FOOTBALL_SECTION_TITLES:
+        t = _select_transition(config, title, INTRA_CROSSFADE)
+        assert t["type"] in supported, (
+            f"{title!r} resolved to transition {t['type']!r}, which no render "
+            f"path implements"
+        )
+
+
+def test_football_transition_pool_is_actually_exercised():
+    """The configured pool should vary across topics, not collapse to one name.
+
+    Guards the other half of the bug: a pool can be fully renderable and still
+    be pointless if the selector only ever returns its first entry.
+    """
+    from core.utils import load_channel_config
+
+    config = load_channel_config("football_news")
+    pool = config.style.video.get("transition_pool", [])
+    if len(pool) < 2:
+        pytest.skip("pool has a single entry; nothing to vary")
+
+    seen = {
+        _select_transition(config, title, INTRA_CROSSFADE)["type"]
+        for title in FOOTBALL_SECTION_TITLES
+    }
+    assert len(seen) >= 2, (
+        f"across {len(FOOTBALL_SECTION_TITLES)} topics only {seen} was ever "
+        f"selected from pool {pool}"
+    )
+
+
 # ── Sub-slot duration computation ────────────────────────────────
 
 
@@ -592,7 +656,7 @@ def test_check_windows_gpu_preflight_accepts_hardware_accelerated_output(monkeyp
         "OpenGL: Enabled",
     ])
 
-    def fake_run(cmd, capture_output, text, cwd):
+    def fake_run(cmd, capture_output, text, cwd, **kwargs):
         assert cmd[-4:] == ["--chrome-mode", "chrome-for-testing", "--gl", "angle"]
 
         class _Result:
@@ -619,7 +683,7 @@ def test_check_windows_gpu_preflight_rejects_software_output(monkeypatch):
         "OpenGL: Disabled",
     ])
 
-    def fake_run(cmd, capture_output, text, cwd):
+    def fake_run(cmd, capture_output, text, cwd, **kwargs):
         class _Result:
             returncode = 0
             stdout = output
@@ -628,13 +692,14 @@ def test_check_windows_gpu_preflight_rejects_software_output(monkeypatch):
         return _Result()
 
     monkeypatch.setattr(render_sections.subprocess, "run", fake_run)
+    monkeypatch.setattr(render_sections.settings, "remotion_require_gpu", True)
 
     with pytest.raises(RuntimeError, match="software rendering"):
         _check_windows_gpu_preflight()
 
 
 def test_check_windows_gpu_preflight_rejects_malformed_output(monkeypatch):
-    def fake_run(cmd, capture_output, text, cwd):
+    def fake_run(cmd, capture_output, text, cwd, **kwargs):
         class _Result:
             returncode = 0
             stdout = "unexpected output"
@@ -643,9 +708,28 @@ def test_check_windows_gpu_preflight_rejects_malformed_output(monkeypatch):
         return _Result()
 
     monkeypatch.setattr(render_sections.subprocess, "run", fake_run)
+    monkeypatch.setattr(render_sections.settings, "remotion_require_gpu", True)
 
     with pytest.raises(RuntimeError, match="no parseable status"):
         _check_windows_gpu_preflight()
+
+
+def test_check_windows_gpu_preflight_warns_when_gpu_not_required(monkeypatch, caplog):
+    def fake_run(cmd, capture_output, text, cwd, **kwargs):
+        class _Result:
+            returncode = 0
+            stdout = "Canvas: Software only. Hardware acceleration disabled"
+            stderr = ""
+
+        return _Result()
+
+    monkeypatch.setattr(render_sections.subprocess, "run", fake_run)
+    monkeypatch.setattr(render_sections.settings, "remotion_require_gpu", False)
+
+    with caplog.at_level("WARNING"):
+        assert _check_windows_gpu_preflight() == {}
+
+    assert "software rendering" in caplog.text
 
 
 def test_build_section_encode_cmd_uses_nvenc(tmp_path):
@@ -676,7 +760,9 @@ def test_render_scene_uses_sequence_and_nvenc_on_windows(monkeypatch, tmp_path):
     calls: list[tuple] = []
     removed: list[tuple] = []
 
-    async def fake_run_remotion_render(cmd, cwd):
+    async def fake_run_remotion_render(cmd, cwd, **kwargs):
+        # **kwargs absorbs the timeout budget and retry label the real
+        # function now takes.
         calls.append(("render", cmd, cwd))
 
     def fake_encode_section_frames(frames_dir, out_path, fps, duration_frames, sequence_image_format):

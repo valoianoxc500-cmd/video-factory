@@ -149,7 +149,10 @@
     "max_generated_fallback_images": 5,
     "generated_fallback_model": "gemini-3.1-flash-lite-image",
     "allow_video_broll": true,
-    "max_broll_ratio": 0.34
+    "max_broll_ratio": 0.34,
+    "complete_over_coverage": true,
+    "open_library_fallback": true,
+    "scene_audio": true
   },
   "youtube": {
     "category_id": "27",

@@ -24,6 +24,7 @@ import prompts
 from core import generated_visuals
 from core.bilingual_queries import build_bilingual_queries, is_single_script
 from core.framing import subject_aware_fit, verticality_score
+from core.scripter import strip_mood_words
 from core.utils import meets_minimum_source_size, minimum_source_size
 from core.reviewer import review_gate
 from core.utils import (
@@ -63,6 +64,29 @@ _PEXELS_CANDIDATE_COUNT = 8
 _SERPER_CANDIDATE_COUNT = 8
 _SERPER_MAX_ATTEMPTS = 3
 _SERPER_RETRY_BACKOFF = 1.5  # seconds, multiplied by the attempt number
+
+# Pexels search shape. Pexels is a curated stock catalogue rather than a web
+# index: it matches short noun phrases and returns nothing at all for a slot's
+# full descriptive brief. Each beat therefore searches a short ladder of
+# progressively simpler queries instead of the one phrasing the script chose,
+# and every query in the ladder runs at once.
+_PEXELS_QUERY_LADDER_LIMIT = 4
+_PEXELS_PER_QUERY_PAGE = 15
+# A photographer uploads a whole shoot at once, so the top of a result page is
+# regularly six near-identical frames. Capping them keeps the candidate set an
+# actual choice.
+_PEXELS_MAX_PER_PHOTOGRAPHER = 2
+# How much of a candidate's rank comes from matching the beat's own words. The
+# rest is how well the photo survives the vertical crop.
+_PEXELS_RELEVANCE_WEIGHT = 0.65
+
+# Pexels photo ids that have already shipped on a beat this run, and the ids a
+# beat is holding while it downloads and reviews. Beats source concurrently,
+# so content-hash dedup alone came too late: two beats could download the same
+# photo before either had written its file, and the same picture would appear
+# on two unrelated beats.
+_PEXELS_COMMITTED_IDS: set[str] = set()
+_PEXELS_CLAIMED_IDS: set[str] = set()
 
 
 def _is_blank_media_prompt(text: str) -> bool:
@@ -148,6 +172,39 @@ def _record_candidate_provenance(
 def _reset_provenance() -> None:
     _CANDIDATE_PROVENANCE.clear()
     _ASSET_PROVENANCE.clear()
+
+
+def _reset_pexels_dedup() -> None:
+    """Forget which Pexels photos this run has used. Per run, not per beat."""
+    _PEXELS_COMMITTED_IDS.clear()
+    _PEXELS_CLAIMED_IDS.clear()
+
+
+def _claim_pexels_photo(photo_id: str) -> bool:
+    """Reserve a photo for the beat about to download it.
+
+    False means another beat has it -- either shipped, or in flight. Photos
+    without an id (test doubles, malformed rows) are never reserved; the
+    content-hash check downstream still catches those.
+    """
+    if not photo_id:
+        return True
+    if photo_id in _PEXELS_COMMITTED_IDS or photo_id in _PEXELS_CLAIMED_IDS:
+        return False
+    _PEXELS_CLAIMED_IDS.add(photo_id)
+    return True
+
+
+def _release_pexels_photos(photo_ids) -> None:
+    """Return photos a beat downloaded but did not ship to the shared pool."""
+    _PEXELS_CLAIMED_IDS.difference_update({pid for pid in photo_ids if pid})
+
+
+def _commit_pexels_photo(photo_id: str) -> None:
+    """Retire a photo for the rest of the run: it is shipping on this beat."""
+    if photo_id:
+        _PEXELS_COMMITTED_IDS.add(photo_id)
+        _PEXELS_CLAIMED_IDS.discard(photo_id)
 
 
 def save_asset_provenance(workspace: Path) -> Path:
@@ -536,6 +593,7 @@ async def source_images(
     raw_dir = workspace / "images" / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     _reset_provenance()
+    _reset_pexels_dedup()
 
     sourcing_log = []  # tracks per-image sourcing actions
     seen_hashes: set[str] = set()  # content-hash dedup across sections
@@ -900,6 +958,20 @@ async def source_images(
         descriptors=descriptors,
         config=config,
         sourcing_log=sourcing_log,
+    )
+
+    # Fifth pass: cover whatever is still empty with a licensed clip or a text
+    # card, so a beat nothing could be found for costs the beat rather than
+    # the whole video. Opt-in per channel.
+    await _cover_unsourced_slots(
+        descriptors=descriptors,
+        config=config,
+        sourcing_log=sourcing_log,
+        videos_dir=videos_dir,
+        raw_dir=raw_dir,
+        seen_hashes=seen_hashes,
+        target_size=target_size,
+        fps=fps,
     )
 
     # Cached slots join the pool only now: they must not be re-sourced by the
@@ -1540,6 +1612,125 @@ def _subject_rescue_queries(script: Script, section, slot) -> list[str]:
     )
 
 
+async def _cover_unsourced_slots(
+    *,
+    descriptors: list[dict],
+    config: ChannelConfig,
+    sourcing_log: list[dict],
+    videos_dir: Path,
+    raw_dir: Path,
+    seen_hashes: set[str],
+    target_size: tuple[int, int],
+    fps: int,
+) -> int:
+    """Give a beat something honest to show rather than losing the video.
+
+    Runs last, on slots that web search, subject rescue and generation have all
+    failed to fill. Two covers, in order:
+
+      1. A licensed Pexels clip for the beat's own keywords. Stock footage of a
+         mountain in a storm is not a record of this story's events, and the
+         documentary review rules already hold it to the scene rather than the
+         topic -- so it sets the moment without claiming to document it.
+      2. An info_card: the renderer draws it from the slot's own text. No
+         picture, no sourcing, nothing to get wrong.
+
+    What this deliberately does not do is reuse an already-sourced image. A
+    photograph that belongs to one beat becomes wrong the moment it is shown
+    under another, and a video that cycles four images across twelve beats is
+    the failure `enforce_minimum_slots` was written to prevent.
+
+    Returns how many slots it covered.
+    """
+    if not getattr(config.image_sourcing, "complete_over_coverage", False):
+        return 0
+
+    unsourced = [d for d in descriptors if not d.get("sourced", True)]
+    if not unsourced:
+        return 0
+
+    covered = 0
+    broll_ok = getattr(config.image_sourcing, "allow_video_broll", False)
+
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        for desc in unsourced:
+            section = desc["section"]
+            sub_idx = desc.get("sub_idx", 0)
+            slot = desc["slot"]
+            keywords = str(desc.get("keywords") or "").strip()
+
+            # 1. Licensed motion footage for this beat's own subject.
+            if broll_ok and keywords:
+                video_path = (
+                    videos_dir / f"section_{section.id:03d}_{sub_idx + 1:02d}.mp4"
+                )
+                try:
+                    got = await _search_pexels_video(
+                        keywords=keywords,
+                        output_path=video_path,
+                        client=client,
+                        seen_hashes=seen_hashes,
+                        target_duration=desc.get("target_duration", 4.0),
+                        target_size=target_size,
+                        fps=fps,
+                    )
+                except Exception as exc:
+                    logger.debug(f"cover b-roll failed for section {section.id}: {exc}")
+                    got = False
+
+                if got:
+                    frame_path = (
+                        raw_dir / f"section_{section.id:03d}_{sub_idx + 1:02d}.jpg"
+                    )
+                    _extract_video_frame(video_path, frame_path)
+                    slot.visual = "b_roll"
+                    desc["sourced"] = True
+                    covered += 1
+                    sourcing_log.append({
+                        "section_id": section.id,
+                        "sub_image_index": sub_idx + 1,
+                        "file": video_path.name,
+                        "keywords": keywords,
+                        "source": "pexels_video (coverage)",
+                    })
+                    logger.info(
+                        f"Section {section.id} sub-image {sub_idx + 1}: covered "
+                        f"with a licensed Pexels clip"
+                    )
+                    continue
+
+            # 2. A card the renderer draws from the slot's own words.
+            text = (
+                str(getattr(slot, "prompt", "") or "").strip()
+                or keywords
+                or str(getattr(section, "narration", "") or "").strip()
+            )
+            if not text:
+                continue
+            slot.visual = "info_card"
+            slot.props = dict(getattr(slot, "props", None) or {})
+            slot.props.setdefault("text", text[:280])
+            desc["sourced"] = True
+            covered += 1
+            sourcing_log.append({
+                "section_id": section.id,
+                "sub_image_index": sub_idx + 1,
+                "file": None,
+                "keywords": keywords,
+                "source": "info_card (coverage)",
+            })
+            logger.info(
+                f"Section {section.id} sub-image {sub_idx + 1}: no photograph "
+                f"found; showing an info card instead of dropping the beat"
+            )
+
+    if covered:
+        logger.info(
+            f"covered {covered} unsourced beat(s) so the video can finish"
+        )
+    return covered
+
+
 def _broll_allowed(config: ChannelConfig, used: int, total_slots: int) -> bool:
     """Whether one more slot may be sourced as a video clip.
 
@@ -1789,6 +1980,25 @@ def enforce_minimum_slots(
         f"every beat under {config.rendering_defaults.max_visual_hold_seconds:.0f}s"
         for sid, (have, need) in sorted(short.items())
     )
+
+    # A channel that would rather finish takes the thin section. Everything
+    # that could cover the gap has already been tried by this point: search,
+    # subject rescue, generation, a licensed clip, a text card.
+    #
+    # What the renderer then does is re-show an image from *within the same
+    # section*, cycling from that section's start (_reuse_slots_to_hold_the_cap
+    # in core/render_sections.py). That is a documentary editor returning to a
+    # subject inside one beat group -- the image is real, already through the
+    # review gate, and already has its provenance recorded. It is never another
+    # section's photograph, so nothing is cycled across unrelated beats.
+    if getattr(config.image_sourcing, "complete_over_coverage", False):
+        logger.warning(
+            f"Finishing with thin sections rather than abandoning the video: "
+            f"{detail}. Those sections will re-show their own images to stay "
+            f"under the hold cap; no image crosses into another section."
+        )
+        return
+
     raise RuntimeError(
         f"Not enough real photographs to render this video without repeating "
         f"images: {detail}. The run is stopped rather than cycling the same "
@@ -1933,6 +2143,31 @@ async def _source_single_image(
                 return image_source
         except Exception as e:
             logger.warning(f"{output_path.name}: {image_source} failed: {e}")
+
+        # The configured source found nothing. Before settling for a generated
+        # image, ask the other freely-licensed catalogues -- a real photograph
+        # from Pixabay, Unsplash or Commons is a better answer for a real
+        # subject than an invented one, and this is the last point at which
+        # that choice is still open.
+        if (
+            image_source in {"pexels", "serper"}
+            and config.image_sourcing.open_library_fallback
+        ):
+            try:
+                if await _search_open_libraries(
+                    keywords,
+                    prompt,
+                    output_path,
+                    client,
+                    seen_hashes,
+                    tuple(config.video.resolution),
+                    narration=narration,
+                ):
+                    logger.info(f"Sourced {output_path.name} from an open library")
+                    return "open_libraries"
+            except Exception as e:
+                logger.warning(f"{output_path.name}: open libraries failed: {e}")
+
         if not allow_generation_fallback:
             return None
         if config.test.preview_ai_image_prompts:
@@ -2052,6 +2287,130 @@ async def _search_serper(
 
 
 
+async def _search_open_libraries(
+    keywords: str,
+    prompt: str,
+    output_path: Path,
+    client: httpx.AsyncClient,
+    seen_hashes: set[str],
+    target_size: tuple[int, int],
+    narration: str = "",
+) -> bool:
+    """Try the other freely-licensed libraries when Pexels comes up empty.
+
+    Pixabay, Unsplash and Wikimedia Commons, asked in parallel with the same
+    query ladder Pexels uses, and judged by the same candidate selection. Only
+    Pexels is left out: it has already run by the time this is reached.
+
+    This sits between stock search and AI generation on purpose. A beat with no
+    photograph otherwise falls through to a generated image, and three more
+    catalogues of real photographs is a better answer than a made-up one --
+    which is the standing rule for this pipeline, not a preference.
+
+    Licences differ across these sources, so each candidate's own licence and
+    credit are recorded as it is downloaded, and Unsplash's use is reported
+    back to Unsplash as their API guidelines require.
+    """
+    from core.providers import MediaKind, search_media
+    from core.providers.media import (
+        CommonsProvider,
+        PixabayProvider,
+        UnsplashProvider,
+    )
+
+    providers = [PixabayProvider(), UnsplashProvider(), CommonsProvider()]
+    usable = [p for p in providers if p.status().usable]
+    if not usable:
+        return False
+
+    queries = pexels_query_ladder(keywords, prompt=prompt)
+    if not queries:
+        return False
+
+    found: list = []
+    for query in queries:
+        result = await search_media(
+            query,
+            providers=usable,
+            client=client,
+            limit=_PEXELS_CANDIDATE_COUNT,
+            kind=MediaKind.PHOTO,
+            orientation="portrait",
+        )
+        found.extend(result.items)
+        if len(found) >= _PEXELS_CANDIDATE_COUNT:
+            break
+
+    if not found:
+        return False
+
+    with tempfile.TemporaryDirectory(prefix="vf_open_candidates_") as tmp_dir:
+        tmp = Path(tmp_dir)
+        candidate_hashes: set[str] = set()
+        candidate_paths: list[Path] = []
+        by_path: dict[str, object] = {}
+
+        for index, item in enumerate(found, start=1):
+            if len(candidate_paths) >= _PEXELS_CANDIDATE_COUNT:
+                break
+            if not item.url:
+                continue
+            try:
+                image_bytes = await _download_valid_image_bytes(
+                    client, item.url, target_size, output_path.name)
+            except Exception as exc:
+                logger.debug(f"Skipping {item.provider} candidate: {exc}")
+                continue
+            if image_bytes is None:
+                continue
+
+            content_hash = hashlib.md5(image_bytes).hexdigest()
+            if content_hash in seen_hashes or content_hash in candidate_hashes:
+                continue
+            candidate_hashes.add(content_hash)
+
+            candidate_path = tmp / f"{item.provider}_{index:02d}.jpg"
+            candidate_path.write_bytes(image_bytes)
+            # The item already carries exactly the provenance fields this
+            # records, so nothing is restated or lost in translation.
+            _record_candidate_provenance(candidate_path, **item.to_provenance())
+            candidate_paths.append(candidate_path)
+            by_path[str(candidate_path)] = item
+
+        if not candidate_paths:
+            return False
+
+        winner = await _select_photo_candidate(
+            source_name="open libraries",
+            keywords=keywords,
+            prompt=prompt,
+            candidate_paths=candidate_paths,
+            operation_label="open_library_candidate_selection",
+            narration=narration,
+        )
+        if winner is None:
+            logger.info(f"No acceptable open-library candidate for {output_path.name}")
+            return False
+
+        chosen = by_path.get(str(winner))
+        shipped = _finalize_selected_photo_candidate(
+            winner=winner,
+            output_path=output_path,
+            seen_hashes=seen_hashes,
+            source_name=getattr(chosen, "provider", "open libraries"),
+        )
+
+        # Unsplash requires a use to be reported back. Only once the photo has
+        # actually shipped, and never at the cost of the beat.
+        if shipped and getattr(chosen, "provider", "") == "unsplash":
+            for provider in usable:
+                if provider.name == "unsplash":
+                    await provider.report_use(chosen, client=client)
+                    break
+
+        return shipped
+
+
 async def _search_pexels(
     keywords: str,
     prompt: str,
@@ -2065,6 +2424,7 @@ async def _search_pexels(
     with tempfile.TemporaryDirectory(prefix="vf_pexels_candidates_") as tmp_dir:
         candidate_records = await _collect_pexels_candidates(
             keywords=keywords,
+            prompt=prompt,
             output_name=output_path.name,
             client=client,
             seen_hashes=seen_hashes,
@@ -2072,28 +2432,44 @@ async def _search_pexels(
             tmp_dir=Path(tmp_dir),
         )
         candidate_paths = [record["path"] for record in candidate_records]
+        photo_ids = {
+            str(record["path"]): str(record.get("pexels_id") or "")
+            for record in candidate_records
+        }
 
-        if not candidate_paths:
-            return False
+        try:
+            if not candidate_paths:
+                return False
 
-        winner = await _select_photo_candidate(
-            source_name="Pexels",
-            keywords=keywords,
-            prompt=prompt,
-            candidate_paths=candidate_paths,
-            operation_label="pexels_candidate_selection",
-            narration=narration,
-        )
-        if winner is None:
-            logger.info(f"No acceptable Pexels candidate for {output_path.name}")
-            return False
+            winner = await _select_photo_candidate(
+                source_name="Pexels",
+                keywords=keywords,
+                prompt=prompt,
+                candidate_paths=candidate_paths,
+                operation_label="pexels_candidate_selection",
+                narration=narration,
+            )
+            if winner is None:
+                logger.info(f"No acceptable Pexels candidate for {output_path.name}")
+                return False
 
-        return _finalize_selected_photo_candidate(
-            winner=winner,
-            output_path=output_path,
-            seen_hashes=seen_hashes,
-            source_name="Pexels",
-        )
+            # Retired for the rest of the run before the file is written, so
+            # no other beat can be handed the same photograph.
+            _commit_pexels_photo(photo_ids.get(str(winner), ""))
+
+            return _finalize_selected_photo_candidate(
+                winner=winner,
+                output_path=output_path,
+                seen_hashes=seen_hashes,
+                source_name="Pexels",
+            )
+        finally:
+            # Everything this beat looked at and did not ship goes back into
+            # the pool -- holding it would starve later beats of candidates.
+            _release_pexels_photos(
+                pid for pid in photo_ids.values()
+                if pid not in _PEXELS_COMMITTED_IDS
+            )
 
 
 def _finalize_selected_photo_candidate(
@@ -2320,6 +2696,195 @@ async def _collect_serper_candidates(
     return candidates
 
 
+# Words that carry no search signal. Shorter than the scripter's list on
+# purpose: this one only has to stop a query from being padded out, and a word
+# that names something ("photo album", "view finder") must survive.
+_PEXELS_QUERY_STOPWORDS = frozenset("""
+a an the of in on at to from with and or for by as is are was were be been
+this that these those its it his her their there here into onto over under
+above showing shows show seen looking view shot image photo photograph
+picture close up wide angle scene depicting depicts featuring featured
+""".split())
+
+
+def _search_sized(text: str, *, max_words: int = 6) -> str:
+    """Trim a brief to something a stock catalogue will actually match."""
+    return " ".join(str(text or "").split()[:max_words]).strip()
+
+
+def _content_words(text: str) -> list[str]:
+    cleaned = re.sub(r"[^\w\s-]", " ", str(text or ""))
+    return [
+        word
+        for word in cleaned.split()
+        if len(word) > 1 and word.lower() not in _PEXELS_QUERY_STOPWORDS
+    ]
+
+
+def pexels_query_ladder(
+    keywords: str,
+    *,
+    prompt: str = "",
+    limit: int = _PEXELS_QUERY_LADDER_LIMIT,
+) -> list[str]:
+    """Beat-specific Pexels queries, most specific first.
+
+    One phrasing per beat meant an unlucky brief cost the beat its picture --
+    "hands holding a torn 1971 flight manifest at dusk" is not a photo anyone
+    filed under that name, so the search came back empty and the beat was
+    dropped. The ladder keeps asking the same question in shorter words:
+
+        1. the brief with mood and style words removed
+        2. the same, trimmed to a length a stock catalogue matches
+        3. the subject with the staging around it stripped away
+        4. its first few content words
+        5. the trailing noun phrase, which is where the subject usually sits
+
+    Every rung still describes this beat. None of them widen to the story, so
+    a rescue cannot quietly turn into generic stock imagery.
+    """
+    base = " ".join(str(keywords or "").split())
+    concrete = strip_mood_words(base) or base
+
+    tiers = [
+        # The brief as written leads: it is the most specific thing the beat
+        # gave us, and it is what the sourcer has always searched for.
+        concrete,
+        _search_sized(concrete),
+        *(_search_sized(v) for v in _documented_subject_queries(concrete)),
+    ]
+
+    words = _content_words(concrete)
+    if len(words) > 3:
+        tiers.append(" ".join(words[:3]))
+    if len(words) >= 2:
+        tiers.append(" ".join(words[-2:]))
+
+    # Only when the slot's keywords held almost nothing to search with.
+    if len(words) < 2:
+        prompt_words = _content_words(strip_mood_words(prompt) or prompt)
+        if prompt_words:
+            tiers.append(" ".join(prompt_words[:4]))
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for tier in tiers:
+        query = " ".join(str(tier or "").split())
+        if not query or query.lower() in seen:
+            continue
+        seen.add(query.lower())
+        ordered.append(query)
+
+    # Pexels indexes English captions, so a query that is mostly another script
+    # matches nothing -- unless it is the only thing the beat gave us.
+    latin = [q for q in ordered if _latin_ratio(q) >= _MIN_LATIN_RATIO_FOR_SEARCH]
+    ordered = latin or ordered
+
+    # The cap takes the middle out, not the bottom. The broadest rung is the
+    # one that finds a picture when the brief describes something nobody has
+    # photographed, so trimming it away would cost exactly the beats this
+    # ladder exists to rescue.
+    if len(ordered) > limit:
+        ordered = ordered[: max(limit - 1, 1)] + ordered[-1:]
+    return ordered[:limit]
+
+
+def _pexels_relevance(photo: dict, tokens: list[str]) -> float:
+    """0..1 rating of how well a result matches the beat's own words.
+
+    Pexels ranks for the query it was given, so results from the widest rung
+    of the ladder come back confident and generic. Scoring every result back
+    against the beat's original words puts the specific ones first again.
+    """
+    if not tokens:
+        return 0.0
+    haystack = re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        f"{photo.get('alt') or ''} {photo.get('url') or ''}".lower(),
+    )
+    matched = sum(1 for token in tokens if token in haystack)
+    # Coverage is most of the score; the rest is reserved for phrasing, so a
+    # caption that matches every word still ranks below one that also puts
+    # them together. Two query words side by side describe the same thing --
+    # "fishing boat" -- where the same two scattered across a caption often
+    # describe two.
+    score = 0.85 * (matched / len(tokens))
+    for first, second in zip(tokens, tokens[1:]):
+        if f"{first} {second}" in haystack:
+            score += 0.15
+            break
+    return score
+
+
+def _pexels_rank(photo: dict, tokens: list[str], target_size: tuple[int, int]) -> float:
+    """Relevance leads; how well the photo survives the crop breaks ties."""
+    fit = verticality_score(
+        int(photo.get("width") or 0), int(photo.get("height") or 0), target_size
+    )
+    return (
+        _PEXELS_RELEVANCE_WEIGHT * _pexels_relevance(photo, tokens)
+        + (1 - _PEXELS_RELEVANCE_WEIGHT) * fit
+    )
+
+
+def _diversified_pexels_photos(photos: list[dict], limit: int) -> list[dict]:
+    """Best-first, but not six frames from the same shoot.
+
+    Photos over the per-photographer cap are deferred rather than dropped: a
+    thin catalogue for a query should still fill the candidate set.
+    """
+    picked: list[dict] = []
+    deferred: list[dict] = []
+    per_photographer: dict[str, int] = {}
+
+    for photo in photos:
+        who = str(photo.get("photographer_id") or photo.get("photographer") or "")
+        if who and per_photographer.get(who, 0) >= _PEXELS_MAX_PER_PHOTOGRAPHER:
+            deferred.append(photo)
+            continue
+        per_photographer[who] = per_photographer.get(who, 0) + 1
+        picked.append(photo)
+        if len(picked) >= limit:
+            return picked
+
+    return (picked + deferred)[:limit]
+
+
+async def _fetch_pexels_photos(
+    client: httpx.AsyncClient,
+    *,
+    query: str,
+    orientation: str,
+    per_page: int,
+    api_key: str,
+) -> list[dict]:
+    resp = await client.get(
+        "https://api.pexels.com/v1/search",
+        params={"query": query, "per_page": per_page, "orientation": orientation},
+        headers={"Authorization": api_key},
+    )
+    resp.raise_for_status()
+    return list(resp.json().get("photos") or [])
+
+
+async def _fetch_pexels_videos(
+    client: httpx.AsyncClient,
+    *,
+    query: str,
+    orientation: str,
+    api_key: str,
+    per_page: int = 5,
+) -> list[dict]:
+    resp = await client.get(
+        "https://api.pexels.com/v1/videos/search",
+        params={"query": query, "per_page": per_page, "orientation": orientation},
+        headers={"Authorization": api_key},
+    )
+    resp.raise_for_status()
+    return list(resp.json().get("videos") or [])
+
+
 async def _collect_pexels_candidates(
     *,
     keywords: str,
@@ -2329,48 +2894,93 @@ async def _collect_pexels_candidates(
     target_size: tuple[int, int],
     tmp_dir: Path,
     limit: int = _PEXELS_CANDIDATE_COUNT,
+    prompt: str = "",
 ) -> list[dict[str, str | Path]]:
     pexels_key = _usable_pexels_key()
     if not pexels_key:
         return []
 
+    queries = pexels_query_ladder(keywords, prompt=prompt)
+    if not queries:
+        return []
+
     # Portrait first. The output is 1080x1920, and a landscape source loses
     # ~68% of its width to the crop -- asking Pexels for landscape was
     # discarding the vertical photos that survive reframing intact. Landscape
-    # is still queried as a fallback so a thin portrait catalogue for a query
-    # cannot leave the slot unsourced.
+    # is still queried so a thin portrait catalogue cannot leave the slot
+    # unsourced. The whole grid goes out at once: it is the same number of
+    # requests the ladder would make one at a time, and a beat is no longer
+    # waiting on the rung before it.
+    searches = [
+        (query, orientation)
+        for query in queries
+        for orientation in ("portrait", "landscape")
+    ]
+    results = await asyncio.gather(
+        *[
+            _fetch_pexels_photos(
+                client,
+                query=query,
+                orientation=orientation,
+                per_page=_PEXELS_PER_QUERY_PAGE,
+                api_key=pexels_key,
+            )
+            for query, orientation in searches
+        ],
+        return_exceptions=True,
+    )
+
     photos: list[dict] = []
-    for orientation in ("portrait", "landscape"):
-        resp = await client.get(
-            "https://api.pexels.com/v1/search",
-            params={
-                "query": keywords,
-                "per_page": limit,
-                "orientation": orientation,
-            },
-            headers={"Authorization": pexels_key},
+    seen_results: set[str] = set()
+    failures = 0
+    for (query, orientation), result in zip(searches, results):
+        if isinstance(result, BaseException):
+            # One rung of the ladder failing is not the beat failing, and a
+            # beat with weak results is not the run failing.
+            failures += 1
+            logger.debug(
+                f"Pexels query {query!r} ({orientation}) failed: "
+                f"{type(result).__name__}: {result}"
+            )
+            continue
+        for photo in result:
+            key = str(photo.get("id") or "") or str(
+                (photo.get("src") or {}).get("large2x") or ""
+            )
+            if key:
+                if key in seen_results:
+                    continue
+                seen_results.add(key)
+            photos.append({**photo, "_query": query})
+
+    if failures:
+        logger.info(
+            f"{output_name}: {failures}/{len(searches)} Pexels searches failed; "
+            f"ranking the {len(photos)} result(s) that came back"
         )
-        resp.raise_for_status()
-        photos.extend(resp.json().get("photos", []))
-        if len(photos) >= limit:
-            break
     if not photos:
+        logger.info(f"{output_name}: no Pexels results for {queries}")
         return []
 
-    # Best-surviving crop first, so the reframer gets the most usable source.
-    photos.sort(
-        key=lambda p: verticality_score(
-            int(p.get("width") or 0), int(p.get("height") or 0), target_size
-        ),
-        reverse=True,
-    )
-    photos = photos[:limit]
+    tokens = [word.lower() for word in _content_words(keywords)]
+    photos.sort(key=lambda p: _pexels_rank(p, tokens, target_size), reverse=True)
 
+    # Over-fetch the shortlist: photos already claimed by another beat, ones
+    # that fail to download and ones that duplicate an earlier candidate all
+    # come off it, and the beat should still end up with a full set.
     candidate_hashes: set[str] = set()
     candidates: list[dict[str, str | Path]] = []
-    for idx, photo in enumerate(photos, start=1):
-        img_url = photo.get("src", {}).get("large2x", "")
+    for photo in _diversified_pexels_photos(photos, limit * 3):
+        if len(candidates) >= limit:
+            break
+
+        photo_id = str(photo.get("id") or "")
+        if not _claim_pexels_photo(photo_id):
+            continue
+
+        img_url = (photo.get("src") or {}).get("large2x", "")
         if not img_url:
+            _release_pexels_photos([photo_id])
             continue
 
         try:
@@ -2382,16 +2992,19 @@ async def _collect_pexels_candidates(
             )
         except Exception as e:
             logger.debug(f"Skipping Pexels candidate download failure: {e}")
+            _release_pexels_photos([photo_id])
             continue
         if image_bytes is None:
+            _release_pexels_photos([photo_id])
             continue
 
         content_hash = hashlib.md5(image_bytes).hexdigest()
         if content_hash in seen_hashes or content_hash in candidate_hashes:
+            _release_pexels_photos([photo_id])
             continue
         candidate_hashes.add(content_hash)
 
-        candidate_path = tmp_dir / f"pexels_{idx:02d}.jpg"
+        candidate_path = tmp_dir / f"pexels_{len(candidates) + 1:02d}.jpg"
         candidate_path.write_bytes(image_bytes)
         _record_candidate_provenance(
             candidate_path,
@@ -2403,7 +3016,12 @@ async def _collect_pexels_candidates(
             width=int(photo.get("width") or 0),
             height=int(photo.get("height") or 0),
         )
-        candidates.append({"path": candidate_path, "source": "pexels"})
+        candidates.append({
+            "path": candidate_path,
+            "source": "pexels",
+            "pexels_id": photo_id,
+            "query": str(photo.get("_query") or ""),
+        })
 
     return candidates
 
@@ -2455,45 +3073,73 @@ async def _search_pexels_video(
     if not pexels_key:
         return False
 
-    try:
-        resp = await client.get(
-            "https://api.pexels.com/v1/videos/search",
-            # Vertical B-roll fills the 9:16 frame without a crop; see the
-            # note in _collect_pexels_candidates.
-            params={"query": keywords, "per_page": 5, "orientation": "portrait"},
-            headers={"Authorization": pexels_key},
-        )
-        resp.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        status = e.response.status_code if e.response is not None else "unknown"
-        logger.warning(
-            f"Pexels video search failed ({status}) for query {keywords!r}; "
-            "falling back to still image sourcing"
-        )
+    # Portrait stock footage is far scarcer than portrait stills, so a beat
+    # asking for motion needs more than one phrasing to find any. Same ladder
+    # the photo path uses, and the same fan-out: portrait first for the 9:16
+    # frame, landscape as the fallback that keeps the beat moving.
+    queries = pexels_query_ladder(keywords)
+    if not queries:
         return False
-    except httpx.HTTPError as e:
-        logger.warning(
-            f"Pexels video search transport error for query {keywords!r}: {e}; "
-            "falling back to still image sourcing"
-        )
-        return False
-    videos = resp.json().get("videos", [])
-    if not videos:
-        # Portrait stock footage is much scarcer than portrait stills, so a
-        # miss here should widen the search rather than drop straight to a
-        # still image.
-        try:
-            resp = await client.get(
-                "https://api.pexels.com/v1/videos/search",
-                params={"query": keywords, "per_page": 5, "orientation": "landscape"},
-                headers={"Authorization": pexels_key},
+
+    searches = [
+        (query, orientation)
+        for query in queries
+        for orientation in ("portrait", "landscape")
+    ]
+    results = await asyncio.gather(
+        *[
+            _fetch_pexels_videos(
+                client,
+                query=query,
+                orientation=orientation,
+                api_key=pexels_key,
             )
-            resp.raise_for_status()
-            videos = resp.json().get("videos", [])
-        except httpx.HTTPError:
-            return False
+            for query, orientation in searches
+        ],
+        return_exceptions=True,
+    )
+
+    videos: list[dict] = []
+    pooled_ids: set[str] = set()
+    failures: list[BaseException] = []
+    for (query, orientation), result in zip(searches, results):
+        if isinstance(result, BaseException):
+            failures.append(result)
+            logger.debug(
+                f"Pexels video query {query!r} ({orientation}) failed: "
+                f"{type(result).__name__}: {result}"
+            )
+            continue
+        for video in result:
+            video_id = str(video.get("id") or "")
+            if video_id:
+                if video_id in pooled_ids:
+                    continue
+                pooled_ids.add(video_id)
+            videos.append(video)
+
     if not videos:
+        if len(failures) == len(searches):
+            # Every request erroring is a key or transport problem, not a thin
+            # catalogue -- worth saying out loud. The beat still falls back to
+            # a still rather than failing the run.
+            logger.warning(
+                f"{output_path.name}: every Pexels video search failed "
+                f"({type(failures[0]).__name__}: {failures[0]}); "
+                "falling back to still image sourcing"
+            )
+        else:
+            logger.info(
+                f"{output_path.name}: no Pexels footage for {queries}; "
+                "falling back to still image sourcing"
+            )
         return False
+
+    # Clips that match the beat's own words first. Pexels ranks for whichever
+    # rung found them, so without this the widest query's generic footage
+    # outranks the specific clip a narrower one turned up.
+    tokens = [word.lower() for word in _content_words(keywords)]
+    videos.sort(key=lambda v: _pexels_rank(v, tokens, target_size), reverse=True)
 
     tw, th = target_size
 
@@ -2519,7 +3165,8 @@ async def _search_pexels_video(
         if not download_url:
             continue
 
-        # Dedup by video ID
+        # Dedup by video ID, reserved before the download so two beats running
+        # concurrently cannot both ship the same clip.
         video_id = str(video.get("id", ""))
         if video_id and video_id in seen_hashes:
             continue
@@ -2532,6 +3179,11 @@ async def _search_pexels_video(
         )
         if success:
             return True
+        # The reservation only stands for a clip that shipped. A clip that
+        # failed to download is still unused footage, and holding its id would
+        # keep every later beat away from it too.
+        if video_id:
+            seen_hashes.discard(video_id)
 
     return False
 
