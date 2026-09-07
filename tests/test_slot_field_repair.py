@@ -227,7 +227,8 @@ def test_repair_runs_before_validation_in_the_generation_loop():
     source = (REPO_ROOT / "core" / "scripter.py").read_text(encoding="utf-8")
     block = source[source.index("def _validate_generated_script"):]
     block = block[: block.index("def _script_validation_feedback")]
-    repair_at = block.index("_repair_slot_fields(content)")
+    # Matched on the call, not its argument list, which has grown a keyword.
+    repair_at = block.index("_repair_slot_fields(")
     validate_at = block.index("_script_validation_errors(")
     assert repair_at < validate_at, (
         "validation runs before the repair pass, so repairable output still fails"

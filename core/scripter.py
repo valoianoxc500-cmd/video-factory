@@ -492,7 +492,135 @@ def _derive_keywords(prompt: str, *, limit: int = 8) -> str:
     return " ".join(words)
 
 
-def _repair_slot_fields(script_data: dict) -> None:
+# Every pattern that means "no photograph contains this", as strippable
+# fragments rather than reasons. Used to salvage the real subject a brief named
+# alongside a graphic device: "question mark over the Boeing 727" still tells
+# us the beat is about the aircraft.
+_UNPHOTOGRAPHABLE_FRAGMENT_RES: tuple[re.Pattern, ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern, _ in (
+        *_ALWAYS_FORBIDDEN_KEYWORD_PATTERNS,
+        *_ARTWORK_KEYWORD_PATTERNS,
+        *_CONCEPTUAL_KEYWORD_PATTERNS,
+    )
+)
+
+# Words that say how something looks or behaves rather than naming a thing. A
+# phrase made only of these is not a subject and searches no better than the
+# brief it replaced: "a glowing question mark hanging over the scene" reduces
+# to "glowing hanging" once the device is removed, which is nothing at all.
+#
+# Deliberately short. A word stays off this list if it can name something --
+# "building", "painting" and "drawing" are all subjects despite the -ing.
+_DESCRIPTOR_ONLY_WORDS = frozenset("""
+glowing shining gleaming glimmering flickering pulsing pulsating flashing
+hanging floating drifting hovering looming towering swirling spinning
+falling rising fading blurred blurry distorted warped twisted
+abstract symbolic conceptual metaphorical representing symbolising symbolizing
+blank faint dim giant huge tiny massive
+""".split())
+
+
+def _names_a_subject(phrase: str) -> bool:
+    """Whether *phrase* contains anything a camera could have been pointed at."""
+    return any(
+        word.lower() not in _DESCRIPTOR_ONLY_WORDS
+        and word.lower() not in _MOOD_STYLE_WORDS
+        for word in phrase.split()
+    )
+
+
+def strip_unphotographable_fragments(keywords: str) -> str:
+    """Remove the graphic devices and artwork words, keep everything else."""
+    text = " ".join(str(keywords or "").split())
+    for regex in _UNPHOTOGRAPHABLE_FRAGMENT_RES:
+        text = regex.sub(" ", text)
+    return " ".join(text.split())
+
+
+def _proper_nouns(text: str, *, limit: int = 5) -> str:
+    """Capitalised words after the first: the names, places and organisations.
+
+    The first word is skipped because sentence-initial capitalisation says
+    nothing about whether the word is a name. Returns "" for scripts in a
+    language without letter case, which then falls through to the next source.
+    """
+    words = re.sub(r"[^\w\s-]", " ", str(text or "")).split()
+    kept = [word for index, word in enumerate(words) if index and word[:1].isupper()]
+    return " ".join(kept[:limit])
+
+
+def _photographable_candidate(text: str, *, limit: int = 6) -> str:
+    """Reduce *text* to a concrete search phrase, or "" if it holds none."""
+    concrete = strip_unphotographable_fragments(text)
+    concrete = strip_mood_words(concrete) or concrete
+    concrete = _derive_keywords(concrete, limit=limit)
+    if not concrete or not _names_a_subject(concrete):
+        return ""
+    # The replacement has to satisfy the same rule the original failed.
+    if non_photographable_reason(concrete) or conceptual_brief_reason(concrete):
+        return ""
+    return concrete
+
+
+def reground_keywords(
+    keywords: str,
+    *,
+    prompt: str = "",
+    narration: str = "",
+    title: str = "",
+    siblings: tuple[str, ...] = (),
+) -> str:
+    """Concrete search keywords for a brief that named something unphotographable.
+
+    A slot asking for "glowing question mark mystery" cannot be sourced by any
+    search: there is no photograph of a question mark, so every candidate is
+    rejected and the run dies at the image review gate -- or, on a
+    web-photo-only channel, at script validation before a single search is paid
+    for. The remedy is not a looser validator; it is keywords naming something
+    a camera could actually have pointed at.
+
+    The replacement is only ever taken from the script's own words, in order of
+    how specific each source is to this beat:
+
+        1. the brief itself with the device removed -- "question mark over the
+           Boeing 727" is really about the aircraft
+        2. the slot's prompt, which describes the picture the beat wanted
+        3. the names and places in the section's narration
+        4. a sibling beat's keywords, which already name a real subject the
+           story established
+        5. the narration, then the title
+
+    Nothing is invented: a story that never named a photographable subject gets
+    "" back, the original keywords stay, and validation reports them exactly as
+    it does today. Returns "" when the keywords were already fine.
+    """
+    original = " ".join(str(keywords or "").split())
+    if not original:
+        return ""
+    # A chart has a different remedy -- change the slot type, not the search
+    # terms -- and `conceptual_brief_reason` is what carries that message.
+    if conceptual_brief_reason(original):
+        return ""
+    if not non_photographable_reason(original):
+        return ""
+
+    for source in (
+        original,
+        prompt,
+        _proper_nouns(narration),
+        *siblings,
+        narration,
+        _proper_nouns(title),
+        title,
+    ):
+        candidate = _photographable_candidate(source)
+        if candidate and candidate.lower() != original.lower():
+            return candidate
+    return ""
+
+
+def _repair_slot_fields(script_data: dict, *, web_photos_only: bool = False) -> None:
     """Put misplaced slot fields where the schema expects them.
 
     Two shapes the model produces that are perfectly usable but structurally
@@ -515,13 +643,13 @@ def _repair_slot_fields(script_data: dict) -> None:
     not move, the model's output is put into the shape the rules already
     expect. Anything that cannot be repaired still fails.
     """
+    title = str(script_data.get("title") or "")
     for section in script_data.get("sections") or []:
         if not isinstance(section, dict):
             continue
-        for slot in section.get("slots") or []:
-            if not isinstance(slot, dict):
-                continue
-
+        narration = str(section.get("narration") or "")
+        section_slots = [s for s in (section.get("slots") or []) if isinstance(s, dict)]
+        for slot in section_slots:
             visual = str(slot.get("visual") or "").strip()
 
             # 1. A description in the type field.
@@ -570,6 +698,35 @@ def _repair_slot_fields(script_data: dict) -> None:
                             f"Removed mood/style words from slot keywords: "
                             f"{keywords!r} -> {concrete!r}"
                         )
+
+            # 4. Keywords naming something no photograph contains, replaced
+            #    with a concrete subject taken from the story's own words.
+            #
+            #    Scoped to the channels whose validator enforces the rule, and
+            #    to the slot types it enforces it on, so nothing else changes
+            #    shape. A brief that cannot be regrounded is left exactly as
+            #    written: validation still rejects it, and the scripter is
+            #    still told to revise.
+            if web_photos_only and visual in VisualSlot.IMAGE_TYPES:
+                keywords = str(slot.get("keywords") or "").strip()
+                grounded = reground_keywords(
+                    keywords,
+                    prompt=str(slot.get("prompt") or ""),
+                    narration=narration,
+                    title=title,
+                    siblings=tuple(
+                        str(other.get("keywords") or "")
+                        for other in section_slots
+                        if other is not slot
+                    ),
+                )
+                if grounded:
+                    slot["keywords"] = grounded
+                    logger.info(
+                        f"Keywords named something unphotographable "
+                        f"({non_photographable_reason(keywords)}); regrounded "
+                        f"{keywords!r} -> {grounded!r}"
+                    )
 
 
 def _coerce_slot_keywords(script_data: dict) -> None:
@@ -1121,7 +1278,10 @@ async def generate_script(
         # the wrong shape, and both previously fatal. Repairing first means the
         # validator judges the script's substance rather than its typing.
         _coerce_slot_keywords(content)
-        _repair_slot_fields(content)
+        _repair_slot_fields(
+            content,
+            web_photos_only=config.image_sourcing.web_photos_only,
+        )
         _apply_word_based_duration_estimates(
             content,
             timing_profile=timing_profile,

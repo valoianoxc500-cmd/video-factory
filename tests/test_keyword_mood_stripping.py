@@ -172,8 +172,9 @@ def test_stripping_runs_before_validation():
     source = (REPO_ROOT / "core" / "scripter.py").read_text(encoding="utf-8")
     block = source[source.index("def _validate_generated_script"):]
     block = block[: block.index("def _script_validation_feedback")]
-    assert "_repair_slot_fields(content)" in block
-    assert block.index("_repair_slot_fields(content)") < block.index(
+    # Matched on the call, not its argument list, which has grown a keyword.
+    assert "_repair_slot_fields(" in block
+    assert block.index("_repair_slot_fields(") < block.index(
         "_script_validation_errors("
     )
 
