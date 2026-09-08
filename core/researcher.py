@@ -1,4 +1,4 @@
-"""Stage 0b: web-grounded news research.
+﻿"""Stage 0b: web-grounded news research.
 
 Runs between planning and scripting. The planner picks a subject; this stage
 establishes what is actually true about it *right now*, using Google Search
@@ -14,13 +14,352 @@ already consumes.
 
 import json
 import logging
+import re
 from datetime import date, timedelta
 
 import clients
 import prompts
+from core import arabic_names, news_sources, player_facts
 from core.utils import ChannelConfig
 
+# Clubs named often enough in football writing to anchor a cross-check.
+_KNOWN_CLUBS = (
+    "Barcelona", "Real Madrid", "Atletico Madrid", "Atlético Madrid",
+    "Arsenal", "Manchester United", "Manchester City", "Liverpool",
+    "Chelsea", "Tottenham", "Newcastle", "Aston Villa", "West Ham",
+    "Bayern Munich", "Borussia Dortmund", "Juventus", "Inter Milan",
+    "AC Milan", "Napoli", "Roma", "Paris Saint-Germain", "PSG",
+    "Ajax", "Porto", "Benfica", "River Plate", "Boca Juniors",
+    "Al Hilal", "Al Nassr", "Al-Hilal", "Al-Nassr",
+)
+
+# A person's name in a topic: two or three capitalised words in a row, with
+# the club vocabulary above removed so "Real Madrid" is not read as a player.
+_NAME_RUN_RE = re.compile(r"\b([A-Z][\w'’-]+(?:\s+[A-Z][\w'’-]+){1,2})\b")
+
+
+# Capitalised because a sentence starts there, not because it is a name.
+# "…Julian Alvarez. Is Barcelona pursuing…" produced the candidate "Julian
+# Alvarez Is", whose surname "Is" is too short for the provider to search on.
+_SENTENCE_STARTERS = frozenset(
+    """is are was were the a an and or but if why how what when where who
+    does do did has have had will would can could should this that these
+    those his her their our your it he she they we you i in on at for from
+    with about after before during""".split()
+)
+
+
+def candidate_player_names(text: str) -> list[str]:
+    """Names in *text* that could be players, clubs excluded."""
+    club_words = {w.lower() for club in _KNOWN_CLUBS for w in club.split()}
+    names: list[str] = []
+    for match in _NAME_RUN_RE.finditer(str(text or "")):
+        words = " ".join(match.group(1).split()).split()
+        # Trim leading and trailing sentence words rather than dropping the
+        # whole run: the name is usually still in there.
+        while words and words[0].lower() in _SENTENCE_STARTERS:
+            words.pop(0)
+        while words and words[-1].lower() in _SENTENCE_STARTERS:
+            words.pop()
+        if len(words) < 2:
+            continue
+        if any(w.lower() in club_words for w in words):
+            continue
+        phrase = " ".join(words)
+        if phrase not in names:
+            names.append(phrase)
+    return names
+
 logger = logging.getLogger("video_factory")
+
+
+def _is_news_channel(config: ChannelConfig) -> bool:
+    """Whether this channel reports on things that change week to week.
+
+    Gated on the niche rather than a new config field: `core/utils.py` is
+    being edited elsewhere, and the football channel is already the only one
+    whose category says "news". A storytelling channel gets none of this --
+    its subject matter does not go stale, and it should not pay for news
+    lookups it cannot use.
+    """
+    category = str(getattr(config.niche, "category", "") or "").lower()
+    focus = str(getattr(config.niche, "focus", "") or "").lower()
+    return "news" in category or "football" in category or "football" in focus
+
+
+_LATIN_DESTINATION_RE = re.compile(
+    r"\b(?:to|joins?|joined|signs? for|move to|transfer to|switch to)\s+"
+    r"([A-Z][\w'’-]+(?:\s+[A-Z][\w'’-]+){0,2})",
+)
+
+
+def _latin_destination_clubs(text: str) -> list[str]:
+    """Clubs a Latin-script topic presents as the player's destination."""
+    known = {c.lower(): c for c in _KNOWN_CLUBS}
+    found: list[str] = []
+    for match in _LATIN_DESTINATION_RE.finditer(str(text or "")):
+        phrase = " ".join(match.group(1).split())
+        canonical = known.get(phrase.lower())
+        if canonical and canonical not in found:
+            found.append(canonical)
+    return found
+
+
+async def _resolve_named_players(text: str, evidence: list) -> list:
+    """Squad facts for every player the topic names, cross-checked.
+
+    Never raises and never guesses: a player who cannot be resolved is simply
+    absent from the result, and the caller falls back to dated reporting.
+    """
+    lookups: list[tuple[str, list[str], tuple[str, ...]]] = []
+
+    # Arabic first: this channel writes in it, and capitalised-run detection
+    # is a Latin-script idea that found nothing at all in an Arabic topic --
+    # which is how an invented Chelsea transfer reached sourcing unchecked.
+    if arabic_names.contains_arabic(text):
+        for candidate in arabic_names.person_name_candidates(text):
+            lookups.append(
+                (
+                    candidate["arabic"],
+                    candidate["search_terms"],
+                    tuple(candidate["confirm_terms"]),
+                )
+            )
+
+    for name in candidate_player_names(text):
+        lookups.append((name, [name.split()[-1]], tuple(name.split()[:-1])))
+
+    if not lookups:
+        return []
+
+    resolved: list = []
+    for display, terms, confirm in lookups[:4]:
+        try:
+            status = await player_facts.resolve_player_by_terms(
+                display, terms, confirm_words=confirm
+            )
+        except Exception as exc:
+            logger.warning(f"Could not resolve {display!r}: {exc}")
+            continue
+        if not status:
+            continue
+        try:
+            player_facts.cross_check(status, evidence, list(_KNOWN_CLUBS))
+        except Exception as exc:
+            logger.warning(f"Cross-check failed for {name!r}: {exc}")
+        resolved.append(status)
+    return resolved
+
+
+def _reject_outdated_claims(research: dict, statuses: list) -> int:
+    """Drop claims that state a former club as the player's current one.
+
+    Removed outright rather than downgraded: a downgraded wrong club is still
+    a wrong club on screen, and the script prompt carries the correct one.
+    """
+    facts = research.get("verified_facts")
+    if not statuses or not isinstance(facts, list):
+        return 0
+
+    kept: list = []
+    rejected = 0
+    for fact in facts:
+        claim = fact.get("claim", "") if isinstance(fact, dict) else str(fact)
+        reason = ""
+        for status in statuses:
+            reason = player_facts.outdated_claim_reason(claim, status)
+            if reason:
+                break
+        if reason:
+            rejected += 1
+            logger.error(
+                f"Claim rejected as out of date — {reason}: {str(claim)[:110]}"
+            )
+            continue
+        kept.append(fact)
+
+    if rejected:
+        research["verified_facts"] = kept
+        research["claims_rejected_outdated"] = rejected
+    return rejected
+
+
+async def _retrieve_current_reporting(*, topic: str, angle: str) -> list:
+    """Dated articles about the topic from the configured news providers.
+
+    Never raises: research is an enhancement, and losing it must not take down
+    a run that can still produce a video.
+    """
+    try:
+        items = await news_sources.fetch_current_news(
+            topic,
+            trusted_domains=_TRUSTED_SOURCE_DOMAINS,
+            days=_STALE_AFTER_DAYS,
+        )
+    except Exception as exc:
+        logger.warning(f"Live news retrieval failed ({exc}); continuing without it")
+        return []
+
+    live = [name for name, on in news_sources.provider_status().items() if on]
+    if items:
+        newest = items[0].age_days()
+        logger.info(
+            f"Retrieved {len(items)} current article(s) from {', '.join(live) or 'no'} "
+            f"provider(s); newest {newest if newest is not None else '?'}d old"
+        )
+    else:
+        logger.warning(
+            f"No current reporting found for {topic!r} via {', '.join(live) or 'no'} "
+            f"provider(s) — the script will not be allowed to invent one"
+        )
+    return items
+
+
+# Words too common in football writing to show that two texts are about the
+# same thing.
+_CLAIM_STOPWORDS = frozenset("""
+the a an of to in on at for from with and or is are was were be been has have
+had will would could may might club team player transfer deal move sign signed
+signing new his her their this that it as by after before now says said report
+reports reported linked interest talks agreement fee contract season
+agree agrees agreed join joins joined joining reveal reveals revealed
+set close near expected confirm confirms confirmed complete completes completed
+""".split())
+
+
+def _claim_tokens(text: str) -> set[str]:
+    """The distinctive words in a claim: names, clubs, places, numbers."""
+    cleaned = "".join(c if c.isalnum() or c.isspace() else " " for c in str(text or "").lower())
+    return {
+        word
+        for word in cleaned.split()
+        if len(word) > 2 and word not in _CLAIM_STOPWORDS
+    }
+
+
+def _verify_claims_against_evidence(research: dict, evidence: list) -> None:
+    """Downgrade claims the retrieved reporting does not support.
+
+    Only ever downgrades. A model claim stated as COMPLETED that no retrieved
+    article mentions becomes REPORTED and is marked unsupported -- the
+    scripter's rules already stop it narrating a REPORTED claim as fact. This
+    never promotes a claim, because agreeing with a headline is not
+    verification and treating it as such would manufacture false confidence.
+
+    With no evidence retrieved there is nothing to check against, so claims
+    are left exactly as the model returned them.
+    """
+    facts = research.get("verified_facts")
+    if not evidence or not isinstance(facts, list):
+        return
+
+    corpus = [
+        _claim_tokens(f"{item.title} {item.snippet}") for item in evidence
+    ]
+    downgraded = 0
+    for fact in facts:
+        if not isinstance(fact, dict):
+            continue
+        status = str(fact.get("status") or "").upper()
+        if status not in {"COMPLETED", "CONFIRMED"}:
+            continue
+        tokens = _claim_tokens(fact.get("claim", ""))
+        if not tokens:
+            continue
+        # Supported when a single article shares most of the claim's
+        # distinctive words -- the same names and clubs in one place.
+        supported = any(
+            len(tokens & article) / len(tokens) >= 0.5 for article in corpus
+        )
+        if supported:
+            continue
+        fact["status"] = "REPORTED"
+        fact["unsupported_by_retrieved_reporting"] = True
+        downgraded += 1
+        logger.warning(
+            f"Claim downgraded to REPORTED — no retrieved article supports it: "
+            f"{str(fact.get('claim', ''))[:110]}"
+        )
+
+    if downgraded:
+        research["claims_downgraded"] = downgraded
+
+
+def _player_status_rows(statuses: list) -> list[dict]:
+    """The resolved squad facts, as plain data the later stages can read."""
+    return [
+        {
+            "name": s.name,
+            "current_club": s.current_club,
+            "former_clubs": s.former_clubs,
+            "interested_clubs": s.interested_clubs,
+            "source": s.source,
+        }
+        for s in statuses
+        if s.resolved
+    ]
+
+
+def _research_from_evidence(
+    evidence: list, *, reason: str, statuses: list | None = None
+) -> dict:
+    """A brief built only from retrieved articles, with no model claims.
+
+    Used when the model's own answer is thrown away. The articles are real,
+    dated and attributable, so the scripter still writes from current
+    reporting instead of from memory -- which is what an empty brief left it
+    doing. Every claim is marked REPORTED: these are headlines, and nothing
+    here has been cross-checked into a stronger status.
+    """
+    facts_block = player_facts.render_current_facts(statuses or [])
+    if not evidence:
+        # Squad facts stand on their own. The model's answer being unusable
+        # does not make "which club does he play for" unknown, and this path
+        # is exactly where a script would otherwise be written from memory.
+        return {
+            "brief": facts_block,
+            "sources": [],
+            "key_entities": [],
+            "grounded": bool(facts_block),
+            "rejected_reason": reason,
+        }
+
+    facts = [
+        {
+            "claim": item.title,
+            "status": "REPORTED",
+            "source": item.domain,
+            "url": item.url,
+            "published": item.published_at,
+        }
+        for item in evidence
+    ]
+    brief = (
+        "VERIFIED AGAINST CURRENT REPORTING ONLY.\n"
+        f"The model's own research was discarded ({reason}), so the following "
+        "is drawn strictly from articles retrieved just now. Do not state "
+        "anything beyond what these lines support.\n\n"
+        + news_sources.render_evidence(evidence)
+    )
+    if facts_block:
+        brief = f"{facts_block}\n\n{brief}"
+    logger.warning(
+        f"Model research discarded ({reason}); falling back to "
+        f"{len(evidence)} retrieved article(s) rather than an empty brief"
+    )
+    return {
+        "brief": brief,
+        "sources": [{"title": i.title, "url": i.url, "domain": i.domain} for i in evidence],
+        "key_entities": [],
+        "verified_facts": facts,
+        "grounded": True,
+        "evidence_only": True,
+        "rejected_reason": reason,
+        # Carried on this path too. It is the path the Álvarez topic actually
+        # takes, and without it visual sourcing has no current club to hold
+        # the image briefs to.
+        "player_status": _player_status_rows(statuses or []),
+    }
 
 # How a claim may be labelled. The scripter must carry these through so the
 # narration never states a rumour as fact.
@@ -129,6 +468,59 @@ async def research_topic(
         statuses=CLAIM_STATUSES,
     )
 
+    # Retrieve the reporting before asking the model anything. Grounded search
+    # refuses to answer without citations, but it cannot promise there will be
+    # any -- a run had its research discarded because the model's own search
+    # returned YouTube, Facebook and Reddit, and the script was then written
+    # from nothing, which is training data by another name. These articles are
+    # dated, attributable, and appended to the prompt as the evidence the
+    # answer has to agree with.
+    evidence: list[news_sources.NewsItem] = []
+    statuses: list[player_facts.PlayerStatus] = []
+    if _is_news_channel(config):
+        evidence = await _retrieve_current_reporting(topic=topic, angle=angle)
+
+        # Which club each named player is at *now*, from a squad and transfer
+        # record rather than from memory or from a headline. A model writing
+        # from training data still has Julián Álvarez at Manchester City; he
+        # moved to Atlético Madrid in August 2024, and a transfer story built
+        # on the wrong club is wrong from its first line.
+        statuses = await _resolve_named_players(f"{topic} {angle}", evidence)
+        facts_block = player_facts.render_current_facts(statuses)
+        if facts_block:
+            prompt = f"{prompt}\n\n{facts_block}"
+
+        # Whether the topic's own premise survives the record. A planner can
+        # invent a transfer, and everything downstream then works faithfully
+        # on a false story.
+        asserted = arabic_names.destination_clubs(topic) if arabic_names.contains_arabic(
+            topic
+        ) else _latin_destination_clubs(topic)
+        premise = player_facts.premise_conflict(asserted, statuses)
+        if premise:
+            logger.error(
+                f"Topic premise contradicted by the squad record — {premise}. "
+                f"Refusing to research or script it."
+            )
+            return {
+                "brief": "",
+                "sources": [],
+                "key_entities": [],
+                "grounded": False,
+                "premise_conflict": premise,
+                "player_status": _player_status_rows(statuses),
+            }
+
+        if evidence:
+            prompt = (
+                f"{prompt}\n\n"
+                f"{news_sources.render_evidence(evidence)}\n\n"
+                "Ground every claim in the reporting above. Where it "
+                "contradicts what you recall, the reporting is right and your "
+                "recollection is out of date. Do not state anything it does "
+                "not support."
+            )
+
     try:
         research = await clients.research_with_search(
             prompt,
@@ -139,10 +531,10 @@ async def research_topic(
         )
     except Exception as exc:
         logger.warning(
-            f"Grounded research unavailable ({exc}); the script will be written "
-            f"without a verified brief"
+            f"Grounded research unavailable ({exc}); falling back to retrieved "
+            f"reporting"
         )
-        return {"brief": "", "sources": [], "key_entities": []}
+        return _research_from_evidence(evidence, statuses=statuses, reason=f"grounded search failed: {exc}")
 
     # An ungrounded answer is worse than none: it reads as researched but is
     # only as current as the model's training data, which for football news is
@@ -150,29 +542,39 @@ async def research_topic(
     # treat it as verified.
     if not research.get("grounded"):
         logger.warning(
-            "Research produced no search citations — discarding it and writing "
-            "the script without a verified brief rather than trusting stale "
-            "training data"
+            "Research produced no search citations — discarding it rather than "
+            "trusting stale training data"
         )
-        return {"brief": "", "sources": [], "key_entities": [], "grounded": False}
+        return _research_from_evidence(evidence, statuses=statuses, reason="no search citations")
 
     fabricated = _reject_fabricated_research(research)
     if fabricated:
         logger.error(
-            f"Research discarded — {fabricated}. Writing the script without a "
-            f"verified brief rather than narrating unverifiable claims as news."
+            f"Research discarded — {fabricated}. Falling back to retrieved "
+            f"reporting rather than narrating unverifiable claims as news."
         )
-        return {
-            "brief": "",
-            "sources": [],
-            "key_entities": [],
-            "grounded": False,
-            "rejected_reason": fabricated,
-        }
+        return _research_from_evidence(evidence, statuses=statuses, reason=fabricated)
 
     _flag_stale_research(research)
+    _verify_claims_against_evidence(research, evidence)
+    # Before the script is written, not after: a claim putting the player at
+    # a former club would otherwise reach the scripter as a verified fact.
+    _reject_outdated_claims(research, statuses)
 
     brief = _format_brief(research)
+    # The reporting goes into the brief alongside the model's own summary, so
+    # the scripter can see the dated headlines rather than only a distilled
+    # claim about them.
+    if evidence:
+        brief = f"{brief}\n\n{news_sources.render_evidence(evidence)}".strip()
+    # The squad facts lead the brief. Everything after them -- the model's
+    # summary, the headlines -- is read against them, and the image briefs are
+    # written from the same block, so a beat cannot name a club the player
+    # left two years ago.
+    facts_block = player_facts.render_current_facts(statuses)
+    if facts_block:
+        brief = f"{facts_block}\n\n{brief}".strip()
+        research["player_status"] = _player_status_rows(statuses)
     research["brief"] = brief
 
     facts = research.get("verified_facts") or []

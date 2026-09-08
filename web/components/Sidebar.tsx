@@ -17,6 +17,8 @@ const Icon = {
     "M4 6h11a4 4 0 0 1 0 8H7m0 0 3-3m-3 3 3 3M4 4v4h4",
   credits:
     "M3 8h18v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8Zm0 0 2-3h14l2 3M8 13h4",
+  clipping:
+    "M6 3v10m12-10v10M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm12 0a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM8.1 15.9 18 3M15.9 15.9 6 3",
   saved: "M6 4h12v16l-6-4-6 4V4Z",
   queue: "M4 6h16M4 12h16M4 18h16M2 6h.01M2 12h.01M2 18h.01",
   scheduled: "M8 3v4m8-4v4M4 9h16M5 5h14a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z",
@@ -53,26 +55,59 @@ export function Sidebar({ email }: { email: string }) {
       </Link>
 
       {/*
-        Six destinations, and no groups.
+        Nine destinations under three headings -- the things you actually come
+        here to do, named the way you would ask for them.
 
-        Everything else the product does is still reachable, just not from
-        here: the channels and the whole Reels workspace are surfaced on the
-        Dashboard, and connected accounts live under Settings, where an
-        integration belongs. Nothing was removed -- a long nav was doing the
-        job an overview page does better.
+        Deliberately still short. The publishing states (saved, queue,
+        scheduled, published) and connected accounts are not here: they are
+        stages of work you are already looking at, so they live inside the
+        screen that owns them rather than competing with it in the nav.
       */}
       <nav className="nav">
-        <Link href="/dashboard/create" className={is("/dashboard/create") ? "active" : ""}>
-          <NavIcon d={Icon.create} /> Create Video
+        <span className="nav-label">Make</span>
+        <Link href="/dashboard" className={is("/dashboard") ? "active" : ""}>
+          <NavIcon d={Icon.overview} /> Dashboard
         </Link>
+        <Link href="/dashboard/create" className={is("/dashboard/create") ? "active" : ""}>
+          <NavIcon d={Icon.create} />
+          <span>
+            Create Video
+            <span className="nav-sub">A finished video from a topic</span>
+          </span>
+        </Link>
+        <Link
+          href="/dashboard/clipping"
+          className={is("/dashboard/clipping") ? "active" : ""}
+        >
+          <NavIcon d={Icon.clipping} />
+          <span>
+            Clipping
+            <span className="nav-sub">Your footage, cut to 9:16</span>
+          </span>
+        </Link>
+
+        <span className="nav-label">Grow</span>
+        {/* Discover lives at /dashboard/reels. The nav used to call this
+            "Re-Create", which is a different screen entirely -- the label and
+            the page it opened disagreed. */}
         <Link
           href="/dashboard/reels"
           className={pathname === "/dashboard/reels" ? "active" : ""}
         >
+          <NavIcon d={Icon.discover} />
+          <span>
+            Find Viral
+            <span className="nav-sub">What is performing right now</span>
+          </span>
+        </Link>
+        <Link
+          href="/dashboard/reels/videos"
+          className={is("/dashboard/reels/videos") ? "active" : ""}
+        >
           <NavIcon d={Icon.recreate} />
           <span>
             Re-Create
-            <span className="nav-sub">Turn any video into a new one</span>
+            <span className="nav-sub">Turn a video you own into a new one</span>
           </span>
         </Link>
         <Link href="/dashboard/library" className={is("/dashboard/library") ? "active" : ""}>
@@ -84,15 +119,13 @@ export function Sidebar({ email }: { email: string }) {
         >
           <NavIcon d={Icon.analytics} /> Analytics
         </Link>
+
+        <span className="nav-label">Account</span>
         <Link href="/dashboard/settings" className={is("/dashboard/settings") ? "active" : ""}>
           <NavIcon d={Icon.settings} /> Settings
         </Link>
-
-        <Link href="/dashboard" className={is("/dashboard") ? "active" : ""}>
-          <NavIcon d={Icon.overview} /> Dashboard
-        </Link>
         <Link href="/dashboard/plans" className={is("/dashboard/plans") ? "active" : ""}>
-          <NavIcon d={Icon.credits} /> Buy Credits
+          <NavIcon d={Icon.credits} /> Credits
         </Link>
       </nav>
 

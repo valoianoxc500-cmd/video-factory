@@ -478,7 +478,17 @@ def run_process(client: WorkerClient, payload: dict) -> dict:
         _download(str(asset.get("storage_path") or ""), source_path)
 
         source = probe(source_path)
-        plan = build_plan(source, platform, attestation=attestation)
+        # Trims come from the caller. build_plan has always accepted them and
+        # build_ffmpeg_command has always emitted them; this hands them across
+        # so the clipping screen can ask for a section of a long video rather
+        # than only ever the whole thing.
+        plan = build_plan(
+            source,
+            platform,
+            attestation=attestation,
+            trim_start=float(payload.get("trim_start") or 0.0),
+            trim_end=float(payload.get("trim_end") or 0.0),
+        )
         centre = detect_subject_centre(source_path) if not source.is_vertical else 0.5
 
         output = Path(workdir) / "processed.mp4"

@@ -15,14 +15,20 @@ export default async function SettingsPage() {
 
   // Read directly rather than through a repository: this is one count for a
   // link label, and a failure here must not take the settings page down.
+  //
+  // A live connection is a row with no revoked_at. There is no `status`
+  // column -- selecting one makes PostgREST reject the whole query, which the
+  // catch below then swallowed, so this count read 0 however many accounts
+  // were actually connected. The same mistake was already fixed once in
+  // /api/reels/assets.
   let connected = 0;
   try {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("vrf_accounts")
-      .select("platform, status");
-    connected = (data ?? []).filter(
-      (row) => (row as { status?: string }).status === "connected",
-    ).length;
+      .select("platform, revoked_at")
+      .is("revoked_at", null);
+    if (error) throw new Error(error.message);
+    connected = (data ?? []).length;
   } catch {
     /* the link still works without the count */
   }
@@ -74,8 +80,24 @@ export default async function SettingsPage() {
         </Link>
       </div>
 
+      <div className="sec-head" style={{ marginTop: 30 }}>
+        <h2>Plan</h2>
+        <Link className="sec-link" href="/dashboard/plans">
+          See credit plans
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
+            <path
+              d="M5 12h14m-6-7 7 7-7 7"
+              stroke="currentColor"
+              strokeWidth="1.9"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </Link>
+      </div>
+
       <div className="stat" style={{ marginTop: 6 }}>
-        <div className="k">Plan</div>
+        <div className="k">Current plan</div>
         <div className="v" style={{ fontSize: 17 }}>Unlimited (preview)</div>
         <p style={{ color: "var(--sa-dim)", fontSize: 13.5, marginTop: 8, lineHeight: 1.6 }}>
           Subscriptions, credits and usage limits are not enabled yet. Usage is

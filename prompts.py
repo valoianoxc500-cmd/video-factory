@@ -1151,8 +1151,8 @@ def image_review_prompt(
   "approved": true/false,
   "image_results": [
     {
-      "section_id": 1,
-      "sub_image_index": 1,
+      "section_id": 1,          // REQUIRED on every entry
+      "sub_image_index": 1,     // REQUIRED on every entry, 1-based
       "approved": true/false,
       "severity": "ok" | "warning" | "error",
       "failure_type": "wrong_subject" | "pose_mismatch" | "anatomy_error" | "weak_match" | "conflicting_branding",  // required when approved=false
@@ -1162,6 +1162,11 @@ def image_review_prompt(
   ],
   "feedback": "Overall summary"
 }
+section_id and sub_image_index are mandatory on every entry, and especially on
+any entry with approved=false. They are the only way a rejection can be tied
+back to the image it is about -- the numbering you were shown is not stable, so
+a rejection without them cannot be acted on and the whole response is discarded
+and requested again. Copy them from the SECTION CONTEXT heading for that image.
 Do not put top-level fields like approved, image_results, feedback, or scores inside any image_results item."""
     return _prompt_scaffold(
         task=task,

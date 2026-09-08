@@ -301,17 +301,47 @@ async def run_pipeline(
     # run skipped sourcing and failed the same validation every time, with no
     # way forward short of deleting the workspace. Re-open the stage instead:
     # it is the only stage that can repair the assets.
-    if "image_source" in completed:
-        try:
-            _validate_raw_images(ws, load_script(ws), config)
-        except FileNotFoundError:
-            pass  # no script on disk yet; nothing to check against
-        except Exception as stale:
-            logger.warning(
-                f"checkpoint claims image_source is complete but its assets are "
-                f"not on disk ({stale}); re-running the stage"
+    # Each entry: the stage, what proves it really finished, and the later
+    # stages whose own outputs are built from it. Re-opening a stage without
+    # re-opening its dependants leaves the run consuming stale artifacts.
+    def _render_sections_present() -> None:
+        sections_dir = ws / "videos" / "sections"
+        missing = [
+            f"section_{section.id:03d}.mp4"
+            for section in load_script(ws).sections
+            if not (sections_dir / f"section_{section.id:03d}.mp4").exists()
+        ]
+        if missing:
+            raise RuntimeError(
+                f"{len(missing)} section clip(s) missing: {', '.join(missing[:3])}"
             )
-            completed.discard("image_source")
+
+    _RESUME_CHECKS: list[tuple[str, Any, tuple[str, ...]]] = [
+        ("image_source",
+         lambda: _validate_raw_images(ws, load_script(ws), config),
+         ("process", "render_sections", "assemble")),
+        ("process",
+         lambda: _validate_ready_images(ws, load_script(ws), config),
+         ("render_sections", "assemble")),
+        ("render_sections", _render_sections_present, ("assemble",)),
+    ]
+
+    for stage_name, check, dependants in _RESUME_CHECKS:
+        if stage_name not in completed:
+            continue
+        try:
+            check()
+        except FileNotFoundError:
+            continue  # no script on disk yet; nothing to check against
+        except Exception as stale:
+            reopened = [stage_name] + [d for d in dependants if d in completed]
+            logger.warning(
+                f"checkpoint claims {stage_name} is complete but its assets are "
+                f"not on disk ({stale}); re-running "
+                f"{', '.join(reopened)}"
+            )
+            for name in reopened:
+                completed.discard(name)
             checkpoint.stages_completed = list(completed)
             save_checkpoint(ws, checkpoint)
 
@@ -383,6 +413,20 @@ async def run_pipeline(
 
         if estimate_report:
             logger.info(f"Cost report: {ws / 'reports' / 'cost_estimate.json'}")
+
+        # What this exact video cost, priced from its own trace against the
+        # configured catalogue. Written whether the run finished or failed, so
+        # an abandoned run's spend is still accounted for.
+        try:
+            from settings import PROJECT_ROOT
+
+            from core.cost_guard import DEFAULT_BUDGET_USD, summarise_run
+
+            budget = float(getattr(
+                config.image_sourcing, "cost_budget_usd", DEFAULT_BUDGET_USD))
+            summarise_run(ws, PROJECT_ROOT, budget_usd=budget)
+        except Exception as cost_err:
+            logger.warning(f"Run cost summary unavailable: {cost_err}")
 
         try:
             costs.shutdown_cost_tracking()
@@ -476,6 +520,18 @@ async def run_pipeline(
             else ""
         )
 
+        # A topic whose own premise the squad record contradicts is not
+        # something a better prompt can rescue. The planner invented a
+        # Martínez transfer to Chelsea; the script was written, the images
+        # searched, and the run died six minutes later on fan-art of a move
+        # that never happened. Stop here instead, before anything is written.
+        if research.get("premise_conflict"):
+            save_research(ws, research)
+            fail_pipeline(
+                f"Topic rejected as factually false — {research['premise_conflict']}. "
+                f"No script or visuals were generated. Re-plan with a verified topic."
+            )
+
         if research.get("brief"):
             plan["research_context"] = (
                 story_directive
@@ -483,6 +539,11 @@ async def run_pipeline(
                 + research["brief"]
             )
             plan["research_entities"] = research.get("key_entities", [])
+            # Carried separately from the prose brief so image sourcing can
+            # hold every visual brief to the same current club the narration
+            # is held to -- a beat naming a club the player left two years ago
+            # is as wrong on screen as it is in the script.
+            plan["player_status"] = research.get("player_status", [])
             save_research(ws, research)
         else:
             # No verified brief. Silence here is dangerous: the model fills the

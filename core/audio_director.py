@@ -201,7 +201,13 @@ def _fallback_ambience(text: str) -> str:
     return " ".join(words[:3])
 
 
-async def plan_audio(script, *, model_call=None) -> AudioPlan:
+#: Distinguishes "caller said nothing" from "caller said: no model". Without
+#: it, passing None meant "use the default", so a test asking for the
+#: no-model path quietly reached the real API instead.
+_USE_DEFAULT_MODEL = object()
+
+
+async def plan_audio(script, *, model_call=_USE_DEFAULT_MODEL) -> AudioPlan:
     """Read the script and decide what each scene should sound like.
 
     The model is asked once for the whole script so it can keep the scenes
@@ -215,7 +221,7 @@ async def plan_audio(script, *, model_call=None) -> AudioPlan:
         return plan
 
     payload: dict = {}
-    if model_call is None:
+    if model_call is _USE_DEFAULT_MODEL:
         try:
             import clients
 

@@ -27,13 +27,31 @@ from core.providers.base import (
 
 logger = logging.getLogger("video_factory")
 
-#: Commons asks API clients to identify themselves, and rate-limits harder
-#: when they do not.
-COMMONS_USER_AGENT = "VideoFactory/1.0 (media sourcing; contact via repo)"
+#: Wikimedia's user-agent policy asks for the tool, a contact, and a way to
+#: reach whoever runs it. A burst of searches from a vague agent is what their
+#: robot policy returns 403 for, so this names all three.
+COMMONS_USER_AGENT = (
+    "FirstVideoCheck/1.0 "
+    "(https://video-factory-omega.vercel.app; ibrahemxc500@gmail.com) "
+    "python-httpx"
+)
 
 
 def _orientation_params(orientation: str) -> str:
     return orientation if orientation in {"portrait", "landscape", "square"} else ""
+
+
+def _clip_words(text: str, limit: int) -> str:
+    """Trim to `limit` characters without cutting a word in half."""
+    words = str(text or "").split()
+    out: list[str] = []
+    for word in words:
+        candidate = " ".join(out + [word])
+        if len(candidate) > limit:
+            break
+        out.append(word)
+    # A single word longer than the limit still has to be cut somewhere.
+    return " ".join(out) or str(text or "")[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +200,11 @@ class PixabayProvider:
 
         params = {
             "key": self._key,
-            "q": query,
+            # Pixabay rejects a query over 100 characters with a bare 400, and
+            # the briefs this is called with are whole sentences. Truncated on
+            # a word boundary so the query stays meaningful rather than
+            # ending mid-word.
+            "q": _clip_words(query, 100),
             # Pixabay rejects per_page below 3.
             "per_page": max(3, min(limit, 200)),
             "safesearch": "true",
@@ -404,8 +426,10 @@ class CommonsProvider:
     }
 
     def __init__(self) -> None:
-        # Commons returns 429s to bursts; spacing is what fixed that before.
-        self._limiter = RateLimiter(concurrency=2, min_interval=1.0)
+        # Commons answers a steady trickle and 403s a burst, citing their
+        # robot policy. One request at a time, two seconds apart: a rescue
+        # tier has no reason to go faster, and going faster got us blocked.
+        self._limiter = RateLimiter(concurrency=1, min_interval=2.0)
 
     def status(self) -> ProviderStatus:
         return ProviderStatus(self.name, Availability.READY)

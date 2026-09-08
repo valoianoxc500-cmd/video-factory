@@ -104,6 +104,27 @@ def test_pexels_normalises_into_the_shared_shape():
     assert item.is_portrait is True
 
 
+def test_a_long_brief_is_trimmed_for_pixabay():
+    """Pixabay 400s on a query over 100 characters, and the briefs this is
+    called with are whole sentences."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["q"] = request.url.params.get("q", "")
+        return httpx.Response(200, json=PIXABAY_BODY)
+
+    brief = (
+        "Flashlight beams cutting through a dark dusty and derelict room "
+        "inside an old building illuminating dust particles in the air"
+    )
+    _run(PixabayProvider(api_key="k").search(brief, client=_client(handler)))
+
+    assert len(seen["q"]) <= 100
+    assert not seen["q"].endswith(" ")
+    # Trimmed on a word boundary, not mid-word.
+    assert brief.startswith(seen["q"])
+
+
 def test_pixabay_normalises_into_the_same_shape():
     items = _run(PixabayProvider(api_key="k").search(
         "lighthouse", client=_client(lambda r: httpx.Response(200, json=PIXABAY_BODY)),

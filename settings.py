@@ -67,6 +67,22 @@ class Settings(BaseSettings):
     pixabay_api_key: str = Field(default="", alias="PIXABAY_API_KEY")
     unsplash_access_key: str = Field(default="", alias="UNSPLASH_ACCESS_KEY")
 
+    # AI gateway. `direct` is the existing behaviour: every model call goes
+    # straight to Gemini through clients.py. `omniroute` sends chat completions
+    # through an OpenAI-compatible gateway instead; image generation, research
+    # grounding and TTS always stay direct.
+    #
+    # Every flag below defaults to the current behaviour, so an unconfigured
+    # deployment is unchanged.
+    ai_gateway_mode: str = Field(default="direct", alias="AI_GATEWAY_MODE")
+    ai_gateway_base_url: str = Field(default="", alias="AI_GATEWAY_BASE_URL")
+    ai_gateway_api_key: str = Field(default="", alias="AI_GATEWAY_API_KEY")
+    ai_smart_routing_enabled: bool = Field(
+        default=False, alias="AI_SMART_ROUTING_ENABLED")
+    ai_cache_enabled: bool = Field(default=True, alias="AI_CACHE_ENABLED")
+    ai_request_coalescing_enabled: bool = Field(
+        default=True, alias="AI_REQUEST_COALESCING_ENABLED")
+
     # Audio. ElevenLabs is used for generated sound effects only -- narration
     # stays on Gemini TTS. Freesound supplies recorded ambience and SFX.
     elevenlabs_api_key: str = Field(default="", alias="ELEVENLABS_API_KEY")

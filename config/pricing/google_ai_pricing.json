@@ -4,15 +4,18 @@
   "entries": [
     {
       "service": "generate_content",
-      "model": "gemini-3.1-pro-preview",
-      "input_rate_usd_per_1m_tokens": 2.0,
-      "input_rate_long_context_usd_per_1m_tokens": 4.0,
-      "cached_input_rate_usd_per_1m_tokens": 0.2,
-      "cached_input_rate_long_context_usd_per_1m_tokens": 0.4,
-      "output_text_rate_usd_per_1m_tokens": 12.0,
-      "output_text_rate_long_context_usd_per_1m_tokens": 18.0,
+      "model": "gemini-2.5-pro",
+      "input_rate_usd_per_1m_tokens": 1.25,
+      "input_rate_long_context_usd_per_1m_tokens": 2.5,
+      "output_text_rate_usd_per_1m_tokens": 10.0,
+      "output_text_rate_long_context_usd_per_1m_tokens": 15.0,
+      "long_context_threshold_tokens": 200000,
       "reconciliation_supported": true,
-      "source_url": "https://cloud.google.com/vertex-ai/generative-ai/pricing"
+      "source_url": "https://ai.google.dev/gemini-api/docs/pricing",
+      "notes": [
+        "Paid tier. No free tier is offered for this model, so calls to it are billed.",
+        "Long-context rates apply above 200k prompt tokens."
+      ]
     },
     {
       "service": "generate_content",
@@ -25,6 +28,29 @@
       "output_text_rate_long_context_usd_per_1m_tokens": 3.0,
       "reconciliation_supported": true,
       "source_url": "https://cloud.google.com/vertex-ai/generative-ai/pricing"
+    },
+    {
+      "service": "generate_content",
+      "model": "gemini-3.1-pro-preview",
+      "input_rate_usd_per_1m_tokens": 2.0,
+      "input_rate_long_context_usd_per_1m_tokens": 4.0,
+      "cached_input_rate_usd_per_1m_tokens": 0.2,
+      "cached_input_rate_long_context_usd_per_1m_tokens": 0.4,
+      "output_text_rate_usd_per_1m_tokens": 12.0,
+      "output_text_rate_long_context_usd_per_1m_tokens": 18.0,
+      "reconciliation_supported": true,
+      "source_url": "https://cloud.google.com/vertex-ai/generative-ai/pricing"
+    },
+    {
+      "service": "generate_content_image",
+      "model": "gemini-2.5-flash-image",
+      "input_rate_usd_per_1m_tokens": 0.3,
+      "output_image_rate_usd_per_image": 0.039,
+      "reconciliation_supported": true,
+      "source_url": "https://ai.google.dev/gemini-api/docs/pricing",
+      "notes": [
+        "Paid tier only; output is billed per generated image."
+      ]
     },
     {
       "service": "generate_content_image",
@@ -51,22 +77,16 @@
       ]
     },
     {
-      "service": "tts",
-      "model": "gemini-2.5-pro-tts",
-      "input_rate_usd_per_1m_tokens": 1.0,
-      "output_audio_rate_usd_per_1m_tokens": 20.0,
-      "audio_tokens_per_second": 25,
+      "service": "generate_content_image",
+      "model": "gemini-3.1-flash-lite-image",
+      "input_rate_usd_per_1m_tokens": 0.25,
+      "output_text_rate_usd_per_1m_tokens": 1.5,
+      "output_image_rate_usd_per_image": 0.0336,
       "reconciliation_supported": true,
-      "source_url": "https://cloud.google.com/text-to-speech/pricing"
-    },
-    {
-      "service": "tts",
-      "model": "gemini-2.5-flash-tts",
-      "input_rate_usd_per_1m_tokens": 0.5,
-      "output_audio_rate_usd_per_1m_tokens": 10.0,
-      "audio_tokens_per_second": 25,
-      "reconciliation_supported": true,
-      "source_url": "https://cloud.google.com/text-to-speech/pricing"
+      "source_url": "https://ai.google.dev/gemini-api/docs/pricing",
+      "notes": [
+        "Paid tier only. Image output is published as $30.00 per 1M output tokens, which the page equates to ~$0.0336 for a 1K resolution image; the per-image rate is used here because that is what the pipeline generates."
+      ]
     },
     {
       "service": "speech_to_text",
@@ -78,6 +98,24 @@
       "notes": [
         "Speech-to-Text V2 bills successfully processed audio in one-second increments."
       ]
+    },
+    {
+      "service": "tts",
+      "model": "gemini-2.5-flash-tts",
+      "input_rate_usd_per_1m_tokens": 0.5,
+      "output_audio_rate_usd_per_1m_tokens": 10.0,
+      "audio_tokens_per_second": 25,
+      "reconciliation_supported": true,
+      "source_url": "https://cloud.google.com/text-to-speech/pricing"
+    },
+    {
+      "service": "tts",
+      "model": "gemini-2.5-pro-tts",
+      "input_rate_usd_per_1m_tokens": 1.0,
+      "output_audio_rate_usd_per_1m_tokens": 20.0,
+      "audio_tokens_per_second": 25,
+      "reconciliation_supported": true,
+      "source_url": "https://cloud.google.com/text-to-speech/pricing"
     }
   ]
 }

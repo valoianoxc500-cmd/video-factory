@@ -235,6 +235,34 @@ class ImageSourcingConfig(BaseModel):
     # real photographs opt in. Each catalogue carries its own licence, and the
     # candidate's licence and credit are recorded with it.
     open_library_fallback: bool = False
+    # How many beats in one run may fall through to the open-library tier.
+    #
+    # Sized as a rescue: a handful of beats the primary search missed. It has
+    # to be raised when the primary search is unavailable -- with Serper out
+    # of credits these catalogues stop being a rescue and become the only
+    # source of real photographs, and a cap of six then fails the run.
+    open_library_budget: int = 6
+    # When the relevance gate rejects a sourced photograph, generate a
+    # purpose-built image from that beat's own brief instead of hunting for
+    # another stock photo.
+    #
+    # This is a fallback policy, not a way past the gate: the rejected file is
+    # discarded, the generated one faces the same reviewer, and a generated
+    # image that also fails is regenerated rather than accepted. It exists
+    # because some briefs -- "a poster tacked to a decaying wall", "a wall
+    # clock" -- have no match in any licensed catalogue, and the alternative
+    # was a run that could never go green.
+    #
+    # Off by default. A documentary channel should fail rather than illustrate;
+    # a fiction channel has no such duty.
+    # Target model spend for one finished video, in USD. The guard declines
+    # optional paid work as this is approached; it never skips a validator or
+    # a stage the video cannot be finished without.
+    cost_budget_usd: float = 0.10
+    generate_when_rejected: bool = False
+    # Ceiling on that. A run needing more than this has a sourcing problem
+    # that generation should not paper over.
+    max_generated_when_rejected: int = 8
     # Per-scene ambience and sound cues, sourced from Freesound and generated
     # by ElevenLabs when no recording fits. Adds two mixed layers alongside
     # the music bed and transition track, which are unchanged.

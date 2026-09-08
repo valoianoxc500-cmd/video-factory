@@ -183,6 +183,9 @@ body {
   margin: 18px 0 6px;
   padding: 0 14px;
 }
+/* The first heading sits directly under the wordmark, which already provides
+   the separation the margin is there to create. */
+.nav-label:first-child { margin-top: 4px; }
 
 /* The nav item's own subtitle, as in the reference's "Re-Create" row. */
 .nav-sub {
@@ -533,6 +536,84 @@ body {
 .chan p { font-size: 12.5px; color: #B4BECB; margin: 0; line-height: 1.45; }
 
 .chan.is-on { border-color: var(--sa-violet); box-shadow: 0 0 0 1px var(--sa-violet); }
+
+/* A card standing in for a real video shows that video. Darkened hard: the
+   title and duration sit on top and have to stay readable over a frame we
+   have no control over. */
+.chan[style*="--head-art"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(
+      to top,
+      rgba(5, 8, 12, 0.94) 18%,
+      rgba(5, 8, 12, 0.62) 58%,
+      rgba(5, 8, 12, 0.42) 100%
+    ),
+    var(--head-art);
+  background-size: cover;
+  background-position: center;
+  z-index: 0;
+}
+.chan[style*="--head-art"] > * { position: relative; z-index: 1; }
+
+/* A link inside a paragraph. Underlined on purpose -- colour alone is not a
+   reliable signal that something is clickable. */
+.inline-link {
+  color: var(--sa-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.inline-link:hover { color: var(--sa-text); }
+
+/* Trim controls. Two ranges rather than a scrubber: the worker takes seconds
+   off each end, so these are the actual parameters, not an approximation of
+   them. */
+.trim-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 18px;
+}
+.trim-field { display: flex; flex-direction: column; gap: 8px; }
+.trim-field > span {
+  font-size: 12.5px;
+  color: var(--sa-dim);
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+.trim-field > span b { color: var(--sa-text); font-variant-numeric: tabular-nums; }
+.trim-field input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--sa-line-strong);
+  outline: none;
+}
+.trim-field input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--sa-accent);
+  border: 2px solid var(--sa-bg);
+  cursor: pointer;
+}
+.trim-field input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--sa-accent);
+  border: 2px solid var(--sa-bg);
+  cursor: pointer;
+  border-color: var(--sa-bg);
+}
+.trim-field input[type="range"]:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sa-accent) 35%, transparent);
+}
 
 .chan-check {
   position: absolute;

@@ -17,6 +17,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from threading import Lock
+from types import SimpleNamespace
 from typing import Any
 
 from google import genai
@@ -579,6 +580,19 @@ def _trace_suffix(trace_ref: TraceRef | None) -> str:
     return f' trace={trace_ref.html_rel_path}' if trace_ref else ""
 
 
+#: In-process cache of deterministic model answers for one run.
+#:
+#: Deliberately process-local and unbounded-per-run rather than persisted: a
+#: run is minutes long, the keys carry the model and prompt, and persisting it
+#: would risk serving an answer produced by an older prompt or model version.
+_GATEWAY_CACHE: dict[str, str] = {}
+
+
+def reset_gateway_cache() -> None:
+    """Clear the per-run answer cache. Called between runs and by tests."""
+    _GATEWAY_CACHE.clear()
+
+
 _RETRYABLE_STATUS_MARKERS = (
     "429",
     "RESOURCE_EXHAUSTED",
@@ -639,10 +653,29 @@ async def _generate_text_response(
     response_mime_type: str | None = None,
     operation_label: str | None = None,
 ) -> tuple[str, TraceRef | None]:
-    """Generate text with Gemini and return raw text plus trace reference."""
+    """Generate text with Gemini and return raw text plus trace reference.
+
+    The gateway gets two chances to change what happens here, and both are
+    off by default:
+
+      * `route` may pick a cheaper model that still meets the task's declared
+        requirements. With smart routing disabled it returns the model the
+        caller asked for, so this is a no-op.
+      * `omniroute_available` may send the call through an OpenAI-compatible
+        gateway rather than the Gemini SDK. Unset or half-configured, it is
+        false and the SDK path runs.
+
+    Everything below -- the retry ladder, the trace, the cost record -- is
+    unchanged and applies to either transport.
+    """
+    from core import ai_gateway
+
     client = _get_client()
     model = model or settings.gemini_primary_model
     operation = operation_label or "generate_text"
+    # The operation label doubles as the routing task: call sites already pass
+    # a meaningful one, so no call site has to learn a new argument.
+    model = ai_gateway.route(operation, requested=model)
     trace_ref = reserve_trace(
         operation=operation,
         service="generate_content",
@@ -668,17 +701,61 @@ async def _generate_text_response(
     if labels:
         config.labels = labels
 
+    # Identical prompt, identical model, identical instructions -> identical
+    # answer, so the second caller should not pay for it. Keyed on everything
+    # that changes the result, so a changed prompt or an escalated model is a
+    # different key rather than a stale hit.
+    #
+    # Only deterministic calls qualify: at a high temperature the model is
+    # being asked for variety, and serving a cached answer would remove it.
+    gateway_key = ""
+    if temperature <= 0.4:
+        gateway_key = ai_gateway.cache_key(
+            operation, model, prompt, system_instruction,
+            extra=f"{response_mime_type}|{max_output_tokens}",
+        )
+        cached = _GATEWAY_CACHE.get(gateway_key)
+        if cached is not None and ai_gateway.cache_enabled():
+            logger.info(
+                f"[gateway] cache hit for {operation} "
+                f"({len(cached)} chars, no request made)"
+            )
+            ai_gateway.LOG.add(
+                ai_gateway.Attempt(operation, model, "cached"))
+            return cached, None
+
     started_at = datetime.now()
     t0 = time.perf_counter()
-    try:
-        response = await _call_model_with_retry(
-            operation,
-            lambda: client.aio.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=config,
-            ),
+
+    async def _call_gateway():
+        """OmniRoute returns text, so it is wrapped to look like a response.
+
+        Only the two fields the code below reads are provided. Usage metadata
+        is absent because the gateway does not report Gemini's token counts,
+        and inventing them would corrupt the cost record.
+        """
+        text = await ai_gateway.omniroute_generate(
+            prompt,
+            model=model,
+            system_instruction=system_instruction,
+            response_json=response_mime_type == "application/json",
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
         )
+        return SimpleNamespace(text=text, usage_metadata=None)
+
+    try:
+        if ai_gateway.omniroute_available():
+            response = await _call_model_with_retry(operation, _call_gateway)
+        else:
+            response = await _call_model_with_retry(
+                operation,
+                lambda: client.aio.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=config,
+                ),
+            )
     except Exception as exc:
         elapsed = time.perf_counter() - t0
         if trace_ref:
@@ -737,6 +814,8 @@ async def _generate_text_response(
             "output_token_count": output_tokens or None,
         }
         write_trace(trace_ref, payload)
+    if gateway_key and ai_gateway.cache_enabled():
+        _GATEWAY_CACHE[gateway_key] = response.text
     return response.text, trace_ref
 
 
@@ -1216,16 +1295,26 @@ async def generate_image_gemini(
     started_at = datetime.now()
     try:
         t0 = time.perf_counter()
-        response = await client.aio.models.generate_content(
-            model=model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE", "TEXT"],
-                image_config=types.ImageConfig(
-                    aspect_ratio=aspect_ratio,
-                    image_size=image_size,
+        # Through the same retry ladder as text generation.
+        #
+        # This call used to go straight to the SDK, so a 429 failed the beat
+        # instantly -- observed as four generations failing in the same second
+        # with no backoff, which cost a run its images and then its review
+        # gate. Image quota is the tightest of any model here, so it is the
+        # path that most needs the wait.
+        response = await _call_model_with_retry(
+            operation,
+            lambda: client.aio.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE", "TEXT"],
+                    image_config=types.ImageConfig(
+                        aspect_ratio=aspect_ratio,
+                        image_size=image_size,
+                    ),
+                    labels=costs.current_billing_labels(operation),
                 ),
-                labels=costs.current_billing_labels(operation),
             ),
         )
         elapsed = time.perf_counter() - t0

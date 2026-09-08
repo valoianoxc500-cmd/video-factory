@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { AccountRepository, AssetRepository, PLATFORMS } from "@/lib/vrf";
 import { MyVideos } from "@/components/reels/MyVideos";
@@ -24,11 +25,18 @@ export default async function MyVideosPage() {
         data-art="reels"
         style={{ ["--head-art" as string]: "url('/channels/reels.jpg')" }}
       >
-        <h1>My Videos</h1>
+        <h1>
+          Re-<span className="hl">Create</span>
+        </h1>
         <p>
-          Videos you hold the rights to. Each one is re-encoded for the target
-          platform, reframed to 9:16 around the subject and loudness-normalised —
-          the format work an editor does to their own footage.
+          Videos you hold the rights to, and their new versions. Each one is
+          re-encoded for the target platform, reframed to 9:16 around the
+          subject and loudness-normalised — the format work an editor does to
+          their own footage. To keep only part of a video,{" "}
+          <Link href="/dashboard/clipping" className="inline-link">
+            cut a clip
+          </Link>
+          .
         </p>
       </div>
       <MyVideos initial={assets} accounts={accounts} />

@@ -1,4 +1,4 @@
-"""Per-scene audio: planning, sourcing without repeats, and layer rendering.
+﻿"""Per-scene audio: planning, sourcing without repeats, and layer rendering.
 
 The point of this tier is that two scenes do not sound the same. So the tests
 that matter are the ones about distinctness -- a plan that gives every scene
@@ -332,7 +332,6 @@ def _duration(path: Path) -> float:
     return float((out.stdout or "0").strip() or 0.0)
 
 
-@pytest.mark.slow
 def test_a_layer_is_exactly_as_long_as_the_video(tmp_path):
     """A short final cue must not truncate the mix."""
     bed = _tone(tmp_path / "bed.mp3", 3.0)
@@ -343,7 +342,6 @@ def test_a_layer_is_exactly_as_long_as_the_video(tmp_path):
     assert abs(_duration(out) - 20.0) < 0.05
 
 
-@pytest.mark.slow
 def test_cues_land_where_the_plan_put_them(tmp_path):
     """Silence before the first cue proves the delay was applied."""
     click = _tone(tmp_path / "cue.mp3", 0.4, freq=900)

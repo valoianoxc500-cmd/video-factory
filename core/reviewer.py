@@ -7,11 +7,18 @@ Each gate follows the same pattern:
 4. After max_attempts, fail the run with the review feedback
 """
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 
 import clients
+
+#: How many times to re-ask when the reviewer's response will not parse.
+#: A truncated body is a transport problem, so it does not spend one of the
+#: gate's content attempts -- but it is bounded, so a reviewer that is
+#: persistently broken still fails the gate rather than looping forever.
+_MALFORMED_REVIEW_RETRIES = 3
 
 logger = logging.getLogger("video_factory")
 
@@ -55,6 +62,39 @@ def _normalize_raw_list_review(review: list[Any]) -> dict[str, Any]:
         "image_results": image_results,
         "feedback": f"Raw list response: {rejected_count} rejected image(s)",
     }
+
+
+def require_slot_identity(review: Any, gate_name: str) -> None:
+    """A rejection must say which image it is about.
+
+    Raises ValueError -- the same signal a truncated body raises -- so the
+    caller's malformed-response path re-asks rather than acting on it.
+
+    Positional inference is deliberately not offered as a fallback. The
+    reviewer numbers the images it was shown, and that numbering shifts
+    whenever a slot has no asset, so position identifies the wrong beat. An
+    unidentified rejection previously caused the gate to abandon regeneration
+    entirely and burn both attempts having re-sourced nothing.
+    """
+    if gate_name != "image_review" or not isinstance(review, dict):
+        return
+
+    missing = 0
+    for item in review.get("image_results") or []:
+        if not isinstance(item, dict) or item.get("approved", True):
+            continue
+        try:
+            int(item["section_id"])
+            int(item["sub_image_index"])
+        except (KeyError, TypeError, ValueError):
+            missing += 1
+
+    if missing:
+        raise ValueError(
+            f"{missing} rejected image(s) carried no usable "
+            f"section_id/sub_image_index, so the rejection cannot be tied to "
+            f"a beat"
+        )
 
 
 async def review_gate(
@@ -102,24 +142,67 @@ async def review_gate(
 
         prompt = review_prompt_fn(content)
 
-        try:
+        async def _ask_reviewer():
             if image_paths:
-                review = await clients.review_with_vision(
+                answer = await clients.review_with_vision(
                     prompt,
                     image_paths,
                     system_instruction=system_instruction,
                     operation_label=gate_name,
                 )
             else:
-                review = await clients.generate_json(
+                answer = await clients.generate_json(
                     prompt,
                     system_instruction=system_instruction,
                     temperature=0.3,
                     operation_label=gate_name,
                 )
-        except Exception as e:
-            logger.error(f"[{gate_name}] Review call failed: {e}")
-            review = {"approved": False, "feedback": f"Review error: {e}"}
+            # Normalised here so the identity check sees the same shape the
+            # gate will act on, whichever form the model replied in.
+            if isinstance(answer, list):
+                answer = _normalize_raw_list_review(answer)
+            # A rejection that names no image is unusable, and inferring the
+            # image from its position is how the wrong beat gets regenerated.
+            # Treated as malformed so the retry below re-asks for it.
+            require_slot_identity(answer, gate_name)
+            return answer
+
+        # A malformed response is not a verdict.
+        #
+        # Reviewing seventeen images produces a long JSON body, and when it is
+        # truncated the decoder raises "Unterminated string". That was being
+        # turned into `approved: False` with no per-image detail -- which both
+        # spent a content attempt and left the regenerate step nothing to
+        # target, so a run could fail the gate without the reviewer ever
+        # having judged the images.
+        #
+        # Asking again is not weakening anything: a parse failure never
+        # approves, and a genuine rejection still falls straight through.
+        review = None
+        for parse_attempt in range(1, _MALFORMED_REVIEW_RETRIES + 1):
+            try:
+                review = await _ask_reviewer()
+                break
+            except (json.JSONDecodeError, ValueError) as e:
+                if parse_attempt == _MALFORMED_REVIEW_RETRIES:
+                    logger.error(
+                        f"[{gate_name}] Review response was unparseable after "
+                        f"{parse_attempt} attempt(s): {e}"
+                    )
+                    review = {
+                        "approved": False,
+                        "feedback": f"Review error: {e}",
+                    }
+                    break
+                logger.warning(
+                    f"[{gate_name}] Review response was unparseable "
+                    f"({str(e)[:80]}); asking again "
+                    f"({parse_attempt}/{_MALFORMED_REVIEW_RETRIES})"
+                )
+            except Exception as e:
+                logger.error(f"[{gate_name}] Review call failed: {e}")
+                review = {"approved": False, "feedback": f"Review error: {e}"}
+                break
 
         # Gemini sometimes returns the image_results array without the
         # top-level object; normalize it so regeneration sees rejected slots.

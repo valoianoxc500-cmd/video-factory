@@ -7,14 +7,21 @@ import {
   spring,
 } from "remotion";
 import { theme } from "../design/theme";
+import {
+  activeChunkIndex,
+  activeWordIndex,
+  groupIntoChunks,
+  isRtlText,
+  type WordTimestamp,
+} from "../lib/captionTiming";
+
+// Grouping and active-word selection live in ../lib/captionTiming so the
+// highlight invariant can be tested frame by frame without a renderer.
+// Re-exported here because this module was their original home.
+export { groupIntoChunks, isRtlText };
+export type { WordTimestamp };
 
 // ── Types ────────────────────────────────────────────────────
-
-export interface WordTimestamp {
-  word: string;
-  start: number;
-  end: number;
-}
 
 export interface NarrationSubtitleProps {
   word_timestamps: WordTimestamp[];
@@ -22,72 +29,6 @@ export interface NarrationSubtitleProps {
   highlight_color?: string;
   /** Frame ranges [start, end] where subtitles should be hidden (e.g. during chart slots). */
   suppress_frame_ranges?: [number, number][];
-}
-
-/**
- * A short group of words shown together, with one of them active.
- *
- * Captions are cut into 1-3 word chunks rather than sentences: a full line of
- * Arabic is unreadable at a glance on a phone, and the point of the format is
- * that the eye lands on the word being spoken right now.
- */
-interface Chunk {
-  words: WordTimestamp[];
-  startSec: number;
-  endSec: number;
-}
-
-// ── Grouping ─────────────────────────────────────────────────
-
-const MAX_WORDS_PER_CHUNK = 3;
-/** A pause longer than this ends the chunk early — it reads as a beat. */
-const GAP_THRESHOLD_SEC = 0.28;
-/** Very short words ride along with a neighbour instead of flashing alone. */
-const SHORT_WORD_CHARS = 3;
-
-// Arabic / Hebrew / Thaana ranges -- enough to detect right-to-left narration.
-const RTL_RE = /[֐-׿؀-ۿ܀-ݏހ-޿ࢠ-ࣿיִ-﷿ﹰ-﻿]/;
-
-export function isRtlText(text: string): boolean {
-  return RTL_RE.test(text);
-}
-
-export function groupIntoChunks(words: WordTimestamp[]): Chunk[] {
-  if (words.length === 0) return [];
-
-  const chunks: Chunk[] = [];
-  let buf: WordTimestamp[] = [];
-
-  const flush = () => {
-    if (buf.length === 0) return;
-    chunks.push({
-      words: buf,
-      startSec: buf[0].start,
-      endSec: buf[buf.length - 1].end,
-    });
-    buf = [];
-  };
-
-  for (let i = 0; i < words.length; i++) {
-    const cur = words[i];
-    const prev = words[i - 1];
-
-    if (buf.length > 0 && prev) {
-      const gap = cur.start - prev.end;
-      // Keep a chunk to at most three words, and break on a real pause so the
-      // grouping follows the delivery rather than fighting it.
-      const wouldOverflow = buf.length >= MAX_WORDS_PER_CHUNK;
-      const longPause = gap > GAP_THRESHOLD_SEC;
-      // A lone very short word (Arabic في, من, على) looks like a glitch, so
-      // only break before one if the chunk is already full.
-      const curIsShort = cur.word.replace(/\W/g, "").length <= SHORT_WORD_CHARS;
-      if (wouldOverflow || (longPause && !curIsShort)) flush();
-    }
-    buf.push(cur);
-  }
-  flush();
-
-  return chunks;
 }
 
 // ── Component ────────────────────────────────────────────────
@@ -134,23 +75,12 @@ export const NarrationSubtitle: React.FC<NarrationSubtitleProps> = ({
 
   const currentSec = frame / fps;
 
-  // The chunk whose window contains now; otherwise the last one that started,
-  // so a gap between words holds the previous caption instead of blinking off.
-  let activeIdx = chunks.findIndex(
-    (c) => currentSec >= c.startSec && currentSec <= c.endSec,
-  );
-  if (activeIdx === -1) {
-    for (let i = chunks.length - 1; i >= 0; i--) {
-      if (currentSec > chunks[i].endSec) {
-        // Only hold briefly, so trailing silence is not captioned.
-        if (currentSec - chunks[i].endSec < 0.4) activeIdx = i;
-        break;
-      }
-    }
-  }
+  const activeIdx = activeChunkIndex(chunks, currentSec);
   if (activeIdx === -1) return null;
 
   const chunk = chunks[activeIdx];
+  // Exactly one word of a visible chunk is highlighted, on every frame.
+  const activeWord = activeWordIndex(chunk, currentSec);
   const rtl = isRtlText(chunk.words.map((w) => w.word).join(" "));
 
   const chunkStartFrame = Math.round(chunk.startSec * fps);
@@ -221,8 +151,10 @@ export const NarrationSubtitle: React.FC<NarrationSubtitleProps> = ({
         }}
       >
         {chunk.words.map((w, i) => {
-          const isActive = currentSec >= w.start && currentSec <= w.end;
-          // Pop the word as it becomes active, then settle back.
+          const isActive = i === activeWord;
+          // Pop the word as it becomes active, then settle back. Keyed on the
+          // word's own start, so the pop still lands on the spoken onset even
+          // though the highlight now holds through any pause that follows.
           const wordLocal = frame - Math.round(w.start * fps);
           const pop = isActive
             ? spring({

@@ -152,7 +152,10 @@
     "max_broll_ratio": 0.34,
     "complete_over_coverage": true,
     "open_library_fallback": true,
-    "scene_audio": true
+    "scene_audio": true,
+    "open_library_budget": 20,
+    "generate_when_rejected": true,
+    "max_generated_when_rejected": 8
   },
   "youtube": {
     "category_id": "27",

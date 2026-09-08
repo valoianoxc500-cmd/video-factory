@@ -1,9 +1,10 @@
-"""Stage 1: Script generation — AI writes narration + image prompts, reviewed by Gate #1."""
+﻿"""Stage 1: Script generation — AI writes narration + image prompts, reviewed by Gate #1."""
 
 import json
 import logging
 import math
 import re
+import unicodedata
 from pathlib import Path
 
 import clients
@@ -618,6 +619,235 @@ def reground_keywords(
         if candidate and candidate.lower() != original.lower():
             return candidate
     return ""
+
+
+# ── Football brief repair ─────────────────────────────────────────────────
+#
+# A Football run died with section 3 holding two usable photographs where it
+# needed four. The sourcing was fine; the briefs were not. Five of that
+# section's six beats asked for things no archive photograph contains:
+#
+#   "A finger clicking on a YouTube notification bell icon on a smartphone"
+#   "A smartphone displaying a sports news app with football headlines"
+#
+# On a web_photos_only channel every one of those is searched for as a real
+# photograph, so search returns screenshots, line art and error pages and the
+# relevance gate rejects the lot -- correctly. The gate is not the problem and
+# is left exactly as strict as it was; the briefs are rewritten to ask for
+# something a camera has actually photographed.
+
+# Interface, artwork and screen-capture wording. None of it is a photographic
+# subject, and all of it appeared in the failing run.
+_UI_BRIEF_PATTERNS: tuple[str, ...] = (
+    r"\b(smart\s*phone|smartphone|phone|tablet|laptop|monitor)\s+"
+    r"(screen|display|showing|displaying)\b",
+    r"\b(notification|subscribe|like|bell|thumbs?[- ]up)\s*(icon|button|bell)\b",
+    r"\bbell\s+icon\b",
+    r"\b(app|application|website|web\s*page|browser|interface|ui|ux)\b",
+    r"\b(screen\s*shot|screenshot|screen\s*grab|screen\s*capture)\b",
+    r"\b(icon|emoji|cursor|mouse\s+pointer|pop[- ]?up|banner\s+ad)\b",
+    r"\b(finger|hand)\s+(clicking|tapping|pressing|swiping)\b",
+    r"\b(mock[- ]?up|wireframe|render|3d\s+render|digital\s+art|illustration)\b",
+    r"\b(graphic|infographic|animation|animated)\b",
+)
+_UI_BRIEF_RES = tuple(re.compile(p, re.IGNORECASE) for p in _UI_BRIEF_PATTERNS)
+
+# "Football" alone returns gridiron. Several candidate sets in the failing run
+# were rejected with "All candidates show American football, which is
+# explicitly prohibited" -- attempts spent on the wrong sport entirely.
+_AMERICAN_FOOTBALL_RES = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (r"\bamerican\s+football\b", r"\bgridiron\b", r"\bnfl\b")
+)
+_SOCCER_MARKERS = ("soccer", "association football", "premier league", "la liga")
+
+# Photographic subjects for a beat that has no subject of its own -- an outro,
+# a subscribe prompt, a "what happens next". Each is a real thing a camera has
+# pointed at, and each is anchored to a named club below so it satisfies the
+# review gate's demand for a specific subject without needing the player.
+_CTA_PHOTO_SUBJECTS: tuple[tuple[str, str], ...] = (
+    ("{club} fans celebrating in the stands photograph",
+     "{club} supporters celebrating in a packed stand during a match."),
+    ("{club} stadium packed crowd flags photograph",
+     "The {club} stadium full of supporters with flags raised during a match."),
+    ("{club} players celebrating goal photograph",
+     "{club} players celebrating a goal together on the pitch."),
+    ("{club} supporters scarves stadium photograph",
+     "{club} supporters holding scarves above their heads in the stadium."),
+)
+
+
+def _is_football_channel(config) -> bool:
+    """Whether this channel's beats are association football.
+
+    Read from the niche rather than a new config field: `core/utils.py` is
+    being edited elsewhere, and the football channel is already the only one
+    whose category names the sport.
+    """
+    niche = getattr(config, "niche", None)
+    category = str(getattr(niche, "category", "") or "").lower()
+    focus = str(getattr(niche, "focus", "") or "").lower()
+    return "football" in category or "football" in focus or "soccer" in category
+
+
+def brief_requests_interface(text: str) -> bool:
+    """Whether this brief asks for a screen, icon or drawing rather than a photo."""
+    haystack = " ".join(str(text or "").split())
+    return any(regex.search(haystack) for regex in _UI_BRIEF_RES)
+
+
+def disambiguate_football(query: str) -> str:
+    """Make a football query mean association football.
+
+    Only touches queries that say "football" without already naming the sport
+    or a competition that fixes it. American-football wording is left alone:
+    a brief that genuinely means the NFL is not this function's business.
+    """
+    text = " ".join(str(query or "").split())
+    if not text or not re.search(r"\bfootball\b", text, re.IGNORECASE):
+        return text
+    lowered = text.lower()
+    if any(marker in lowered for marker in _SOCCER_MARKERS):
+        return text
+    if any(regex.search(text) for regex in _AMERICAN_FOOTBALL_RES):
+        return text
+    return re.sub(r"\bfootball\b", "soccer football", text, count=1, flags=re.IGNORECASE)
+
+
+def _named_clubs(script_data: dict) -> list[str]:
+    """Clubs the script itself names, most-mentioned first.
+
+    Used to anchor a generic beat to a specific club. The review gate accepts
+    a named "person, club, match or event", so naming the club satisfies it
+    without pretending every filler beat is a photograph of the player -- of
+    which there are not six distinct ones to find.
+    """
+    text = json.dumps(script_data, ensure_ascii=False)
+    counts: list[tuple[int, str]] = []
+    for club in (
+        "Barcelona", "Real Madrid", "Atletico Madrid", "Atlético Madrid",
+        "Arsenal", "Manchester United", "Manchester City", "Liverpool",
+        "Chelsea", "Tottenham", "Bayern Munich", "Juventus", "Inter Milan",
+        "AC Milan", "Paris Saint-Germain", "PSG", "Napoli", "Borussia Dortmund",
+    ):
+        found = text.count(club)
+        if found:
+            counts.append((found, club))
+    counts.sort(reverse=True)
+    return [club for _, club in counts]
+
+
+def repair_outdated_club_briefs(script_data: dict, player_status: list) -> int:
+    """Rewrite image briefs that put a player at a club he has left.
+
+    The narration is held to the squad record; the pictures have to be too. A
+    beat searching for "Manchester City's Julian Alvarez" returns a real
+    photograph of a real moment that is two years out of date, and the
+    relevance gate would accept it -- it does show the named player.
+
+    Only the club name is replaced, so the beat keeps its subject and framing.
+    """
+    rows = [
+        row
+        for row in (player_status or [])
+        if isinstance(row, dict) and row.get("current_club")
+    ]
+    if not rows:
+        return 0
+
+    repaired = 0
+    for section in script_data.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for slot in section.get("slots") or []:
+            if not isinstance(slot, dict):
+                continue
+            if str(slot.get("visual") or "") not in _SEARCHED_VISUAL_TYPES:
+                continue
+
+            for row in rows:
+                surname = str(row.get("name") or "").split()[-1] if row.get("name") else ""
+                if not surname:
+                    continue
+                current = str(row["current_club"])
+                for field in ("keywords", "prompt"):
+                    text = str(slot.get(field) or "")
+                    # Both sides folded: the record spells him "Álvarez" and
+                    # the brief may not.
+                    if not text or _fold(surname) not in _fold(text):
+                        continue
+                    for former in row.get("former_clubs") or []:
+                        pattern = re.compile(re.escape(str(former)), re.IGNORECASE)
+                        if not pattern.search(text):
+                            continue
+                        replaced = pattern.sub(current, text)
+                        slot[field] = replaced
+                        repaired += 1
+                        logger.warning(
+                            f"Image brief named {former}, a club "
+                            f"{row['name']} left; rewrote to {current}: "
+                            f"{text[:70]!r}"
+                        )
+                        text = replaced
+    return repaired
+
+
+def _fold(text: str) -> str:
+    """Lowercased and accent-stripped, so "Álvarez" matches "Alvarez"."""
+    decomposed = unicodedata.normalize("NFKD", str(text or ""))
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).lower()
+
+
+def _repair_football_briefs(script_data: dict) -> None:
+    """Rewrite briefs a real-photographs-only channel cannot possibly satisfy.
+
+    Two rewrites, both deterministic and both drawn from the script's own
+    named clubs -- nothing is invented:
+
+      1. A brief asking for a screen, icon, app or drawing becomes a real
+         football photograph of a named club's fans, crowd or players.
+      2. A football query that does not say which football gets told.
+
+    Slots keep their type and policy. This changes what is searched for, not
+    what the beat is for.
+    """
+    clubs = _named_clubs(script_data) or ["the club"]
+    rotation = 0
+
+    for section in script_data.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for slot in section.get("slots") or []:
+            if not isinstance(slot, dict):
+                continue
+            if str(slot.get("visual") or "") not in _SEARCHED_VISUAL_TYPES:
+                continue
+
+            keywords = str(slot.get("keywords") or "")
+            prompt = str(slot.get("prompt") or "")
+
+            if brief_requests_interface(keywords) or brief_requests_interface(prompt):
+                club = clubs[rotation % len(clubs)]
+                kw_tpl, prompt_tpl = _CTA_PHOTO_SUBJECTS[
+                    rotation % len(_CTA_PHOTO_SUBJECTS)
+                ]
+                rotation += 1
+                slot["keywords"] = kw_tpl.format(club=club)
+                slot["prompt"] = prompt_tpl.format(club=club)
+                logger.info(
+                    f"Football brief asked for an interface, not a photograph; "
+                    f"replaced {keywords!r} with {slot['keywords']!r}"
+                )
+                keywords = slot["keywords"]
+                prompt = slot["prompt"]
+
+            disambiguated = disambiguate_football(keywords)
+            if disambiguated != keywords:
+                slot["keywords"] = disambiguated
+                logger.info(
+                    f"Football query did not say which football; "
+                    f"{keywords!r} -> {disambiguated!r}"
+                )
 
 
 def _repair_slot_fields(script_data: dict, *, web_photos_only: bool = False) -> None:
@@ -1278,6 +1508,16 @@ async def generate_script(
         # the wrong shape, and both previously fatal. Repairing first means the
         # validator judges the script's substance rather than its typing.
         _coerce_slot_keywords(content)
+        # Football briefs are repaired before the generic pass so the
+        # replacements it writes go through mood-stripping and regrounding
+        # like any other brief. Gated on the niche: a storytelling channel
+        # has no football beats and must not be given any.
+        if _is_football_channel(config):
+            _repair_football_briefs(content)
+            # The same squad facts the narration is held to. A picture of the
+            # right player in the wrong shirt passes the relevance gate and is
+            # still two years out of date.
+            repair_outdated_club_briefs(content, plan.get("player_status") or [])
         _repair_slot_fields(
             content,
             web_photos_only=config.image_sourcing.web_photos_only,

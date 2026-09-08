@@ -16,8 +16,10 @@ const CHANNEL_ART = new Set(["horror_stories", "football_news"]);
  * read there.
  */
 const REELS_SECTIONS = [
-  ["/dashboard/reels/saved", "Viral videos", "Saved from Discover", "M6 4h12v16l-6-4-6 4V4Z"],
-  ["/dashboard/reels/videos", "My videos", "Yours, and their new versions", "M4 6h16M4 12h16M4 18h10"],
+  ["/dashboard/reels", "Find viral", "What is performing right now", "M21 21l-4.3-4.3M11 19a8 8 0 1 1 0-16 8 8 0 0 1 0 16Z"],
+  ["/dashboard/reels/saved", "Saved", "Kept from Find Viral", "M6 4h12v16l-6-4-6 4V4Z"],
+  ["/dashboard/reels/videos", "Re-Create", "Yours, and their new versions", "M4 6h11a4 4 0 0 1 0 8H7m0 0 3-3m-3 3 3 3M4 4v4h4"],
+  ["/dashboard/clipping", "Clipping", "Cut a section to 9:16", "M6 3v10m12-10v10M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm12 0a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM8.1 15.9 18 3M15.9 15.9 6 3"],
   ["/dashboard/reels/queue", "Queue", "Waiting to publish", "M4 6h16M4 12h16M4 18h16"],
   ["/dashboard/reels/scheduled", "Scheduled", "Posting at a set time", "M8 3v4m8-4v4M4 9h16M5 5h14a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z"],
   ["/dashboard/reels/published", "Published", "Already posted", "M5 13l4 4L19 7"],
@@ -91,9 +93,9 @@ export default async function OverviewPage() {
       </div>
 
       <div className="sec-head" style={{ marginTop: 30 }}>
-        <h2>Viral Reels Finder</h2>
+        <h2>Short-form</h2>
         <Link className="sec-link" href="/dashboard/reels">
-          Open Re-Create
+          Find viral videos
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
             <path d="M5 12h14m-6-7 7 7-7 7" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
           </svg>

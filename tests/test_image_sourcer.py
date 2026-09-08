@@ -338,10 +338,14 @@ def test_search_pexels_video_uses_documented_v1_endpoint(monkeypatch, tmp_path):
     # both orientations, so there is no single request to assert on. What this
     # test still owns is the shape of each one: the documented endpoint above,
     # the brief leading the ladder, and a page size per request.
+    #
+    # Only the two most specific rungs: a loosely-matched *clip* reads as
+    # stock footage in a way a loosely-matched still does not, so the vague
+    # rungs are not searched for video.
     ladder = image_sourcer.pexels_query_ladder("senior standing up from bed")
     assert ladder[0] == "senior standing up from bed"
     assert [search["query"] for search in client.searches] == [
-        query for query in ladder for _ in ("portrait", "landscape")
+        query for query in ladder[:2] for _ in ("portrait", "landscape")
     ]
     assert {search["orientation"] for search in client.searches} == {
         "portrait", "landscape",
@@ -2075,23 +2079,29 @@ def test_cached_images_are_still_reachable_by_the_review_gate(monkeypatch, tmp_p
 
 
 def test_rejected_filenames_survive_slot_renumbering():
-    """Reviewer indices must resolve through filenames, not descriptor order.
+    """Reviewer indices must resolve through the slot's stable id, not order.
 
     Reproduces the renumbering case: section 3's first slot went unsourced and
-    was dropped, so the survivors were renumbered and the file the reviewer
-    calls "3.2" is section_003_03.jpg on disk. Index-based matching resolved
-    this to nothing, so the gate re-reviewed identical images until its retry
+    was dropped, so the survivors were renumbered and the beat the reviewer
+    calls "3.2" is section_003_03 on disk. Index-based matching resolved this
+    to nothing, so the gate re-reviewed identical images until its retry
     budget ran out and then failed the run.
+
+    Resolves to `slot_uid` rather than a filename so a b-roll beat -- reviewed
+    through a poster frame its descriptor does not carry -- maps back just as
+    reliably as a still.
     """
     sections_context = [
-        {"section_id": 3, "sub_image_index": 1, "image_filename": "section_003_02.jpg"},
-        {"section_id": 3, "sub_image_index": 2, "image_filename": "section_003_03.jpg"},
+        {"section_id": 3, "sub_image_index": 1,
+         "image_filename": "section_003_02.jpg", "slot_uid": "section_003_02"},
+        {"section_id": 3, "sub_image_index": 2,
+         "image_filename": "section_003_03.jpg", "slot_uid": "section_003_03"},
     ]
     rejected = {(3, 2): "Anfield stadium crowd photograph"}
 
     resolved = image_sourcer._rejected_filenames(rejected, sections_context)
 
-    assert resolved == {"section_003_03.jpg": "Anfield stadium crowd photograph"}
+    assert resolved == {"section_003_03": "Anfield stadium crowd photograph"}
 
 
 def test_rejected_filenames_ignores_unknown_keys():

@@ -1,7 +1,16 @@
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { MetricsRepository, PLATFORMS, PublishJobRepository } from "@/lib/vrf";
 
 export const dynamic = "force-dynamic";
+
+/** The full-width buttons need shrinking when two sit side by side. */
+const INLINE_CTA = {
+  display: "inline-block",
+  width: "auto",
+  padding: "9px 18px",
+  textDecoration: "none",
+} as const;
 
 /**
  * How published posts actually did, and how the predictions compared.
@@ -71,7 +80,16 @@ export default async function AnalyticsPage() {
           <h3>Nothing measured yet</h3>
           <p>
             Figures appear once a post has been live long enough for the platform
-            to report on it.
+            to report on it. Nothing has been published from here yet.
+          </p>
+          {/* An empty state that offers no next step is a dead end. */}
+          <p style={{ marginTop: 18, display: "flex", gap: 10, justifyContent: "center" }}>
+            <Link href="/dashboard/reels/videos" className="btn-primary" style={INLINE_CTA}>
+              Prepare a video
+            </Link>
+            <Link href="/dashboard/reels/accounts" className="btn-ghost" style={INLINE_CTA}>
+              Connect an account
+            </Link>
           </p>
         </div>
       ) : (
