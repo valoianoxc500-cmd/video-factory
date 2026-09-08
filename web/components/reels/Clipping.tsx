@@ -134,7 +134,7 @@ export function Clipping({
       <div className="empty">
         <h3>Nothing to clip yet</h3>
         <p>
-          Clipping works on videos you own. Add one under Re-Create — paste the
+          Clipping works on videos you own. Add one under My Videos — paste the
           link and confirm the rights — and once its file has imported it will
           appear here ready to cut.
         </p>
@@ -250,7 +250,7 @@ export function Clipping({
         <div className={`notice${task.status === "failed" ? " notice-error" : ""}`}>
           {task.status === "queued" && "Queued — the worker will pick this up shortly."}
           {task.status === "running" && "Clipping now: trimming, reframing and re-encoding."}
-          {task.status === "done" && "Clip ready. It is on the video in Re-Create."}
+          {task.status === "done" && "Clip ready. It is on the video in My Videos."}
           {task.status === "failed" && (task.error || "Clipping failed.")}
         </div>
       )}

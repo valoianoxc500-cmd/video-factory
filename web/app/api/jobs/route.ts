@@ -79,6 +79,9 @@ export async function POST(request: Request) {
       channel: String(payload.engine ?? payload.channel ?? ""),
       style: payload.style ? String(payload.style) : undefined,
       language: payload.language ? String(payload.language) : undefined,
+      captionLanguage: payload.captionLanguage
+        ? String(payload.captionLanguage)
+        : undefined,
     });
     return Response.json(job, { status: 201 });
   } catch (err) {

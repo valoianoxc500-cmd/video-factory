@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import shutil
+import subprocess
 import time
 import wave
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from threading import Lock
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 from google import genai
 from google.genai import types
 
@@ -1416,6 +1418,130 @@ async def generate_image_gemini(
 # TTS — speech generation
 # ---------------------------------------------------------------------------
 
+#: Gemini TTS returns mono 16-bit PCM at 24 kHz. ElevenLabs narration is
+#: normalised to exactly that, because `_concat_wavs` joins sections with the
+#: `wave` module and refuses a file whose parameters differ from the first.
+#: A run that mixes providers across sections still concatenates cleanly.
+_NARRATION_SAMPLE_RATE = 24000
+
+
+async def _speak_elevenlabs(
+    text: str,
+    output_path: Path,
+    *,
+    voice_id: str,
+    language: str,
+    voice_label: str,
+    operation_label: str,
+) -> Path | None:
+    """One section of narration, in one named ElevenLabs voice.
+
+    Returns a WAV path so the rest of the audio stage cannot tell which
+    provider spoke, or None on failure so the caller's existing retry applies.
+    """
+    from core.providers.narration import ElevenLabsNarrationProvider
+
+    provider = ElevenLabsNarrationProvider()
+    status = provider.status()
+    if not status.usable:
+        logger.error(f"[tts] ElevenLabs narration unavailable: {status.reason}")
+        return None
+
+    trace_ref = reserve_trace(
+        operation=operation_label,
+        service="tts",
+        model=provider.MODEL,
+    )
+    logger.info(
+        f"[tts] elevenlabs model={provider.MODEL} voice={voice_label or voice_id} "
+        f"lang={language} text={len(text.split())} words"
+        f"{_trace_suffix(trace_ref)}"
+    )
+
+    started_at = datetime.now()
+    t0 = time.perf_counter()
+    mp3_path = output_path.with_suffix(".mp3")
+    wav_path = output_path.with_suffix(".wav")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)) as http:
+            audio = await provider.speak(text, voice_id=voice_id, client=http)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        mp3_path.write_bytes(audio)
+
+        result = subprocess.run(
+            [
+                settings.ffmpeg_path, "-y",
+                "-i", str(mp3_path),
+                "-ac", "1",
+                "-ar", str(_NARRATION_SAMPLE_RATE),
+                "-c:a", "pcm_s16le",
+                str(wav_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 or not wav_path.exists():
+            raise RuntimeError(
+                f"ffmpeg could not decode the narration MP3: "
+                f"{(result.stderr or '').strip()[:300]}"
+            )
+        mp3_path.unlink(missing_ok=True)
+
+        elapsed = time.perf_counter() - t0
+        audio_seconds = wav_path.stat().st_size / (_NARRATION_SAMPLE_RATE * 2)
+        # Billed per character, not per token, so the Gemini TTS cost model
+        # does not describe this. Recorded as characters and left for the
+        # pricing table to price, rather than reported as free.
+        costs.record_tts_cost(
+            model=provider.MODEL,
+            prompt_tokens=len(text),
+            audio_seconds=audio_seconds,
+            operation=operation_label,
+        )
+        logger.info(
+            f"[tts] elevenlabs done — {elapsed:.1f}s → {wav_path.name} "
+            f"({audio_seconds:.1f}s audio){_trace_suffix(trace_ref)}"
+        )
+        if trace_ref:
+            payload = base_payload(
+                trace_ref,
+                started_at=started_at,
+                duration_seconds=elapsed,
+                status="ok",
+            )
+            payload["request"] = {
+                "provider": provider.name,
+                "voice_id": voice_id,
+                "voice_label": voice_label,
+                "language": language,
+                "characters": len(text),
+                "output_path": str(wav_path),
+            }
+            payload["response"] = {
+                "output_path": str(wav_path),
+                "audio_seconds": round(audio_seconds, 3),
+                "sample_rate": _NARRATION_SAMPLE_RATE,
+            }
+            write_trace(trace_ref, payload)
+        return wav_path
+
+    except Exception as e:
+        mp3_path.unlink(missing_ok=True)
+        if trace_ref:
+            payload = base_payload(trace_ref, started_at=started_at, status="error")
+            payload["request"] = {
+                "provider": "elevenlabs_narration",
+                "voice_id": voice_id,
+                "language": language,
+                "output_path": str(wav_path),
+            }
+            payload["response"] = {"error": str(e)}
+            write_trace(trace_ref, payload)
+        logger.error(f"ElevenLabs narration failed: {e}")
+        return None
+
+
 @cached_file("speech")
 async def generate_speech(
     text: str,
@@ -1426,15 +1552,40 @@ async def generate_speech(
     voice_name: str = "Charon",
     model: str | None = None,
     operation_label: str | None = None,
+    provider: str = "",
+    voice_id: str = "",
 ) -> Path | None:
-    """Generate speech audio from text using Gemini TTS.
+    """Generate speech audio from text.
 
-    The voice characteristics are controlled via the voice_prompt — describe
-    the voice you want (tone, pace, emotion, accent). The base voice is
-    selected via voice_name (e.g. "Charon", "Kore", "Fenrir", "Aoede").
+    Gemini TTS by default: the voice characteristics are controlled via the
+    voice_prompt — describe the voice you want (tone, pace, emotion, accent)
+    — and the base voice is selected via voice_name ("Charon", "Kore", …).
+
+    A channel whose voice config sets `provider: "elevenlabs"` and a
+    `voice_id` is narrated by that one ElevenLabs voice instead. There is no
+    voice_prompt in that path: an ElevenLabs voice *is* the performance, and a
+    prompt describing a different one would be silently ignored.
 
     Returns the output path on success, None on failure.
     """
+    if str(provider or "").strip().lower().startswith("eleven"):
+        if str(voice_id or "").strip():
+            return await _speak_elevenlabs(
+                text,
+                output_path,
+                voice_id=voice_id,
+                language=language,
+                voice_label=voice_name,
+                operation_label=operation_label or "generate_speech",
+            )
+        # Configured for ElevenLabs but with no voice to speak in. Gemini is
+        # the documented default and narrates correctly, so falling through
+        # costs a different voice; refusing would cost the whole run.
+        logger.warning(
+            "[tts] channel asks for ElevenLabs narration but no voice_id is "
+            "configured; narrating with Gemini TTS instead"
+        )
+
     client = _get_client()
     model = model or settings.gemini_tts_model
     operation = operation_label or "generate_speech"

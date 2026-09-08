@@ -208,6 +208,7 @@ async def run_pipeline(
     preview_remotion: bool = False,
     allow_review_failures: set[str] | None = None,
     language: str | None = None,
+    caption_language: str | None = None,
 ) -> None:
     """Run the full video factory pipeline."""
     logger = setup_logging(channel_slug)
@@ -220,8 +221,22 @@ async def run_pipeline(
     config = load_channel_config(
         channel_slug, overrides=overrides, language=language
     )
+    # Captions can be written in a language the narrator is not speaking. Set
+    # after the variant is applied so it overrides whatever the variant chose,
+    # and only when it actually differs -- passing the voice language here
+    # must stay a no-op so the measured STT timings are used unchanged.
+    if caption_language:
+        config.caption_language = str(caption_language).strip().lower()
+
+    caption_note = (
+        f", captions: {config.caption_language}"
+        if config.caption_language
+        and config.caption_language[:2] != str(config.voice.language or "")[:2]
+        else ""
+    )
     logger.info(
-        f"Channel: {config.channel_name} (script language: {config.language})"
+        f"Channel: {config.channel_name} "
+        f"(script language: {config.language}{caption_note})"
     )
 
     # Explicit workspace path overrides all auto-detection
@@ -1138,8 +1153,14 @@ def _apply_settings_overrides(overrides: list[str]) -> None:
 @click.command()
 @click.option("--channel", required=True, help="Channel slug (e.g. demo_channel)")
 @click.option("--language", default=None,
-              help="Script language for narration and captions (e.g. ar, en). "
-                   "Must be one the channel declares in language_variants.")
+              help="Voice language for the narration (e.g. ar, en). Must be "
+                   "one the channel declares in language_variants. Captions "
+                   "follow it unless --caption-language says otherwise.")
+@click.option("--caption-language", default=None,
+              help="Caption language, when it differs from the narration "
+                   "(e.g. ar, en). Captions are translated and aligned to the "
+                   "narration's measured sentence timings. Omit to caption in "
+                   "the spoken language from the transcript itself.")
 @click.option("--stage", "stage_spec", default=None, help="Run specific stage(s): 'script', 'process..thumbnail', '..script'")
 @click.option("--workspace", type=click.Path(exists=True, file_okay=False), default=None, help="Target a specific workspace (skips auto-detection)")
 @click.option("--fixtures", type=click.Choice(["record", "replay"]), default=None, help="Record or replay API responses via .fixtures/")
@@ -1150,8 +1171,8 @@ def _apply_settings_overrides(overrides: list[str]) -> None:
     default="",
     help="Comma-separated review gates to continue after max retries (e.g. image_review,thumbnail,final_review)",
 )
-def main(channel, language, stage_spec, workspace, fixtures, overrides,
-         preview_remotion, allow_review_failures):
+def main(channel, language, caption_language, stage_spec, workspace, fixtures,
+         overrides, preview_remotion, allow_review_failures):
     """Video Factory — Autonomous YouTube video pipeline."""
     if fixtures:
         from clients import set_mode
@@ -1187,6 +1208,7 @@ def main(channel, language, stage_spec, workspace, fixtures, overrides,
             preview_remotion=preview_remotion,
             allow_review_failures=allowed_review_failures,
             language=language,
+            caption_language=caption_language,
         ))
     except Exception:
         failed_ws = workspace_path or find_latest_workspace(channel)

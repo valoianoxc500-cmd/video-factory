@@ -36,7 +36,7 @@ const PLANS = [
     features: [
       "150 generation credits",
       "Everything in Starter",
-      "Re-Create from a video",
+      "Clip Analyzer",
       "Scheduled publishing",
       "Priority rendering queue",
     ],

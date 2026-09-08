@@ -219,6 +219,11 @@ class VoiceConfig(BaseModel):
     voice_name: str = "Charon"
     voice_prompt: str = ""
     voice_prompt_variations: list[str] = []
+    # ElevenLabs only. The voice *id*, not its display name: names are neither
+    # unique nor stable across a rename, so resolving one at request time
+    # would let the narrator change without this config changing. Empty means
+    # the channel narrates on Gemini TTS regardless of `provider`.
+    voice_id: str = ""
 
 
 class ImageSourcingConfig(BaseModel):
@@ -512,6 +517,12 @@ class ChannelConfig(BaseModel):
     channel_name: str
     channel_id: str = ""
     language: str = "en"
+    # The caption track's language, when it is not the narrator's. Empty (the
+    # default) means captions come straight from the narration's own STT word
+    # timings, which is what every channel did before this existed and is the
+    # only configuration where every word timing is a measurement rather than
+    # an interpolation. See core/caption_language.py.
+    caption_language: str = ""
     content_mode: str = "visual"  # "visual" | "data_graphics" | "hybrid"
     niche: NicheConfig
     video: VideoConfig = VideoConfig()

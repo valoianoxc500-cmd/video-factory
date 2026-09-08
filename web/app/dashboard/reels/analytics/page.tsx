@@ -47,6 +47,7 @@ export default async function AnalyticsPage() {
       <div
         className="page-head"
         data-art="analytics"
+        data-surface="analytics"
         style={{ ["--head-art" as string]: "url('/channels/analytics.jpg')" }}
       >
         <h1>Analytics</h1>

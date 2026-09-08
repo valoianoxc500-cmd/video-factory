@@ -23,9 +23,24 @@ export type ScriptLanguage = {
   native: string;
 };
 
+/**
+ * The nav groups an engine can belong to.
+ *
+ * Football stands alone; the two story engines share "Story To Video" because
+ * they are the same act -- a researched story turned into a narrated video --
+ * differing only in what they promise about the truth of it.
+ */
+export type EngineSection = "football" | "story";
+
+export const SECTIONS: { id: EngineSection; label: string }[] = [
+  { id: "football", label: "Football" },
+  { id: "story", label: "Story To Video" },
+];
+
 export type Engine = {
   slug: string;
   label: string;
+  section: EngineSection;
   /** Page headline while this engine is selected. */
   headline: string;
   /** Sentence under the headline, completed by the shared render blurb. */
@@ -39,18 +54,39 @@ export type Engine = {
   /** Optional sub-mode. Sent as `style` and reaches the pipeline as plan.story_type. */
   styles?: StoryStyle[];
   /**
-   * Script languages this engine offers. Controls narration, captions and the
-   * finished video; visual search always runs in both scripts regardless.
+   * Languages this engine can *narrate* in. Selecting one swaps the channel's
+   * language variant, which moves the narration language, the voice and the
+   * script instructions together -- they cannot move independently.
    */
-  languages?: ScriptLanguage[];
+  voiceLanguages?: ScriptLanguage[];
+  /**
+   * Languages the caption track can be written in. Where this differs from the
+   * chosen voice language the captions are translated and aligned to the
+   * narration's measured sentence timings, so a line still appears and leaves
+   * exactly when its sentence is spoken.
+   *
+   * Every engine offers both, including ones that narrate in only one
+   * language: reading English under Arabic narration is the point.
+   */
+  captionLanguages?: ScriptLanguage[];
   /** Applies the cinematic horror theme to the page. */
-  theme?: "horror";
+  theme?: "horror" | "true" | "football";
+  /** Which narrator this engine speaks with, stated plainly in the UI. */
+  voiceNote?: string;
 };
+
+const AR: ScriptLanguage = { code: "ar", label: "Arabic", native: "العربية" };
+const EN: ScriptLanguage = { code: "en", label: "English", native: "English" };
+
+/** Both engines caption in either script; kept in one place so they cannot drift. */
+const CAPTION_LANGUAGES: ScriptLanguage[] = [AR, EN];
 
 export const ENGINES: Engine[] = [
   {
     slug: "football_news",
     label: "Football News",
+    section: "football",
+    theme: "football",
     headline: "Arabic football news, generated end to end",
     sub:
       "Enter a topic and the pipeline researches it, writes an Arabic script, " +
@@ -60,6 +96,11 @@ export const ENGINES: Engine[] = [
     inputLabel: "Football topic or news",
     placeholder: "e.g. Mbappé's move to Real Madrid",
     submitLabel: "Generate",
+    // The channel declares only an Arabic variant, and asking it for English
+    // narration fails in the worker rather than here. Captions can still be
+    // English, which is what the caption control is for.
+    voiceLanguages: [AR],
+    captionLanguages: CAPTION_LANGUAGES,
     examples: [
       "صفقات الانتقالات الصيفية الكبرى",
       "أعظم لحظات دوري أبطال أوروبا",
@@ -69,27 +110,22 @@ export const ENGINES: Engine[] = [
   {
     slug: "horror_stories",
     label: "Horror Stories",
-    headline: "Arabic horror, told end to end",
+    section: "story",
+    theme: "horror",
+    headline: "Horror, told end to end",
     sub:
       "Name a story and the pipeline researches it, separates what is verified " +
-      "from what is merely claimed, writes a complete Arabic arc, and finds real " +
+      "from what is merely claimed, writes a complete arc, and finds real " +
       "photographs of the actual places.",
     blurb:
-      "Researches the case, marks fact apart from rumour, and builds a complete cinematic Arabic story.",
+      "Paranormal accounts, urban legends and original horror, narrated in one unmistakable voice.",
     inputLabel: "Story or case",
-    placeholder: "e.g. اختفاء عائلة سوديف",
+    placeholder: "e.g. أسطورة بئر برهوت",
     submitLabel: "Generate Story",
-    theme: "horror",
-    languages: [
-      { code: "ar", label: "Arabic", native: "العربية" },
-      { code: "en", label: "English", native: "English" },
-    ],
+    voiceNote: "Narrated by Rudra — Intense Documentary Narrator (ElevenLabs).",
+    voiceLanguages: [AR, EN],
+    captionLanguages: CAPTION_LANGUAGES,
     styles: [
-      {
-        slug: "true_story",
-        label: "True Story",
-        hint: "A real case. Researched first; verified facts stated plainly, claims attributed, nothing invented.",
-      },
       {
         slug: "paranormal",
         label: "Paranormal",
@@ -107,9 +143,43 @@ export const ENGINES: Engine[] = [
       },
     ],
     examples: [
-      "اختفاء عائلة سوديف",
       "أسطورة بئر برهوت",
       "قصة القصر المهجور في الصحراء",
+      "حكايات الطريق الصحراوي القديم",
+    ],
+  },
+  {
+    slug: "true_stories",
+    label: "True Stories",
+    section: "story",
+    theme: "true",
+    headline: "Real cases, told exactly as they are known",
+    sub:
+      "Name a real case and the pipeline researches it first, states verified " +
+      "facts plainly, attributes what was merely reported, and never " +
+      "manufactures a resolution the case does not have.",
+    blurb:
+      "A real case, researched first: verified facts stated plainly, claims attributed, nothing invented.",
+    inputLabel: "Case or event",
+    placeholder: "e.g. اختفاء عائلة سوديف",
+    submitLabel: "Generate Story",
+    voiceNote: "Narrated by the documentary voice this channel has always used.",
+    voiceLanguages: [AR, EN],
+    captionLanguages: CAPTION_LANGUAGES,
+    // One story type, and it is the whole promise of the engine. Sent
+    // explicitly so the pipeline applies the true_story truth rules rather
+    // than inferring them from the channel name.
+    styles: [
+      {
+        slug: "true_story",
+        label: "True Story",
+        hint: "A real case. Researched first; verified facts stated plainly, claims attributed, nothing invented.",
+      },
+    ],
+    examples: [
+      "اختفاء عائلة سوديف",
+      "قضية دي بي كوبر",
+      "لغز سفينة ماري سيليست",
     ],
   },
 ];
@@ -124,6 +194,10 @@ export function engineBySlug(slug: string): Engine {
   return ENGINES.find((e) => e.slug === slug) ?? ENGINES[0];
 }
 
+export function enginesInSection(section: EngineSection): Engine[] {
+  return ENGINES.filter((e) => e.section === section);
+}
+
 /** Whether `style` is a valid sub-mode of `engine`. Empty style is allowed. */
 export function isKnownStyle(engineSlug: string, style: string): boolean {
   if (!style) return true;
@@ -136,14 +210,32 @@ export function defaultStyle(engineSlug: string): string {
   return engine?.styles?.[0]?.slug ?? "";
 }
 
-/** Whether `code` is a script language this engine offers. Empty is allowed. */
+/** Whether `code` is a voice language this engine offers. Empty is allowed. */
 export function isKnownLanguage(engineSlug: string, code: string): boolean {
   if (!code) return true;
   const engine = ENGINES.find((e) => e.slug === engineSlug);
-  return (engine?.languages ?? []).some((l) => l.code === code);
+  return (engine?.voiceLanguages ?? []).some((l) => l.code === code);
 }
 
 export function defaultLanguage(engineSlug: string): string {
   const engine = ENGINES.find((e) => e.slug === engineSlug);
-  return engine?.languages?.[0]?.code ?? "";
+  return engine?.voiceLanguages?.[0]?.code ?? "";
+}
+
+/** Whether `code` is a caption language this engine offers. Empty is allowed. */
+export function isKnownCaptionLanguage(engineSlug: string, code: string): boolean {
+  if (!code) return true;
+  const engine = ENGINES.find((e) => e.slug === engineSlug);
+  return (engine?.captionLanguages ?? []).some((l) => l.code === code);
+}
+
+/**
+ * Captions default to the spoken language.
+ *
+ * That is the only setting where every word timing is measured from the audio
+ * rather than interpolated across a translated sentence, so it stays the
+ * default and differing from it is a deliberate choice.
+ */
+export function defaultCaptionLanguage(engineSlug: string): string {
+  return defaultLanguage(engineSlug);
 }

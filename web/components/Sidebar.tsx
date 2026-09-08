@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -7,24 +7,24 @@ import { createClient } from "@/lib/supabase/client";
 
 const Icon = {
   overview: "M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm9 0h7v-9h-7v9Zm0-16v5h7V4h-7Z",
-  create: "M12 5v14M5 12h14",
-  library: "M4 6h16M4 12h16M4 18h10",
-  jobs: "M12 8v4l3 2m6-2a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z",
-  settings:
-    "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.4-3a7.4 7.4 0 0 0-.1-1.1l2-1.6-2-3.4-2.4 1a7.5 7.5 0 0 0-1.9-1.1L14.6 3H9.4l-.4 2.8c-.7.3-1.3.6-1.9 1.1l-2.4-1-2 3.4 2 1.6a7.4 7.4 0 0 0 0 2.2l-2 1.6 2 3.4 2.4-1c.6.5 1.2.8 1.9 1.1l.4 2.8h5.2l.4-2.8c.7-.3 1.3-.6 1.9-1.1l2.4 1 2-3.4-2-1.6c.1-.4.1-.7.1-1.1Z",
-  discover: "M21 21l-4.3-4.3M11 19a8 8 0 1 1 0-16 8 8 0 0 1 0 16Z",
-  recreate:
-    "M4 6h11a4 4 0 0 1 0 8H7m0 0 3-3m-3 3 3 3M4 4v4h4",
-  credits:
-    "M3 8h18v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8Zm0 0 2-3h14l2 3M8 13h4",
+  football:
+    "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 4.2 3.9 2.8-1.5 4.6H9.6L8.1 10 12 7.2ZM12 3v4.2M4.2 9.5 8.1 10m-1.4 8L9.6 14.6m7.7 3.4-2.9-3.4M19.8 9.5 15.9 10",
+  story:
+    "M5 4h9l5 5v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Zm9 0v5h5M8 13h8M8 17h5",
+  horror:
+    "M12 2c4.4 0 8 3.4 8 7.6 0 2.7-1 4.3-2 5.4v3.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 6 18.5V15c-1-1.1-2-2.7-2-5.4C4 5.4 7.6 2 12 2Zm-2.4 7.8a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Zm4.8 0a1.3 1.3 0 1 0 0 2.6 1.3 1.3 0 0 0 0-2.6Z",
+  truth:
+    "M12 2 4 5.5v6c0 4.6 3.2 8.8 8 10.5 4.8-1.7 8-5.9 8-10.5v-6L12 2Zm-1 12.5-3-3 1.4-1.4L11 11.6l4.6-4.6L17 8.4l-6 6.1Z",
   clipping:
     "M6 3v10m12-10v10M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm12 0a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM8.1 15.9 18 3M15.9 15.9 6 3",
-  saved: "M6 4h12v16l-6-4-6 4V4Z",
-  queue: "M4 6h16M4 12h16M4 18h16M2 6h.01M2 12h.01M2 18h.01",
-  scheduled: "M8 3v4m8-4v4M4 9h16M5 5h14a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z",
-  published: "M5 13l4 4L19 7",
-  accounts: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm13 10v-2a4 4 0 0 0-3-3.9",
   analytics: "M4 20V10m6 10V4m6 16v-7",
+  library: "M4 6h16M4 12h16M4 18h10",
+  settings:
+    "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.4-3a7.4 7.4 0 0 0-.1-1.1l2-1.6-2-3.4-2.4 1a7.5 7.5 0 0 0-1.9-1.1L14.6 3H9.4l-.4 2.8c-.7.3-1.3.6-1.9 1.1l-2.4-1-2 3.4 2 1.6a7.4 7.4 0 0 0 0 2.2l-2 1.6 2 3.4 2.4-1c.6.5 1.2.8 1.9 1.1l.4 2.8h5.2l.4-2.8c.7-.3 1.3-.6 1.9-1.1l2.4 1 2-3.4-2-1.6c.1-.4.1-.7.1-1.1Z",
+  analyzer:
+    "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14Zm10 17-5.2-5.2M8.5 11h5M11 8.5v5",
+  credits:
+    "M3 8h18v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8Zm0 0 2-3h14l2 3M8 13h4",
 } as const;
 
 function NavIcon({ d }: { d: string }) {
@@ -48,35 +48,71 @@ export function Sidebar({ email }: { email: string }) {
     router.refresh();
   }
 
+  // "Story To Video" is a heading with two destinations under it rather than a
+  // link of its own: there is no such thing as making a story video without
+  // first saying which kind, so a parent link would only ever be a menu.
+  const storyOpen = is("/dashboard/story");
+
   return (
     <aside className="side">
       <Link href="/dashboard" style={{ textDecoration: "none" }}>
         <Brand />
       </Link>
 
-      {/*
-        Nine destinations under three headings -- the things you actually come
-        here to do, named the way you would ask for them.
-
-        Deliberately still short. The publishing states (saved, queue,
-        scheduled, published) and connected accounts are not here: they are
-        stages of work you are already looking at, so they live inside the
-        screen that owns them rather than competing with it in the nav.
-      */}
       <nav className="nav">
-        <span className="nav-label">Make</span>
         <Link href="/dashboard" className={is("/dashboard") ? "active" : ""}>
-          <NavIcon d={Icon.overview} /> Dashboard
-        </Link>
-        <Link href="/dashboard/create" className={is("/dashboard/create") ? "active" : ""}>
-          <NavIcon d={Icon.create} />
+          <NavIcon d={Icon.overview} />
           <span>
-            Create Video
-            <span className="nav-sub">A finished video from a topic</span>
+            Dashboard
+            <span className="nav-sub">Everything in your workspace</span>
           </span>
         </Link>
+
+        {/* Each destination carries its own accent, so the rail picks up the
+            colour of wherever you are going rather than one product colour. */}
+        <Link
+          href="/dashboard/football"
+          data-surface="football"
+          className={is("/dashboard/football") ? "active" : ""}
+        >
+          <NavIcon d={Icon.football} />
+          <span>
+            Football
+            <span className="nav-sub">Researched Arabic football news</span>
+          </span>
+        </Link>
+
+        <span className={`nav-parent${storyOpen ? " is-open" : ""}`}>
+          <NavIcon d={Icon.story} /> Story To Video
+        </span>
+        <span className="nav-children">
+          <Link
+            href="/dashboard/story/horror"
+            data-surface="horror"
+            className={is("/dashboard/story/horror") ? "active" : ""}
+          >
+            <NavIcon d={Icon.horror} />
+            <span>
+              Horror Stories
+              <span className="nav-sub">Paranormal, legends, original horror</span>
+            </span>
+          </Link>
+          <Link
+            href="/dashboard/story/true"
+            data-surface="true"
+            className={is("/dashboard/story/true") ? "active" : ""}
+          >
+            <NavIcon d={Icon.truth} />
+            <span>
+              True Stories
+              <span className="nav-sub">Real cases, verified before written</span>
+            </span>
+          </Link>
+        </span>
+
         <Link
           href="/dashboard/clipping"
+          data-surface="clipping"
           className={is("/dashboard/clipping") ? "active" : ""}
         >
           <NavIcon d={Icon.clipping} />
@@ -86,41 +122,31 @@ export function Sidebar({ email }: { email: string }) {
           </span>
         </Link>
 
-        <span className="nav-label">Grow</span>
-        {/* Discover lives at /dashboard/reels. The nav used to call this
-            "Re-Create", which is a different screen entirely -- the label and
-            the page it opened disagreed. */}
+        {/* Replaces "Re-Create". That screen offered to rebuild a video from
+            another one; this reads the same video and explains why it worked,
+            and stops there. */}
         <Link
-          href="/dashboard/reels"
-          className={pathname === "/dashboard/reels" ? "active" : ""}
+          href="/dashboard/analyzer"
+          data-surface="analyzer"
+          className={is("/dashboard/analyzer") ? "active" : ""}
         >
-          <NavIcon d={Icon.discover} />
+          <NavIcon d={Icon.analyzer} />
           <span>
-            Find Viral
-            <span className="nav-sub">What is performing right now</span>
+            Clip Analyzer
+            <span className="nav-sub">Why a video performed, step by step</span>
           </span>
         </Link>
-        <Link
-          href="/dashboard/reels/videos"
-          className={is("/dashboard/reels/videos") ? "active" : ""}
-        >
-          <NavIcon d={Icon.recreate} />
-          <span>
-            Re-Create
-            <span className="nav-sub">Turn a video you own into a new one</span>
-          </span>
-        </Link>
-        <Link href="/dashboard/library" className={is("/dashboard/library") ? "active" : ""}>
-          <NavIcon d={Icon.library} /> Library
-        </Link>
+
         <Link
           href="/dashboard/reels/analytics"
+          data-surface="analytics"
           className={is("/dashboard/reels/analytics") ? "active" : ""}
         >
           <NavIcon d={Icon.analytics} /> Analytics
         </Link>
-
-        <span className="nav-label">Account</span>
+        <Link href="/dashboard/library" data-surface="library" className={is("/dashboard/library") ? "active" : ""}>
+          <NavIcon d={Icon.library} /> Library
+        </Link>
         <Link href="/dashboard/settings" className={is("/dashboard/settings") ? "active" : ""}>
           <NavIcon d={Icon.settings} /> Settings
         </Link>

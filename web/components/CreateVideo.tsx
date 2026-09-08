@@ -1,11 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   DEFAULT_ENGINE,
-  ENGINES,
+  defaultCaptionLanguage,
   defaultLanguage,
   defaultStyle,
   engineBySlug,
@@ -13,12 +12,13 @@ import {
 import type { JobRow } from "@/lib/repositories";
 
 /**
- * The generation workflow.
+ * The generation workflow for one engine.
  *
  * Deliberately the same shape the pipeline already expects -- engine slug,
- * topic, and the Horror story type -- so nothing about how a video is produced
- * changes. What changed is that the job is created against the signed-in user
- * and progress is read from their own jobs only.
+ * topic, and the story type -- so nothing about how a video is produced
+ * changes. What is new is that voice and caption language are chosen
+ * separately, and that each engine has its own screen rather than a channel
+ * picker: you arrive from the sidebar already knowing what you came to make.
  */
 
 /**
@@ -28,35 +28,6 @@ import type { JobRow } from "@/lib/repositories";
  * fires when both of those have already failed.
  */
 const STALL_AFTER_MS = 18 * 60 * 1000;
-
-/**
- * Each channel's card art.
- *
- * A colour field and a glyph rather than a photograph: it renders instantly,
- * stays legible at any card size, and does not put someone else's footage in
- * the chrome of a product about verified sourcing. Keyed by engine slug, with
- * a neutral fallback so a new channel appears without needing art first.
- */
-const CHANNEL_ART: Record<
-  string,
-  { glyph: string; blurb: string; field: string }
-> = {
-  horror_stories: {
-    glyph: "👻",
-    blurb: "True scary stories, mysteries and paranormal events.",
-    field: "url('/channels/horror_stories.jpg')",
-  },
-  football_news: {
-    glyph: "⚽",
-    blurb: "Latest football news, transfers and match analysis.",
-    field: "url('/channels/football_news.jpg')",
-  },
-  _default: {
-    glyph: "🎬",
-    blurb: "Research, script, narrate and render a finished video.",
-    field: "url('/channels/create.jpg')",
-  },
-};
 
 /** The four things the pipeline promises, in the order it does them. */
 const ASSURANCES = [
@@ -78,11 +49,21 @@ const STAGES = [
   ["final_review", "Review"],
 ] as const;
 
-export function CreateVideo({ activeJob }: { activeJob: JobRow | null }) {
+export function CreateVideo({
+  activeJob,
+  engine: lockedEngine,
+}: {
+  activeJob: JobRow | null;
+  /** The engine this screen makes. Omitted only by the legacy /create route. */
+  engine?: string;
+}) {
   const router = useRouter();
-  const [engine, setEngine] = useState(DEFAULT_ENGINE);
-  const [style, setStyle] = useState(defaultStyle(DEFAULT_ENGINE));
-  const [language, setLanguage] = useState(defaultLanguage(DEFAULT_ENGINE));
+  const engine = lockedEngine ?? DEFAULT_ENGINE;
+  const [style, setStyle] = useState(defaultStyle(engine));
+  const [language, setLanguage] = useState(defaultLanguage(engine));
+  const [captionLanguage, setCaptionLanguage] = useState(
+    defaultCaptionLanguage(engine),
+  );
   const [topic, setTopic] = useState(activeJob?.topic ?? "");
   const [job, setJob] = useState<JobRow | null>(activeJob);
   const [error, setError] = useState<string | null>(null);
@@ -93,10 +74,14 @@ export function CreateVideo({ activeJob }: { activeJob: JobRow | null }) {
 
   const active = engineBySlug(engine);
   const running = job?.status === "queued" || job?.status === "running";
+  const translated = Boolean(
+    captionLanguage && language && captionLanguage !== language,
+  );
 
   useEffect(() => {
     setStyle(defaultStyle(engine));
     setLanguage(defaultLanguage(engine));
+    setCaptionLanguage(defaultCaptionLanguage(engine));
   }, [engine]);
 
   // Poll this job only while it is in flight.
@@ -152,7 +137,13 @@ export function CreateVideo({ activeJob }: { activeJob: JobRow | null }) {
       const res = await fetch("/api/jobs", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ topic: value, engine, style, language }),
+        body: JSON.stringify({
+          topic: value,
+          engine,
+          style,
+          language,
+          captionLanguage,
+        }),
       });
       const data = (await res.json()) as Record<string, unknown>;
       if (!res.ok) {
@@ -165,7 +156,7 @@ export function CreateVideo({ activeJob }: { activeJob: JobRow | null }) {
     } finally {
       setBusy(false);
     }
-  }, [topic, engine, style, language, busy, running]);
+  }, [topic, engine, style, language, captionLanguage, busy, running]);
 
   const stageIndex = STAGES.findIndex(([key]) => key === job?.stage);
   // A finished run reads 100 even if the last update landed at 99, and a
@@ -186,141 +177,114 @@ export function CreateVideo({ activeJob }: { activeJob: JobRow | null }) {
     <>
       {error && <div className="notice notice-error">{error}</div>}
 
-      {/* The two ways in. "From scratch" is the default and stays selected;
-          "Re-Create" is a different screen, so it links rather than toggles. */}
-      <div className="mode-grid">
-        <div className="mode-card is-on">
-          <span className="mode-icon" aria-hidden>
-            <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+      <div className="studio">
+        <p className="studio-sub">{active.sub}</p>
+        {active.voiceNote && (
+          <p className="studio-voice">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
               <path
-                d="M13 2 4.5 13.5H11L10 22l8.5-11.5H12L13 2Z"
-                fill="currentColor"
-              />
-            </svg>
-          </span>
-          <div>
-            <h3>Create from scratch</h3>
-            <p>Enter a topic and let AI research, write, narrate and create a video.</p>
-          </div>
-        </div>
-
-        <Link href="/dashboard/reels" className="mode-card is-alt">
-          <span className="mode-icon" aria-hidden>
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M4 7h11a4 4 0 0 1 0 8H8m0 0 3-3m-3 3 3 3M4 4v5h5"
+                d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Zm7 9a7 7 0 0 1-14 0m7 7v3"
                 stroke="currentColor"
-                strokeWidth="1.8"
+                strokeWidth="1.7"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
             </svg>
-          </span>
-          <div>
-            <h3>Re-Create from a video</h3>
-            <p>Analyse an existing video and create a new one with the same idea.</p>
-          </div>
-          <span className="mode-go" aria-hidden>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-              <path d="m9 5 7 7-7 7" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </span>
-        </Link>
-      </div>
+            {active.voiceNote}
+          </p>
+        )}
 
-      <div className="sec-head">
-        <h2>Select channel</h2>
-        <Link className="sec-link" href="/dashboard">
-          View all
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
-            <path d="M5 12h14m-6-7 7 7-7 7" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </Link>
-      </div>
-
-      <div className="chan-grid" role="radiogroup" aria-label="Channel">
-        {ENGINES.map((e) => {
-          const art = CHANNEL_ART[e.slug] ?? CHANNEL_ART._default;
-          return (
-            <button
-              key={e.slug}
-              type="button"
-              role="radio"
-              aria-checked={engine === e.slug}
-              onClick={() => setEngine(e.slug)}
-              className={`chan${engine === e.slug ? " is-on" : ""}`}
-              style={{ ["--chan-art" as string]: art.field }}
-              disabled={running}
-            >
-              {engine === e.slug && (
-                <span className="chan-check" aria-hidden>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-                    <path d="m5 12 5 5L19 7" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </span>
-              )}
-              <span className="chan-icon" aria-hidden>{art.glyph}</span>
-              <h3>{e.label}</h3>
-              <p>{art.blurb}</p>
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="stat" style={{ padding: 24, marginBottom: 20 }}>
-        <p style={{ color: "var(--sa-dim)", fontSize: 13.5, margin: "0 0 18px", lineHeight: 1.6 }}>
-          {active.sub}
-        </p>
-
-        {active.styles && active.styles.length > 0 && (
-          <>
-            <p style={{ fontSize: 12.5, color: "var(--sa-dim)", margin: "0 0 9px", fontWeight: 560 }}>
+        {active.styles && active.styles.length > 1 && (
+          <div className="opt-group">
+            <p className="opt-label" id="style-label">
               Story type
             </p>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 9, marginBottom: 18 }}>
+            <div className="style-grid" role="radiogroup" aria-labelledby="style-label">
               {active.styles.map((s) => (
                 <button
                   key={s.slug}
                   type="button"
-                  onClick={() => setStyle(s.slug)}
-                  className={style === s.slug ? "btn-primary" : "btn-ghost"}
-                  style={{ textAlign: "left", padding: "10px 12px", width: "100%" }}
-                >
-                  <span style={{ display: "block", fontSize: 13.5, fontWeight: 560 }}>{s.label}</span>
-                  <span style={{ display: "block", fontSize: 11.5, opacity: 0.75, marginTop: 3, lineHeight: 1.45 }}>
-                    {s.hint}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </>
-        )}
-
-        {active.languages && active.languages.length > 1 && (
-          <div className="opt-group">
-            <p className="opt-label" id="lang-label">Script language</p>
-            <div className="seg" role="radiogroup" aria-labelledby="lang-label">
-              {active.languages.map((l) => (
-                <button
-                  key={l.code}
-                  type="button"
                   role="radio"
-                  aria-checked={language === l.code}
-                  onClick={() => setLanguage(l.code)}
-                  className={`seg-item${language === l.code ? " seg-on" : ""}`}
+                  aria-checked={style === s.slug}
+                  onClick={() => setStyle(s.slug)}
+                  className={`style-card${style === s.slug ? " is-on" : ""}`}
                   disabled={running}
                 >
-                  <span className="seg-native" lang={l.code}>{l.native}</span>
-                  <span className="seg-sub">{l.label}</span>
+                  <span className="style-name">{s.label}</span>
+                  <span className="style-hint">{s.hint}</span>
                 </button>
               ))}
             </div>
-            <p className="opt-hint">
-              Sets the narration, captions and finished video. Visuals are
-              searched in both Arabic and English either way.
-            </p>
           </div>
         )}
+
+        {/* Voice and captions are two choices, not one, so they are two
+            controls. The hint below them states exactly what the pipeline
+            guarantees when they differ -- sentence-level sync -- rather than
+            implying word-level sync it cannot measure across a translation. */}
+        <div className="lang-row">
+          {active.voiceLanguages && active.voiceLanguages.length > 0 && (
+            <div className="opt-group">
+              <p className="opt-label" id="voice-lang-label">
+                Voice language
+              </p>
+              <div className="seg" role="radiogroup" aria-labelledby="voice-lang-label">
+                {active.voiceLanguages.map((l) => (
+                  <button
+                    key={l.code}
+                    type="button"
+                    role="radio"
+                    aria-checked={language === l.code}
+                    onClick={() => setLanguage(l.code)}
+                    className={`seg-item${language === l.code ? " seg-on" : ""}`}
+                    disabled={running || active.voiceLanguages!.length < 2}
+                  >
+                    <span className="seg-native" lang={l.code}>
+                      {l.native}
+                    </span>
+                    <span className="seg-sub">{l.label}</span>
+                  </button>
+                ))}
+              </div>
+              <p className="opt-hint">
+                {active.voiceLanguages.length < 2
+                  ? "This channel narrates in Arabic only."
+                  : "What the narrator speaks."}
+              </p>
+            </div>
+          )}
+
+          {active.captionLanguages && active.captionLanguages.length > 0 && (
+            <div className="opt-group">
+              <p className="opt-label" id="caption-lang-label">
+                Caption language
+              </p>
+              <div className="seg" role="radiogroup" aria-labelledby="caption-lang-label">
+                {active.captionLanguages.map((l) => (
+                  <button
+                    key={l.code}
+                    type="button"
+                    role="radio"
+                    aria-checked={captionLanguage === l.code}
+                    onClick={() => setCaptionLanguage(l.code)}
+                    className={`seg-item${captionLanguage === l.code ? " seg-on" : ""}`}
+                    disabled={running}
+                  >
+                    <span className="seg-native" lang={l.code}>
+                      {l.native}
+                    </span>
+                    <span className="seg-sub">{l.label}</span>
+                  </button>
+                ))}
+              </div>
+              <p className="opt-hint">
+                {translated
+                  ? "Captions are translated and locked to the narration’s measured sentence timings, so each line appears and leaves exactly when it is spoken."
+                  : "Captions are taken from the narration audio itself — every word timed to the moment it is said."}
+              </p>
+            </div>
+          )}
+        </div>
 
         <div className="field">
           <label htmlFor="topic">{active.inputLabel}</label>
@@ -337,6 +301,22 @@ export function CreateVideo({ activeJob }: { activeJob: JobRow | null }) {
           />
           <span className="field-count">{topic.length}/300</span>
         </div>
+
+        {active.examples.length > 0 && !running && (
+          <div className="examples">
+            <span className="examples-label">Try</span>
+            {active.examples.map((ex) => (
+              <button
+                key={ex}
+                type="button"
+                className="example-chip"
+                onClick={() => setTopic(ex)}
+              >
+                {ex}
+              </button>
+            ))}
+          </div>
+        )}
 
         <button
           className="btn-generate"

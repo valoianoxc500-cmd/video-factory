@@ -1,6 +1,6 @@
 {
-  "channel_name": "Horror Stories",
-  "channel_id": "horror_stories",
+  "channel_name": "True Stories",
+  "channel_id": "true_stories",
   "language": "ar",
   "content_mode": "visual",
   "style": {
@@ -128,16 +128,15 @@
     }
   },
   "voice": {
-    "provider": "elevenlabs",
+    "provider": "gemini_2.5_tts",
     "language": "ar-SA",
-    "voice_name": "Rudra - Intense Documentary Narrator",
+    "voice_name": "Charon",
     "voice_prompt": "راوٍ بالعربية الفصحى بصوت عميق وهادئ، نبرة جادة وحميمة كأنه يتحدث إليك وحدك في غرفة مظلمة. إلقاء بطيء ومضبوط، مع وقفات مقصودة قبل التفاصيل المهمة. يبني التوتر تدريجيًا جملة بعد جملة، دون مبالغة ولا أداء مسرحي ولا رفع للصوت. مناسب لقصص الجرائم الحقيقية وحالات الاختفاء والألغاز غير المُفسَّرة.",
     "voice_prompt_variations": [
       "راوٍ بالعربية الفصحى بصوت عميق وهادئ، نبرة جادة وحميمة كأنه يتحدث إليك وحدك في غرفة مظلمة. إلقاء بطيء ومضبوط، مع وقفات مقصودة قبل التفاصيل المهمة. يبني التوتر تدريجيًا جملة بعد جملة، دون مبالغة ولا أداء مسرحي ولا رفع للصوت. مناسب لقصص الجرائم الحقيقية وحالات الاختفاء والألغاز غير المُفسَّرة.",
       "راوٍ وثائقي بالعربية الفصحى، صوت منخفض ورصين، يتحدث بهدوء وكأنه يكشف سرًّا لا يريد أن يسمعه أحد. صمت قصير بين الجمل، تصاعد محسوب في التوتر، نبرة باردة ومتزنة بلا انفعال.",
       "صوت عميق وهادئ بالعربية الفصحى، سرد متمهّل وواضح المخارج، يترك وقفة قصيرة قبل كل معلومة ثقيلة. يوحي بالغموض من خلال الهدوء لا من خلال التهويل، ولا يرفع الصوت أبدًا."
-    ],
-    "voice_id": "vIdhHAZdn1bGjKe1dFw8"
+    ]
   },
   "image_sourcing": {
     "generation_model": "gemini-2.5-flash-image",
@@ -283,14 +282,12 @@
       },
       "voice": {
         "language": "en-US",
-        "voice_name": "Rudra - Intense Documentary Narrator",
+        "voice_name": "Charon",
         "voice_prompt": "A deep, calm English narrator speaking as if to one listener in a dark room. Slow, controlled delivery with deliberate pauses before important details. Builds tension sentence by sentence, without theatrics or raised voice. Suited to true crime, disappearances and unexplained cases.",
         "voice_prompt_variations": [
           "A deep, calm English narrator, unhurried and intimate, letting the facts carry the dread.",
           "A restrained English documentary narrator: measured pace, precise consonants, no melodrama."
-        ],
-        "provider": "elevenlabs",
-        "voice_id": "vIdhHAZdn1bGjKe1dFw8"
+        ]
       },
       "business_strategy": {
         "cta_rules": [

@@ -22,6 +22,7 @@ export default async function LibraryPage() {
       <div
         className="page-head"
         data-art="library"
+        data-surface="library"
         style={{ ["--head-art" as string]: "url('/channels/library.jpg')" }}
       >
         <h1>
@@ -43,7 +44,7 @@ export default async function LibraryPage() {
               Create a video
             </Link>
             <Link href="/dashboard/reels/videos" className="btn-ghost" style={INLINE_CTA}>
-              Re-Create from a video
+              My Videos
             </Link>
           </p>
         </div>

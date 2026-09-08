@@ -435,7 +435,7 @@ def run_pipeline(client: httpx.Client, job: dict) -> None:
         else:
             logger.warning(f"ignoring malformed style {style!r}")
 
-    # Script language. Selects a channel language variant, which swaps the
+    # Voice language. Selects a channel language variant, which swaps the
     # narration language, the voice and the script instructions together.
     language = str(job.get("language") or "").strip().lower()
     if language:
@@ -443,6 +443,19 @@ def run_pipeline(client: httpx.Client, job: dict) -> None:
             cmd += ["--language", language]
         else:
             logger.warning(f"ignoring malformed language {language!r}")
+
+    # Caption language, when the viewer asked to read a different language
+    # from the one being spoken. Passed only when it actually differs: sending
+    # the voice language would switch the caption track from measured STT
+    # timings to interpolated ones for no gain.
+    caption_language = str(job.get("caption_language") or "").strip().lower()
+    if caption_language and caption_language != language:
+        if _LANGUAGE_RE.fullmatch(caption_language):
+            cmd += ["--caption-language", caption_language]
+        else:
+            logger.warning(
+                f"ignoring malformed caption language {caption_language!r}"
+            )
 
     env = dict(os.environ)
     env["PYTHONUTF8"] = "1"

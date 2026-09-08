@@ -1,4 +1,4 @@
-import { createClient } from "@/lib/supabase/server";
+﻿import { createClient } from "@/lib/supabase/server";
 import { AssetRepository, TaskRepository } from "@/lib/vrf";
 import { Clipping } from "@/components/reels/Clipping";
 
@@ -33,6 +33,7 @@ export default async function ClippingPage() {
       <div
         className="page-head"
         data-art="reels"
+        data-surface="clipping"
         style={{ ["--head-art" as string]: "url('/channels/reels.jpg')" }}
       >
         <h1>

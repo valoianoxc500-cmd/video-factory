@@ -154,7 +154,10 @@ export type TaskKind =
   | "analyse"
   | "ingest"
   | "process"
-  | "collect_metrics";
+  | "collect_metrics"
+  // Clip Analyzer. Reads a video and explains it; writes nothing back onto
+  // the asset and queues no generation, so the result lives on the task.
+  | "explain";
 
 // â”€â”€ discovery tasks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 

@@ -28,8 +28,10 @@ export interface Job {
   engine: string;
   /** Sub-mode within the engine (Horror story type). Empty when unused. */
   style: string;
-  /** Script language for narration and captions. Empty = channel default. */
+  /** Voice language for the narration. Empty = channel default. */
   language: string;
+  /** Caption language when it differs from the voice. Empty = same as spoken. */
+  captionLanguage: string;
   status: JobStatus;
   progress: number;
   stage: string;
@@ -78,6 +80,7 @@ interface Row {
   engine: string | null;
   style: string | null;
   language: string | null;
+  caption_language: string | null;
   status: JobStatus;
   progress: number;
   stage: string;
@@ -99,6 +102,7 @@ function toJob(row: Row): Job {
     engine: row.engine ?? DEFAULT_ENGINE,
     style: row.style ?? "",
     language: row.language ?? "",
+    captionLanguage: row.caption_language ?? "",
     status: row.status,
     progress: row.progress ?? 0,
     stage: row.stage ?? "",
@@ -120,6 +124,7 @@ function toRow(job: Job): Record<string, unknown> {
     engine: job.engine,
     style: job.style,
     language: job.language,
+    caption_language: job.captionLanguage,
     status: job.status,
     progress: job.progress,
     stage: job.stage,
@@ -166,6 +171,7 @@ export function newJob(
   engine: string = DEFAULT_ENGINE,
   style: string = "",
   language: string = "",
+  captionLanguage: string = "",
 ): Job {
   const now = new Date().toISOString();
   return {
@@ -174,6 +180,11 @@ export function newJob(
     engine,
     style,
     language,
+    // Only meaningful when it differs from the spoken language; equal to it,
+    // captions come from the transcript and every timing is measured.
+    captionLanguage: captionLanguage && captionLanguage !== language
+      ? captionLanguage
+      : "",
     status: "queued",
     progress: 0,
     stage: "queued",

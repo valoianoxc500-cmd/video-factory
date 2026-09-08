@@ -89,12 +89,41 @@ def test_malformed_engine_never_reaches_the_command_line(hostile):
     assert worker_mod._channel_for_job({"engine": hostile}) == worker_mod.CHANNEL
 
 
+def _registered_engine_slugs() -> list[str]:
+    """Every engine slug declared in the web UI.
+
+    An engine object declares a `section`; a story-type object does not, which
+    is what keeps the two apart. Matching on `section` rather than on the
+    line that happens to follow `label` means adding a field to an engine
+    cannot silently empty this list -- which it did, and the assertion below
+    then passed on nothing.
+    """
+    engines_ts = (REPO_ROOT / "web" / "lib" / "engines.ts").read_text(encoding="utf-8")
+    return re.findall(
+        r'slug:\s*"([a-z0-9_]+)",\s*\n\s*label:[^\n]*\n\s*section:', engines_ts
+    )
+
+
 def test_every_registered_web_engine_has_a_channel_config():
     """The UI must never offer an engine the worker cannot run."""
-    engines_ts = (REPO_ROOT / "web" / "lib" / "engines.ts").read_text(encoding="utf-8")
-    # Engine slugs sit on an object that also declares a headline; story-type
-    # slugs do not, so this keeps the two apart.
-    slugs = re.findall(r'slug:\s*"([a-z0-9_]+)",\n\s*label:.*\n\s*headline:', engines_ts)
-    assert set(slugs) == {"football_news", "horror_stories"}, slugs
+    slugs = _registered_engine_slugs()
+    assert set(slugs) == {
+        "football_news", "horror_stories", "true_stories",
+    }, slugs
     for slug in slugs:
         assert (CHANNELS / f"{slug}.json").exists(), f"no channel config for {slug}"
+
+
+def test_the_engine_list_is_actually_found():
+    """Guards the regex above: an empty list must never look like a pass."""
+    assert len(_registered_engine_slugs()) >= 3
+
+
+def test_story_to_video_holds_exactly_horror_and_true_stories():
+    """The sidebar's Story To Video group is these two engines and no others."""
+    engines_ts = (REPO_ROOT / "web" / "lib" / "engines.ts").read_text(encoding="utf-8")
+    story = re.findall(
+        r'slug:\s*"([a-z0-9_]+)",\s*\n\s*label:[^\n]*\n\s*section:\s*"story"',
+        engines_ts,
+    )
+    assert set(story) == {"horror_stories", "true_stories"}, story

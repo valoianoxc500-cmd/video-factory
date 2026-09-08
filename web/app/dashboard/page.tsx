@@ -1,29 +1,63 @@
-﻿import Link from "next/link";
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { VideoRepository, JobRepository, ChannelRepository } from "@/lib/repositories";
 import { VideoGrid } from "@/components/VideoGrid";
 
 export const dynamic = "force-dynamic";
 
-/** Channels that have their own still in /public/channels. */
-const CHANNEL_ART = new Set(["horror_stories", "football_news"]);
-
 /**
- * The Reels workspace, moved out of the sidebar.
+ * The workspace overview.
  *
- * Same destinations, same order, with a line of explanation each -- which is
- * the thing a nav label could not carry and the reason the list was hard to
- * read there.
+ * Three questions, in the order someone actually has them: what is the state
+ * of my work, what do I want to make, and what have I made. The channel cards
+ * carry their own photograph and their own colour, so the thing you came to do
+ * is recognisable before you have read its label.
  */
-const REELS_SECTIONS = [
-  ["/dashboard/reels", "Find viral", "What is performing right now", "M21 21l-4.3-4.3M11 19a8 8 0 1 1 0-16 8 8 0 0 1 0 16Z"],
-  ["/dashboard/reels/saved", "Saved", "Kept from Find Viral", "M6 4h12v16l-6-4-6 4V4Z"],
-  ["/dashboard/reels/videos", "Re-Create", "Yours, and their new versions", "M4 6h11a4 4 0 0 1 0 8H7m0 0 3-3m-3 3 3 3M4 4v4h4"],
-  ["/dashboard/clipping", "Clipping", "Cut a section to 9:16", "M6 3v10m12-10v10M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm12 0a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM8.1 15.9 18 3M15.9 15.9 6 3"],
-  ["/dashboard/reels/queue", "Queue", "Waiting to publish", "M4 6h16M4 12h16M4 18h16"],
-  ["/dashboard/reels/scheduled", "Scheduled", "Posting at a set time", "M8 3v4m8-4v4M4 9h16M5 5h14a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z"],
-  ["/dashboard/reels/published", "Published", "Already posted", "M5 13l4 4L19 7"],
-  ["/dashboard/jobs", "Jobs & activity", "Every generation run", "M12 8v4l3 2m6-2a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"],
+
+/** Where you make something. Each has its own still and its own accent. */
+const MAKE = [
+  {
+    href: "/dashboard/football",
+    surface: "football",
+    art: "football_news.jpg",
+    kicker: "Football",
+    title: "Football News",
+    blurb: "Researched against live squad and transfer data, then written, narrated and illustrated.",
+  },
+  {
+    href: "/dashboard/story/horror",
+    surface: "horror",
+    art: "horror_stories.jpg",
+    kicker: "Story To Video",
+    title: "Horror Stories",
+    blurb: "Paranormal accounts, urban legends and original horror, in one unmistakable voice.",
+  },
+  {
+    href: "/dashboard/story/true",
+    surface: "true",
+    art: "create.jpg",
+    kicker: "Story To Video",
+    title: "True Stories",
+    blurb: "Real cases. Verified facts stated plainly, claims attributed, nothing invented.",
+  },
+  {
+    href: "/dashboard/clipping",
+    surface: "clipping",
+    art: "reels.jpg",
+    kicker: "Your footage",
+    title: "Clipping",
+    blurb: "Cut a section out of a video you own and reframe it to 9:16.",
+  },
+] as const;
+
+/** Where you study or manage what exists. */
+const WORK = [
+  ["/dashboard/analyzer", "analyzer", "Clip Analyzer", "Why a video performed", "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14Zm10 17-5.2-5.2M8.5 11h5M11 8.5v5"],
+  ["/dashboard/reels", "", "Find Viral", "What is performing right now", "M21 21l-4.3-4.3M11 19a8 8 0 1 1 0-16 8 8 0 0 1 0 16Z"],
+  ["/dashboard/reels/videos", "", "My Videos", "Everything you have imported", "M4 6h11a4 4 0 0 1 0 8H7m0 0 3-3m-3 3 3 3M4 4v4h4"],
+  ["/dashboard/reels/analytics", "analytics", "Analytics", "How your posts performed", "M4 20V10m6 10V4m6 16v-7"],
+  ["/dashboard/library", "library", "Library", "Every finished video", "M4 6h16M4 12h16M4 18h10"],
+  ["/dashboard/jobs", "", "Jobs & activity", "Every generation run", "M12 8v4l3 2m6-2a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"],
 ] as const;
 
 export default async function OverviewPage() {
@@ -40,12 +74,27 @@ export default async function OverviewPage() {
   return (
     <>
       <div
-        className="page-head"
-        data-art="create"
+        className="hero"
         style={{ ["--head-art" as string]: "url('/channels/create.jpg')" }}
       >
-        <h1>Overview</h1>
-        <p>Everything generated in your workspace.</p>
+        <h1>
+          Turn a story into a <span className="hl">finished video</span>
+        </h1>
+        <p>
+          Researched against real sources, narrated in a real voice, and cut
+          with real footage — end to end, without you touching a timeline.
+        </p>
+        <div className="hero-actions">
+          <Link href="/dashboard/story/horror" className="btn-primary">
+            Create a video
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="M5 12h14m-6-7 7 7-7 7" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </Link>
+          <Link href="/dashboard/analyzer" className="btn-ghost">
+            Analyse a video
+          </Link>
+        </div>
       </div>
 
       <div className="stat-grid">
@@ -55,56 +104,38 @@ export default async function OverviewPage() {
         <div className="stat"><div className="k">Total runtime</div><div className="v">{Math.round(totalSeconds / 60)}m</div></div>
       </div>
 
-      {/*
-        The nav used to list every channel and every Reels surface. It is a
-        short list now, so the destinations live here instead -- with their
-        counts, which a nav entry could never show as well.
-      */}
-      <div className="sec-head" style={{ marginTop: 30 }}>
-        <h2>Channels</h2>
-        <Link className="sec-link" href="/dashboard/create">
-          Create a video
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
-            <path d="M5 12h14m-6-7 7 7-7 7" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </Link>
+      <div className="sec-head">
+        <h2>Make something</h2>
       </div>
 
-      <div className="tile-grid">
-        {channels.map((channel) => (
+      <div className="chan-cards">
+        {MAKE.map((m) => (
           <Link
-            key={channel.slug}
-            href={`/dashboard/channels/${channel.slug}`}
-            className="tile tile-art"
-            style={{
-              ["--tile-art" as string]: `url('/channels/${
-                CHANNEL_ART.has(channel.slug) ? channel.slug : "create"
-              }.jpg')`,
-            }}
+            key={m.href}
+            href={m.href}
+            className="chan-card"
+            data-surface={m.surface}
+            style={{ ["--chan-art" as string]: `url('/channels/${m.art}')` }}
           >
-            <span className="tile-body">
-              <strong>{channel.name}</strong>
-              <small>
-                {channel.videoCount} {channel.videoCount === 1 ? "video" : "videos"}
-              </small>
+            <span className="chan-badge">{m.kicker}</span>
+            <span className="chan-go" aria-hidden>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+                <path d="m9 5 7 7-7 7" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
             </span>
+            <h3>{m.title}</h3>
+            <p>{m.blurb}</p>
           </Link>
         ))}
       </div>
 
-      <div className="sec-head" style={{ marginTop: 30 }}>
-        <h2>Short-form</h2>
-        <Link className="sec-link" href="/dashboard/reels">
-          Find viral videos
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
-            <path d="M5 12h14m-6-7 7 7-7 7" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </Link>
+      <div className="sec-head">
+        <h2>Study and manage</h2>
       </div>
 
       <div className="tile-grid">
-        {REELS_SECTIONS.map(([href, label, sub, d]) => (
-          <Link key={href} href={href} className="tile">
+        {WORK.map(([href, surface, label, sub, d]) => (
+          <Link key={href} href={href} className="tile" data-surface={surface || undefined}>
             <span className="tile-icon" aria-hidden>
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
                 <path d={d} stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
@@ -118,7 +149,7 @@ export default async function OverviewPage() {
         ))}
       </div>
 
-      <div className="sec-head" style={{ marginTop: 30 }}>
+      <div className="sec-head">
         <h2>Recent videos</h2>
         <Link className="sec-link" href="/dashboard/library">
           View library
@@ -135,8 +166,8 @@ export default async function OverviewPage() {
           </svg>
           <h3>No videos yet</h3>
           <p>Generate your first one and it will be saved here permanently.</p>
-          <p style={{ marginTop: 16 }}>
-            <Link href="/dashboard/create" className="btn-primary" style={{ display: "inline-block", width: "auto", padding: "9px 18px", textDecoration: "none" }}>
+          <p style={{ marginTop: 18 }}>
+            <Link href="/dashboard/story/horror" className="btn-primary">
               Create a video
             </Link>
           </p>

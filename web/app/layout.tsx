@@ -8,6 +8,10 @@ import "./auth-styles.css";
 // Loaded last: it retunes the tokens above and restyles the shells without
 // renaming a single class, so components keep working untouched.
 import "./redesign.css";
+// The cinematic system. Same technique again, one layer further on: it
+// retunes redesign.css rather than replacing it, so nothing that already
+// works can break on a class it happens not to cover.
+import "./premium.css";
 
 export const metadata: Metadata = {
   title: `${branding.appName} — ${branding.tagline}`,

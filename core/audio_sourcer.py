@@ -22,7 +22,7 @@ from google.cloud.speech_v2 import SpeechClient
 from google.cloud.speech_v2.types import cloud_speech
 
 import clients
-from core import costs
+from core import caption_language, costs
 from core.caption_integrity import (
     describe_drift,
     drifted_indices as _drifted_indices,
@@ -100,14 +100,24 @@ def _save_audio_manifest(sections_dir: Path, manifest: dict[str, dict]) -> None:
 
 def _section_audio_fingerprint(
     narration: str, voice_prompt: str, voice_name: str, language: str,
+    provider: str = "", voice_id: str = "",
 ) -> str:
-    """Cache key for a single section's narration audio."""
+    """Cache key for a single section's narration audio.
+
+    Provider and voice id are in the key because switching a channel to a
+    different narrator must re-speak its sections. Without them a workspace
+    reused across the change keeps the old voice for every cached section and
+    speaks only the new ones in the new voice, which is audible and very hard
+    to attribute to a cache.
+    """
     payload = {
         "narration": narration,
         "voice_prompt": voice_prompt,
         "voice_name": voice_name,
         "language": language,
         "model": settings.gemini_tts_model,
+        "provider": provider,
+        "voice_id": voice_id,
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -429,6 +439,61 @@ def _transcribe_section(
 # Main entry point
 # ---------------------------------------------------------------------------
 
+async def _apply_caption_language(script: Script, config: ChannelConfig) -> None:
+    """Rewrite each section's caption words into the configured language.
+
+    A no-op unless the channel sets `caption_language` to something other than
+    the voice language. Per section rather than per video so a failed
+    translation costs one section's captions rather than the whole track, and
+    so each section keeps its own measured span.
+
+    Never raises: captions falling back to the spoken language is a
+    recoverable outcome, and losing the caption track is not.
+    """
+    caption = str(getattr(config, "caption_language", "") or "").strip().lower()[:2]
+    voice = str(config.voice.language or "").strip().lower()[:2]
+    if not caption or caption == voice:
+        return
+
+    logger.info(
+        f"Caption language {caption!r} differs from narration {voice!r}; "
+        f"translating captions and aligning them to narration timings"
+    )
+
+    translated_sections = 0
+    for section in script.sections:
+        words = section.word_timestamps or []
+        if not words:
+            continue
+        try:
+            new_words, translated = await caption_language.build_caption_words(
+                words,
+                section.narration,
+                voice_language=voice,
+                caption_language=caption,
+            )
+        except Exception as exc:
+            logger.error(
+                f"  Section s{section.id:03d}: caption translation failed "
+                f"({exc}); keeping narration-language captions"
+            )
+            continue
+        if translated:
+            section.word_timestamps = new_words
+            translated_sections += 1
+
+    if translated_sections:
+        logger.info(
+            f"Captions written in {caption!r} for {translated_sections}/"
+            f"{len(script.sections)} sections"
+        )
+    else:
+        logger.warning(
+            f"No section captions could be translated to {caption!r}; "
+            f"the caption track stays in {voice!r}"
+        )
+
+
 async def source_audio(
     script: Script,
     config: ChannelConfig,
@@ -470,6 +535,7 @@ async def source_audio(
         fp = _section_audio_fingerprint(
             section.narration, effective_voice_prompt,
             config.voice.voice_name, config.voice.language,
+            config.voice.provider, config.voice.voice_id,
         )
         cached = manifest.get(f"section_{section.id}")
         cache_valid = (
@@ -499,6 +565,8 @@ async def source_audio(
                 language=config.voice.language,
                 voice_name=config.voice.voice_name,
                 operation_label="tts_section_generate",
+                provider=config.voice.provider,
+                voice_id=config.voice.voice_id,
             )
             if result is not None:
                 break
@@ -561,6 +629,14 @@ async def source_audio(
             for s in script.sections
         )
     )
+
+    # ── Captions in a language the narrator is not speaking ────────
+    #
+    # Runs after transcription and before anything reads the timings, so the
+    # rest of the pipeline sees one caption track and does not need to know
+    # which language it is in. When the two languages match this is a no-op
+    # and the measured STT timings are used exactly as before.
+    await _apply_caption_language(script, config)
 
     # ── Concatenate into narration_full.wav ────────────────────────
     narration_path = audio_dir / "narration_full.wav"

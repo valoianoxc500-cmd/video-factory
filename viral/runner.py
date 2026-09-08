@@ -38,6 +38,7 @@ from viral import analytics as vrf_analytics
 from viral.accounts import TokenCipher, TokenSecurityError
 from viral.adapters import AdapterContext, build_adapters, publish_to
 from viral.analysis import analyse, to_new_version_inputs
+from viral.explain import explain
 from viral.discovery import (
     Availability,
     SearchQuery,
@@ -229,6 +230,91 @@ def _analyse_asset(client: WorkerClient, asset_id: str) -> dict:
         "depth": result.depth.value,
         "scored": original is not None,
     }
+
+
+def run_explain(client: WorkerClient, payload: dict) -> dict:
+    """Clip Analyzer: explain one video the user added, and stop there.
+
+    Deliberately writes nothing back onto the asset. The explanation is the
+    task's own result, so running it twice cannot alter a score, a rights
+    record or anything the publishing path reads. Nothing here queues a
+    generation: this analyses and explains, and the plan it returns is for a
+    person to carry out.
+    """
+    asset_id = str(payload.get("asset_id") or "")
+    asset = (client.call("asset", id=asset_id) or {}).get("asset")
+    if not asset:
+        raise RuntimeError("That video no longer exists.")
+
+    metrics = public_metrics(
+        str(asset.get("source_platform") or ""),
+        str(asset.get("source_video_id") or ""),
+    )
+
+    # The processed copy if the user has already cut one, otherwise the
+    # original. Either is a file they hold rights to; the analyser only ever
+    # reads it.
+    local = ""
+    for key in ("processed_path", "storage_path"):
+        candidate = str(asset.get(key) or "").strip()
+        if candidate and Path(candidate).exists():
+            local = candidate
+            break
+
+    duration = None
+    if metrics and metrics.duration_seconds:
+        duration = metrics.duration_seconds
+    elif asset.get("duration_seconds"):
+        duration = float(asset["duration_seconds"])
+
+    video = {
+        "platform": asset.get("source_platform"),
+        "title": asset.get("title"),
+        "author": asset.get("source_author"),
+        "duration_seconds": duration,
+        "views": metrics.views if metrics else None,
+        "likes": metrics.likes if metrics else None,
+        "comments": metrics.comments if metrics else None,
+        "followers": metrics.followers if metrics else None,
+    }
+
+    # An unrecognised or missing rights basis is not a reason to fail an
+    # analysis -- it is a reason to analyse less deeply. `attest` refuses an
+    # unknown source outright, so falling back to DISCOVERED keeps the run and
+    # keeps it at metadata depth, which is exactly what an unproven basis
+    # should get.
+    try:
+        attestation = attest(
+            source=str(asset.get("rights_source") or ""),
+            user_id=str(asset.get("user_id") or "worker"),
+            rights_holder=str(asset.get("rights_holder") or ""),
+            evidence=str(asset.get("rights_evidence") or ""),
+        )
+    except RightsError:
+        logger.info(
+            f"asset {asset_id} has no usable rights basis "
+            f"({asset.get('rights_source')!r}); explaining from public signals only"
+        )
+        attestation = attest(
+            source=Source.DISCOVERED, user_id=str(asset.get("user_id") or "worker")
+        )
+        local = ""  # nothing may be read from the file without a basis
+
+    result = asyncio.run(
+        explain(
+            video,
+            attestation=attestation,
+            source_path=Path(local) if local else None,
+        )
+    )
+    record = result.to_record()
+    record["asset_id"] = asset_id
+    record["title"] = asset.get("title") or ""
+    logger.info(
+        f"explained asset {asset_id} at {result.depth} depth "
+        f"({result.frames_examined} frames)"
+    )
+    return record
 
 
 def public_metrics(platform: str, video_id: str) -> VideoMetrics | None:
@@ -746,6 +832,8 @@ def handle_task(client: WorkerClient, cipher: "TokenCipher | None", task: dict) 
             result = run_process(client, payload)
         elif kind == "collect_metrics":
             result = run_collect_metrics(client, cipher, payload)
+        elif kind == "explain":
+            result = run_explain(client, payload)
         else:
             raise RuntimeError(f"unknown task kind {kind!r}")
     except Exception as exc:

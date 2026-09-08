@@ -124,13 +124,17 @@ export interface JobRow {
   title: string | null;
   error: string | null;
   channel_slug: string | null;
+  style?: string | null;
+  language?: string | null;
+  /** Empty or absent when captions are in the spoken language. */
+  caption_language?: string | null;
   created_at: string;
   updated_at: string;
 }
 
 const JOB_FIELDS =
   "id, topic, status, progress, stage, message, title, error, " +
-  "channel_slug, style, language, created_at, updated_at";
+  "channel_slug, style, language, caption_language, created_at, updated_at";
 
 export class JobRepository {
   constructor(private readonly db: SupabaseClient) {}
@@ -221,6 +225,7 @@ export class JobRepository {
     channel: string;
     style?: string;
     language?: string;
+    captionLanguage?: string;
   }): Promise<JobRow> {
     const topic = params.topic.trim();
     if (!topic) throw new ValidationError("A topic is required.");
@@ -232,12 +237,21 @@ export class JobRepository {
     if (style && !/^[a-z0-9_]{1,64}$/.test(style)) {
       throw new ValidationError("Unknown story type.");
     }
-    // Script language for narration and captions. Visual search runs in both
+    // Voice language: what the narrator speaks. Visual search runs in both
     // scripts regardless, so this never limits which photographs are reachable.
     const language = (params.language ?? "").trim().toLowerCase();
     if (language && !/^[a-z]{2}(-[a-z]{2})?$/i.test(language)) {
-      throw new ValidationError("Unknown script language.");
+      throw new ValidationError("Unknown voice language.");
     }
+    // Caption language. Stored only when it differs from the voice language:
+    // equal to it, captions come from the narration's own transcript and every
+    // word timing is measured, which is the better track and the default.
+    const requestedCaption = (params.captionLanguage ?? "").trim().toLowerCase();
+    if (requestedCaption && !/^[a-z]{2}(-[a-z]{2})?$/i.test(requestedCaption)) {
+      throw new ValidationError("Unknown caption language.");
+    }
+    const captionLanguage =
+      requestedCaption && requestedCaption !== language ? requestedCaption : "";
 
     const { data, error } = await this.db
       .from("jobs")
@@ -251,6 +265,7 @@ export class JobRepository {
         // default, so sending null failed every engine that has no sub-mode.
         style: style,
         language: language,
+        caption_language: captionLanguage,
         status: "queued",
         progress: 0,
         stage: "queued",
