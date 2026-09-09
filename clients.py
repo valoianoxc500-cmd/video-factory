@@ -1090,6 +1090,35 @@ def _parse_fenced_json(text: str) -> dict:
 # Gemini — vision review
 # ---------------------------------------------------------------------------
 
+def normalise_review_response(
+    parsed: object, list_key: str, *, operation: str = "review"
+) -> dict:
+    """A reviewer's parsed JSON as a mapping, whatever shape it arrived in.
+
+    An object is passed through untouched. A top-level array is the reviewer
+    answering with just the list it was asked to put under `list_key`, which is
+    a readable verdict and is wrapped as one. Anything else -- a string, a
+    number, null -- is not a verdict at all and comes back as `{}`, which the
+    caller is expected to treat the way it treats a reviewer that could not run.
+
+    Nothing here decides anything. It only makes the shape predictable so the
+    caller's own gate can.
+    """
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        logger.warning(
+            f"[{operation}] reviewer returned a bare array; "
+            f'reading it as "{list_key}"'
+        )
+        return {list_key: parsed}
+    logger.warning(
+        f"[{operation}] reviewer returned "
+        f"{type(parsed).__name__}, not an object or an array"
+    )
+    return {}
+
+
 @cached_json
 async def review_with_vision(
     prompt: str,
@@ -1098,8 +1127,24 @@ async def review_with_vision(
     system_instruction: str = "",
     model: str | None = None,
     operation_label: str | None = None,
+    list_key: str | None = None,
 ) -> dict:
-    """Send images + prompt to Gemini for vision-based review. Returns parsed JSON."""
+    """Send images + prompt to Gemini for vision-based review. Returns parsed JSON.
+
+    A reviewer asked for `{"rejected": [...], "reason": "..."}` sometimes
+    answers with the bare array instead. The annotation here has always said
+    `dict`; the function returned whatever `json.loads` produced, and a caller
+    that believed the annotation crashed on `.get` -- taking a whole stage down
+    on a response that was perfectly readable.
+
+    Pass `list_key` to get the contract the annotation promises: the return is
+    then always a mapping, with a top-level array wrapped as `{list_key: [...]}`
+    and anything that is neither an object nor an array reported as `{}`.
+
+    Left off, the return is unchanged -- callers that already normalise a list
+    themselves (`core.reviewer`) or read one directly keep the exact shape they
+    handle today.
+    """
     client = _get_client()
     model = model or settings.gemini_review_model
     operation = operation_label or "review_with_vision"
@@ -1239,7 +1284,10 @@ async def review_with_vision(
             "output_token_count": output_tokens or None,
         }
         write_trace(trace_ref, payload)
-    return parsed_json
+
+    if list_key is None:
+        return parsed_json
+    return normalise_review_response(parsed_json, list_key, operation=operation)
 
 
 # ---------------------------------------------------------------------------

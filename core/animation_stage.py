@@ -76,17 +76,41 @@ async def build_character_sheet(
     # One sheet per character. Secondary characters recur too, and a cast
     # whose supporting roles drift is only marginally better than one whose
     # lead does.
+    # The sheet is what every scene is drawn from and judged against, so it has
+    # to come out of the same generator, under the same style contract, as the
+    # scenes themselves. It did not: sheets were drawn on the channel's
+    # *fallback* model while scenes were drawn on its primary one, and the two
+    # models do not share a house style. A real run produced a polished
+    # animated-feature character on the sheet and stick figures in the scenes,
+    # and the reviewer rejected eight scenes for not matching a sheet that was
+    # itself off-style. The locked description is unchanged either way -- only
+    # the renderer of it is.
+    sourcing = config.image_sourcing
+    sheet_model = (
+        str(getattr(sourcing, "generation_model", "") or "").strip()
+        or sourcing.generated_fallback_model
+    )
+    style = anim.STICK_FIGURE_STYLE
+    channel_style = str(
+        getattr(sourcing, "illustration_style_prompt_suffix", "") or ""
+    ).strip()
+    if channel_style:
+        style = f"{style} {channel_style}"
+
     main_sheet: Path | None = None
     for character in bible.characters:
         sheet_path = sheet_dir / f"{character.id}_sheet.png"
         prompt = bible_mod.sheet_prompt(
-            character, anim.STICK_FIGURE_STYLE, anim.STYLE_EXCLUSIONS
+            character, style, anim.STYLE_EXCLUSIONS
         )
-        logger.info(f"[character] sheet for {character.id} ({character.name})")
+        logger.info(
+            f"[character] sheet for {character.id} ({character.name}) "
+            f"on {sheet_model}"
+        )
         result = await clients.generate_scene_image(
             prompt,
             sheet_path,
-            model=config.image_sourcing.generated_fallback_model,
+            model=sheet_model,
             aspect_ratio="16:9",
             target_size=(1920, 1080),
             operation_label="character_sheet",
@@ -205,6 +229,10 @@ async def review_character_consistency(
             prompt,
             sheets + scenes,
             operation_label="character_consistency_review",
+            # The reviewer sometimes answers with the bare array of rejected
+            # filenames instead of the object it was asked for. That is a
+            # readable verdict, and it used to crash the whole stage here.
+            list_key="rejected",
         )
     except Exception as exc:
         logger.warning(
@@ -213,9 +241,26 @@ async def review_character_consistency(
         )
         return {"passed": True, "rejected": [], "reason": "reviewer unavailable"}
 
+    # `list_key` guarantees a mapping, and an empty one means the response was
+    # neither an object nor an array -- a verdict that cannot be read, which is
+    # the same situation as a reviewer that could not run. image_review still
+    # applies to every one of these frames.
+    if not isinstance(result, dict) or not result:
+        logger.warning(
+            "[character_review] no readable verdict; "
+            "leaving the decision to image_review"
+        )
+        return {"passed": True, "rejected": [], "reason": "unreadable verdict"}
+
+    raw_rejected = result.get("rejected")
+    if not isinstance(raw_rejected, list):
+        raw_rejected = []
+    # Filtered against the scenes actually reviewed, so a hallucinated or
+    # mis-shaped name can only ever drop out -- never widen the gate, and never
+    # name a file this run does not own.
     valid = {p.name for p in scenes}
     rejected = [
-        str(name) for name in (result.get("rejected") or [])
+        str(name) for name in raw_rejected
         if str(name) in valid
     ]
     reason = str(result.get("reason") or "").strip()
