@@ -17,6 +17,7 @@ import {
   type QuoteLanguage,
   type Slide,
 } from "@/lib/quotes";
+import { customerSafeError } from "@/lib/customer-errors";
 
 /**
  * Quote Studio.
@@ -115,14 +116,14 @@ export function QuoteStudio() {
         body: JSON.stringify({ topic, name, language, count: slideCount }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Could not write quotes.");
+      if (!res.ok) throw new Error(customerSafeError(data.error ?? "Could not write quotes."));
       const list: string[] = data.quotes ?? [];
       setCandidates(list);
       // Pre-select the first N that will actually set large.
       setChosen(list.filter((q) => isQuoteSettable(q, language)).slice(0, slideCount));
       setStep("quotes");
     } catch (err) {
-      setError((err as Error).message);
+      setError(customerSafeError((err as Error).message));
     } finally {
       setBusy(false);
     }
@@ -165,7 +166,7 @@ export function QuoteStudio() {
         }),
       });
       const data = await res.json();
-      if (!res.ok) return { error: data.error ?? "Generation failed." };
+      if (!res.ok) return { error: customerSafeError(data.error ?? "Generation failed.") };
       return { image: data.image };
     } catch {
       return { error: "Network error." };

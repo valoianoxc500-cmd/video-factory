@@ -1426,3 +1426,122 @@ body {
   .qs-two { grid-template-columns: 1fr; }
   .qs-deck { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
 }
+
+/* ── Platform-wide finish: product accents, editorial rhythm, responsive rail ── */
+:root {
+  --platform-canvas: #090b10;
+  --platform-surface: rgba(19, 24, 34, .82);
+  --platform-border: rgba(255, 255, 255, .09);
+  --platform-focus: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.dash { background: var(--platform-canvas); }
+.content { min-width: 0; }
+.content > * { animation: platform-enter .42s cubic-bezier(.2, .8, .2, 1) both; }
+@keyframes platform-enter { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
+
+[data-surface="football"] { --accent: #4ce487; --accent-ink: #092214; }
+[data-surface="true"] { --accent: #6fc5ff; --accent-ink: #081925; }
+[data-surface="horror"] { --accent: #fb5365; --accent-ink: #29080e; }
+[data-surface="animated"] { --accent: #ffb45e; --accent-ink: #281606; }
+[data-surface="quotes"] { --accent: #ffffff; --accent-ink: #08090b; }
+[data-surface="clipping"] { --accent: #ffb545; --accent-ink: #291904; }
+[data-surface="analyzer"] { --accent: #a88bff; --accent-ink: #160d35; }
+
+.nav-label {
+  display: block;
+  margin: 20px 10px 7px;
+  color: var(--sa-dim);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .15em;
+  text-transform: uppercase;
+}
+.nav-label:first-child { margin-top: 6px; }
+.nav > a, .nav-children > a { border-radius: 11px; }
+.nav > a:focus-visible, .nav-children > a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: none;
+  box-shadow: var(--platform-focus);
+}
+.nav-parent { margin-top: 8px; }
+.nav-children { margin-bottom: 4px; }
+
+.hero, .page-head, .studio, .progress-card, .empty, .qs-panel, .surface, .tile, .chan-card {
+  border-color: var(--platform-border);
+}
+.studio, .progress-card, .qs-panel, .empty { box-shadow: 0 18px 50px rgba(0, 0, 0, .14); }
+.field input, .field textarea, .field select, .qs-slide-text, .qs-quotes li, .cost-panel {
+  border-color: var(--platform-border);
+}
+.field input, .field textarea, .field select, .qs-slide-text { transition: border-color .18s ease, box-shadow .18s ease, background .18s ease; }
+.field input:focus, .field textarea:focus, .field select:focus, .qs-slide-text:focus {
+  border-color: color-mix(in srgb, var(--accent) 65%, #fff);
+  box-shadow: var(--platform-focus);
+}
+.btn-primary, .btn-generate { box-shadow: 0 10px 22px color-mix(in srgb, var(--accent) 18%, transparent); }
+.btn-primary:hover, .btn-generate:hover:not(:disabled) { transform: translateY(-1px); }
+.notice-error { border-color: color-mix(in srgb, #ff6b78 55%, var(--platform-border)); }
+
+/* Quote Studio intentionally steps outside the product palette: it is an editorial desk. */
+[data-surface="quotes"] .quote-studio { --accent: #fff; --accent-ink: #090a0d; }
+[data-surface="quotes"] .quote-studio .qs-panel {
+  background: #f7f7f4;
+  border-color: rgba(255,255,255,.3);
+  color: #111216;
+  box-shadow: 0 20px 45px rgba(0,0,0,.2);
+}
+[data-surface="quotes"] .quote-studio .qs-h,
+[data-surface="quotes"] .quote-studio .field,
+[data-surface="quotes"] .quote-studio .opt-label,
+[data-surface="quotes"] .quote-studio .style-name,
+[data-surface="quotes"] .quote-studio .qs-drop-empty strong { color: #111216; }
+[data-surface="quotes"] .quote-studio .qs-h { font-family: var(--font-playfair), Georgia, serif; font-size: 22px; letter-spacing: -.025em; }
+[data-surface="quotes"] .quote-studio .opt-hint,
+[data-surface="quotes"] .quote-studio .style-hint,
+[data-surface="quotes"] .quote-studio .qs-count,
+[data-surface="quotes"] .quote-studio .qs-drop-empty span { color: #62656c; }
+[data-surface="quotes"] .quote-studio .field input,
+[data-surface="quotes"] .quote-studio .field textarea,
+[data-surface="quotes"] .quote-studio .qs-slide-text,
+[data-surface="quotes"] .quote-studio .qs-quotes li,
+[data-surface="quotes"] .quote-studio .qs-font,
+[data-surface="quotes"] .quote-studio .qs-style,
+[data-surface="quotes"] .quote-studio .cost-panel,
+[data-surface="quotes"] .quote-studio .qs-progress { background: #fff; border-color: #d6d6d0; color: #16171b; }
+[data-surface="quotes"] .quote-studio .field input,
+[data-surface="quotes"] .quote-studio .field textarea,
+[data-surface="quotes"] .quote-studio .qs-slide-text { color: #101115; }
+[data-surface="quotes"] .quote-studio .qs-drop { background: #ecece7; border-color: #a5a5a0; color: #52535a; }
+[data-surface="quotes"] .quote-studio .qs-font.is-on,
+[data-surface="quotes"] .quote-studio .qs-style.is-on { background: #111216; border-color: #111216; }
+[data-surface="quotes"] .quote-studio .qs-font.is-on .style-name,
+[data-surface="quotes"] .quote-studio .qs-font.is-on .style-hint,
+[data-surface="quotes"] .quote-studio .qs-style.is-on .style-name,
+[data-surface="quotes"] .quote-studio .qs-style.is-on .style-hint,
+[data-surface="quotes"] .quote-studio .qs-font.is-on .qs-font-sample { color: #fff; }
+[data-surface="quotes"] .quote-studio .btn-generate { background: #111216; color: #fff; box-shadow: none; }
+[data-surface="quotes"] .quote-studio .btn-generate:hover:not(:disabled) { background: #303136; }
+
+@media (max-width: 860px) {
+  .nav-label { display: none; }
+  .side { backdrop-filter: blur(18px); }
+  .nav { gap: 5px; }
+  .nav > a, .nav-children > a { min-width: max-content; }
+  .nav-parent { min-width: max-content; margin: 0 2px; }
+  .content { padding-inline: clamp(16px, 4vw, 28px); }
+}
+
+@media (max-width: 560px) {
+  .content { padding-top: 24px; padding-bottom: 42px; }
+  .hero h1 { font-size: clamp(30px, 10vw, 43px); }
+  .hero-actions, .hero-actions > * { width: 100%; }
+  .hero-actions { display: grid; }
+  .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .chan-cards { grid-template-columns: 1fr; }
+  .tile-grid { grid-template-columns: 1fr; }
+  .progress-top { align-items: flex-start; }
+  .progress-ring { flex: 0 0 auto; }
+  .steps { grid-template-columns: 1fr 1fr; }
+  .qs-steps { overflow-x: auto; padding-bottom: 4px; }
+  .qs-steps li { min-width: max-content; }
+}

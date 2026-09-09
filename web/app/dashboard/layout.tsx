@@ -22,7 +22,7 @@ export default async function DashboardLayout({
   return (
     <div className="dash">
       <Sidebar email={user.email ?? ""} />
-      <div className="content">{children}</div>
+      <main className="content" id="main-content">{children}</main>
     </div>
   );
 }

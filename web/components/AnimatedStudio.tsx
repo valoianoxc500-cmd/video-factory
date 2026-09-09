@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { engineBySlug } from "@/lib/engines";
 import type { JobRow } from "@/lib/repositories";
+import { CUSTOMER_PROGRESS_STATES, customerProgressState, customerSafeError } from "@/lib/customer-errors";
 
 /**
  * The Animated Stories control panel.
@@ -15,21 +16,6 @@ import type { JobRow } from "@/lib/repositories";
 
 const ENGINE = "animated_stories";
 const STALL_AFTER_MS = 25 * 60 * 1000;
-
-/** The stages this path runs, in order. */
-const STAGES = [
-  ["planning", "Story"],
-  ["script", "Script & beats"],
-  ["character", "Character sheet"],
-  ["image_source", "Scene artwork"],
-  ["animation", "Animation"],
-  ["audio_source", "Narration"],
-  ["process", "Processing"],
-  ["render_sections", "Rendering"],
-  ["assemble", "Assembling"],
-  ["thumbnail", "Thumbnail"],
-  ["final_review", "Review"],
-] as const;
 
 const DURATIONS = [
   { value: 1, label: "~60s", hint: "About 12 scenes" },
@@ -150,18 +136,21 @@ export function AnimatedStudio({ activeJob }: { activeJob: JobRow | null }) {
       });
       const data = (await res.json()) as Record<string, unknown>;
       if (!res.ok) {
-        setError(String(data.error ?? `Could not start (${res.status}).`));
+        setError(customerSafeError(data.error ?? "Could not start this generation."));
         return;
       }
       setJob(data as unknown as JobRow);
     } catch {
-      setError("Could not reach the server.");
+      setError("We could not start this generation right now. Please try again.");
     } finally {
       setBusy(false);
     }
   }, [topic, minutes, language, captionLanguage, sceneSeconds, character, music, busy, running]);
 
-  const stageIndex = STAGES.findIndex(([key]) => key === job?.stage);
+  const currentState = customerProgressState(job?.status, job?.stage);
+  const stageIndex = CUSTOMER_PROGRESS_STATES.indexOf(
+    currentState as (typeof CUSTOMER_PROGRESS_STATES)[number],
+  );
   const pct = job
     ? job.status === "done" ? 100 : Math.min(99, Math.max(1, job.progress))
     : 0;
@@ -328,10 +317,10 @@ export function AnimatedStudio({ activeJob }: { activeJob: JobRow | null }) {
             </div>
             <div className="progress-meta">
               <span className={`chip ${job.status === "done" ? "chip-ok" : job.status === "error" ? "chip-err" : "chip-run"}`}>
-                {job.status === "done" ? "Completed" : job.status === "error" ? "Failed" : "In progress"}
+                {job.status === "done" ? "Complete" : job.status === "error" ? "Needs attention" : currentState}
               </span>
-              <h3>{STAGES[stageIndex]?.[1] ?? "Getting started"}</h3>
-              <p>{job.error ?? job.message}</p>
+              <h3>{currentState}</h3>
+              <p>{job.status === "error" ? customerSafeError(job.error) : job.message}</p>
             </div>
           </div>
 
@@ -347,11 +336,11 @@ export function AnimatedStudio({ activeJob }: { activeJob: JobRow | null }) {
           )}
 
           <ol className="steps">
-            {STAGES.map(([key, label], i) => {
+            {CUSTOMER_PROGRESS_STATES.map((label, i) => {
               const done = job.status === "done" || (stageIndex >= 0 && i < stageIndex);
               const now = i === stageIndex && job.status !== "done";
               return (
-                <li key={key} className={`step${done ? " is-done" : ""}${now ? " is-now" : ""}`}>
+                <li key={label} className={`step${done ? " is-done" : ""}${now ? " is-now" : ""}`}>
                   <span className="step-dot" aria-hidden><i /></span>
                   {label}
                 </li>

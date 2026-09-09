@@ -206,7 +206,7 @@ export const ENGINES: Engine[] = [
     placeholder: "e.g. The night shift nobody else applied for",
     submitLabel: "Create Animated Story",
     voiceNote:
-      "Scenes are drawn with FLUX Schnell and animated with a fal.ai image-to-video model.",
+      "One character reference guides every scene, with motion added where it brings the story to life.",
     voiceLanguages: [AR, EN],
     captionLanguages: CAPTION_LANGUAGES,
     sceneDurations: [3, 4, 5, 6],

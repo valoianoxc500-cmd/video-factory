@@ -2,33 +2,10 @@
 
 import { useEffect, useState } from "react";
 import type { JobRow } from "@/lib/repositories";
-
-/**
- * The caller's generation activity.
- *
- * Stage names come from the pipeline itself; this maps them to language a user
- * can act on. An unrecognised stage falls back to the raw value rather than
- * being hidden, so a pipeline change shows up rather than silently reading as
- * "Queued".
- */
-const STAGE_LABEL: Record<string, string> = {
-  queued: "Queued",
-  claimed: "Starting",
-  planning: "Researching",
-  script: "Writing the script",
-  image_source: "Finding visuals",
-  audio_source: "Recording narration",
-  process: "Preparing images",
-  render_sections: "Rendering",
-  assemble: "Assembling",
-  thumbnail: "Making the thumbnail",
-  final_review: "Reviewing",
-};
+import { customerProgressState, customerSafeError } from "@/lib/customer-errors";
 
 function label(job: JobRow): string {
-  if (job.status === "done") return "Completed";
-  if (job.status === "error") return "Failed";
-  return STAGE_LABEL[job.stage] ?? job.stage ?? "Queued";
+  return customerProgressState(job.status, job.stage);
 }
 
 function chipClass(job: JobRow): string {
@@ -75,8 +52,7 @@ export function JobList({ initial }: { initial: JobRow[] }) {
             <span dir="auto">{job.title || job.topic}</span>
             <small>
               {new Date(job.created_at).toLocaleString()}
-              {job.channel_slug ? ` · ${job.channel_slug.replace(/_/g, " ")}` : ""}
-              {job.status === "error" && job.error ? ` · ${job.error}` : ""}
+              {job.status === "error" && job.error ? ` · ${customerSafeError(job.error)}` : ""}
             </small>
           </div>
           {job.status === "running" || job.status === "queued" ? (

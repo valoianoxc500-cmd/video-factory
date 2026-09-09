@@ -10,6 +10,7 @@ import {
   engineBySlug,
 } from "@/lib/engines";
 import type { JobRow } from "@/lib/repositories";
+import { CUSTOMER_PROGRESS_STATES, customerProgressState, customerSafeError } from "@/lib/customer-errors";
 
 /**
  * The generation workflow for one engine.
@@ -35,18 +36,6 @@ const ASSURANCES = [
   ["Engaging scripts", "Hook-driven and optimised", "M5 4h9l5 5v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Zm9 0v5h5M8 13h8M8 17h5"],
   ["Stunning visuals", "Sourced and generated", "M4 5h16v14H4z M4 15l4.5-4.5L13 15l3-3 4 4"],
   ["Realistic narration", "Natural and engaging", "M6 10v4m4-7v10m4-13v16m4-11v6"],
-] as const;
-
-const STAGES = [
-  ["planning", "Researching"],
-  ["script", "Writing"],
-  ["image_source", "Visuals"],
-  ["audio_source", "Narration"],
-  ["process", "Processing"],
-  ["render_sections", "Rendering"],
-  ["assemble", "Assembling"],
-  ["thumbnail", "Thumbnail"],
-  ["final_review", "Review"],
 ] as const;
 
 export function CreateVideo({
@@ -147,18 +136,21 @@ export function CreateVideo({
       });
       const data = (await res.json()) as Record<string, unknown>;
       if (!res.ok) {
-        setError(String(data.error ?? `Could not start (${res.status}).`));
+        setError(customerSafeError(data.error ?? "Could not start this generation."));
         return;
       }
       setJob(data as unknown as JobRow);
     } catch {
-      setError("Could not reach the server.");
+      setError("We could not start this generation right now. Please try again.");
     } finally {
       setBusy(false);
     }
   }, [topic, engine, style, language, captionLanguage, busy, running]);
 
-  const stageIndex = STAGES.findIndex(([key]) => key === job?.stage);
+  const currentState = customerProgressState(job?.status, job?.stage);
+  const stageIndex = CUSTOMER_PROGRESS_STATES.indexOf(
+    currentState as (typeof CUSTOMER_PROGRESS_STATES)[number],
+  );
   // A finished run reads 100 even if the last update landed at 99, and a
   // queued one never shows 0% next to "In progress".
   const pct = job
@@ -170,8 +162,8 @@ export function CreateVideo({
     job?.status === "done"
       ? "Video ready"
       : job?.status === "error"
-        ? "Stopped"
-        : (STAGES[stageIndex]?.[1] ?? "Getting started");
+        ? "Needs attention"
+        : currentState;
 
   return (
     <>
@@ -365,10 +357,10 @@ export function CreateVideo({
             </div>
             <div className="progress-meta">
               <span className={`chip ${job.status === "done" ? "chip-ok" : job.status === "error" ? "chip-err" : "chip-run"}`}>
-                {job.status === "done" ? "Completed" : job.status === "error" ? "Failed" : "In progress"}
+                {job.status === "done" ? "Complete" : job.status === "error" ? "Needs attention" : currentState}
               </span>
               <h3>{currentStageLabel}</h3>
-              <p>{job.error ?? job.message}</p>
+              <p>{job.status === "error" ? customerSafeError(job.error) : job.message}</p>
             </div>
           </div>
 
@@ -394,15 +386,13 @@ export function CreateVideo({
               </button>
             </div>
           )}
-          {/* Every stage, so the shape of the run is visible: what is done,
-              what is happening, what is still to come. */}
           <ol className="steps">
-            {STAGES.map(([key, label], i) => {
+            {CUSTOMER_PROGRESS_STATES.map((label, i) => {
               const done = job.status === "done" || (stageIndex >= 0 && i < stageIndex);
               const now = i === stageIndex && job.status !== "done";
               return (
                 <li
-                  key={key}
+                  key={label}
                   className={`step${done ? " is-done" : ""}${now ? " is-now" : ""}`}
                 >
                   <span className="step-dot" aria-hidden>

@@ -41,6 +41,22 @@ const MAKE = [
     blurb: "Real cases. Verified facts stated plainly, claims attributed, nothing invented.",
   },
   {
+    href: "/dashboard/animated",
+    surface: "animated",
+    art: "create.jpg",
+    kicker: "Story To Video",
+    title: "Animated Stories",
+    blurb: "Build a consistent visual world around one character and let each scene carry the story forward.",
+  },
+  {
+    href: "/dashboard/quotes",
+    surface: "quotes",
+    art: "library.jpg",
+    kicker: "Editorial images",
+    title: "Quote Studio",
+    blurb: "Turn a thought into a refined, image-only quote carousel that is ready to share.",
+  },
+  {
     href: "/dashboard/clipping",
     surface: "clipping",
     art: "reels.jpg",

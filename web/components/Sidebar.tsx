@@ -52,10 +52,7 @@ export function Sidebar({ email }: { email: string }) {
     router.refresh();
   }
 
-  // "Story To Video" is a heading with two destinations under it rather than a
-  // link of its own: there is no such thing as making a story video without
-  // first saying which kind, so a parent link would only ever be a menu.
-  const storyOpen = is("/dashboard/story");
+  const storyOpen = is("/dashboard/story") || is("/dashboard/animated");
 
   return (
     <aside className="side">
@@ -64,6 +61,7 @@ export function Sidebar({ email }: { email: string }) {
       </Link>
 
       <nav className="nav">
+        <span className="nav-label">Workspace</span>
         <Link href="/dashboard" className={is("/dashboard") ? "active" : ""}>
           <NavIcon d={Icon.overview} />
           <span>
@@ -72,8 +70,7 @@ export function Sidebar({ email }: { email: string }) {
           </span>
         </Link>
 
-        {/* Each destination carries its own accent, so the rail picks up the
-            colour of wherever you are going rather than one product colour. */}
+        <span className="nav-label">Create</span>
         <Link
           href="/dashboard/football"
           data-surface="football"
@@ -112,25 +109,20 @@ export function Sidebar({ email }: { email: string }) {
               <span className="nav-sub">Real cases, verified before written</span>
             </span>
           </Link>
+          <Link
+            href="/dashboard/animated"
+            data-surface="animated"
+            className={is("/dashboard/animated") ? "active" : ""}
+          >
+            <NavIcon d={Icon.animated} />
+            <span>
+              Animated Stories
+              <span className="nav-sub">One visual world, scene to scene</span>
+            </span>
+          </Link>
         </span>
 
-        {/* A third standalone section. Football and Story To Video above are
-            untouched; this sits beside them, not inside them. */}
-        <Link
-          href="/dashboard/animated"
-          data-surface="animated"
-          className={is("/dashboard/animated") ? "active" : ""}
-        >
-          <NavIcon d={Icon.animated} />
-          <span>
-            Animated Stories
-            <span className="nav-sub">Stick-figure scenes, animated</span>
-          </span>
-        </Link>
-
-        {/* A fourth standalone product. Not a video engine: it queues no job
-            and finishes in seconds, so it sits beside the sections rather
-            than inside any of them. */}
+        <span className="nav-label">Tools</span>
         <Link
           href="/dashboard/quotes"
           data-surface="quotes"
@@ -155,9 +147,6 @@ export function Sidebar({ email }: { email: string }) {
           </span>
         </Link>
 
-        {/* Replaces "Re-Create". That screen offered to rebuild a video from
-            another one; this reads the same video and explains why it worked,
-            and stops there. */}
         <Link
           href="/dashboard/analyzer"
           data-surface="analyzer"
@@ -170,6 +159,7 @@ export function Sidebar({ email }: { email: string }) {
           </span>
         </Link>
 
+        <span className="nav-label">Library</span>
         <Link
           href="/dashboard/reels/analytics"
           data-surface="analytics"
@@ -180,6 +170,8 @@ export function Sidebar({ email }: { email: string }) {
         <Link href="/dashboard/library" data-surface="library" className={is("/dashboard/library") ? "active" : ""}>
           <NavIcon d={Icon.library} /> Library
         </Link>
+
+        <span className="nav-label">Account</span>
         <Link href="/dashboard/settings" className={is("/dashboard/settings") ? "active" : ""}>
           <NavIcon d={Icon.settings} /> Settings
         </Link>

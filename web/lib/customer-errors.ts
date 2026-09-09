@@ -14,14 +14,30 @@ export function customerSafeError(raw: unknown): string {
   return text.length <= 180 ? text : "We could not finish this generation. Your work has been saved and can be retried.";
 }
 
+/** The only lifecycle language rendered in customer-facing product screens. */
+export const CUSTOMER_PROGRESS_STATES = [
+  "Preparing",
+  "Researching",
+  "Creating",
+  "Rendering",
+  "Almost ready",
+] as const;
+
+export function customerProgressState(status: string | undefined, stage: string | undefined): string {
+  if (status === "done") return "Complete";
+  if (status === "error") return "Needs attention";
+  const states: Record<string, string> = {
+    queued: "Preparing", claimed: "Preparing", planning: "Researching",
+    script: "Creating", character: "Creating", image_source: "Creating",
+    animation: "Creating", audio_source: "Creating", process: "Creating",
+    render_sections: "Rendering", assemble: "Rendering", thumbnail: "Almost ready",
+    final_review: "Almost ready",
+  };
+  return states[stage ?? ""] ?? "Preparing";
+}
+
 export function customerJobMessage(status: string, stage: string, raw: unknown): string {
   if (status === "done") return "Complete";
   if (status === "error") return customerSafeError(raw);
-  const states: Record<string, string> = {
-    queued: "Preparing", planning: "Researching", script: "Creating",
-    character: "Creating", image_source: "Creating", animation: "Creating",
-    audio_source: "Creating", process: "Creating", render_sections: "Rendering",
-    assemble: "Rendering", thumbnail: "Almost ready", final_review: "Almost ready",
-  };
-  return states[stage] ?? "Preparing";
+  return customerProgressState(status, stage);
 }
