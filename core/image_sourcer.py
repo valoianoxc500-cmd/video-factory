@@ -319,6 +319,36 @@ def _record_generated_asset_provenance(path: Path | str, record: dict) -> None:
     _ASSET_PROVENANCE[name] = {**record, "file": name}
 
 
+def _mark_true_story_provenance(
+    path: Path | str,
+    *,
+    source: str,
+    keywords: str,
+    prompt: str,
+) -> None:
+    """Classify a successful True Stories visual without relabelling evidence.
+
+    This runs only after a real source has written a usable asset. "archival"
+    therefore means a sourced archival subject, not an AI reconstruction whose
+    prompt happened to mention a file or record.
+    """
+    name = Path(path).name
+    record = dict(_ASSET_PROVENANCE.get(name) or {})
+    subject = f"{keywords} {prompt}".lower()
+    archival = bool(re.search(
+        r"\b(archival|archive|case file|police file|court record|"
+        r"evidence photograph|newspaper front page|historical photograph)\b",
+        subject,
+    ))
+    record.update({
+        "file": name,
+        "generated": False,
+        "source": record.get("source") or source,
+        "provenance_kind": "archival" if archival else "sourced",
+    })
+    _ASSET_PROVENANCE[name] = record
+
+
 #: How many beats in one run may fall through to the open-library tier.
 #: Six covers a normal shortfall; beyond that the run has a sourcing problem
 #: the next tier should handle rather than one more catalogue.
@@ -2622,6 +2652,11 @@ async def _generate_missing_visuals(
             model=model,
         )
         provenance = visual.to_provenance()
+        if config.channel_id == "true_stories":
+            provenance["provenance_kind"] = "generated_reconstruction"
+            provenance["provenance"] = (
+                "AI-generated reconstruction, not archival evidence or a photograph"
+            )
         sourcing_log.append(provenance)
         # Both stores, not just the sourcing log: asset_provenance.json is
         # written from _ASSET_PROVENANCE, and a generated frame missing from
@@ -3235,6 +3270,13 @@ async def _source_single_image(
                 return None
 
             if success:
+                if config.channel_id == "true_stories":
+                    _mark_true_story_provenance(
+                        output_path,
+                        source=image_source,
+                        keywords=keywords,
+                        prompt=prompt,
+                    )
                 logger.info(f"Sourced {output_path.name} from {image_source}")
                 return image_source
         except Exception as e:
@@ -3259,6 +3301,13 @@ async def _source_single_image(
                     tuple(config.video.resolution),
                     narration=narration,
                 ):
+                    if config.channel_id == "true_stories":
+                        _mark_true_story_provenance(
+                            output_path,
+                            source="open_libraries",
+                            keywords=keywords,
+                            prompt=prompt,
+                        )
                     logger.info(f"Sourced {output_path.name} from an open library")
                     return "open_libraries"
             except Exception as e:

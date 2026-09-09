@@ -279,19 +279,14 @@ def test_football_generation_is_untouched():
     assert "fal" not in cfg.image_sourcing.generated_fallback_model
 
 
-@pytest.mark.parametrize("slug", ["horror_stories", "true_stories"])
-def test_story_beats_are_generated_and_licensed_sources_remain(slug):
-    """Story channels generate their beats; the licensed tiers stay wired.
-
-    Changed deliberately: the reviewer kept rejecting keyword-matched stock
-    ("a movie poster", "a Greek flag and a crowd") while every generated frame
-    passed. Generation is now first for these two channels only -- a slot that
-    names its own photo source still gets a real photograph, and the
-    open-library tier is still configured.
-    """
-    cfg = load_channel_config(slug)
-    assert cfg.image_sourcing.prefer_generated_visuals is True
-    assert cfg.image_sourcing.open_library_fallback is True
+def test_story_channels_keep_their_distinct_visual_priority():
+    """Horror is fictional; True Stories must exhaust real sourcing first."""
+    horror = load_channel_config("horror_stories")
+    true_stories = load_channel_config("true_stories")
+    assert horror.image_sourcing.prefer_generated_visuals is True
+    assert true_stories.image_sourcing.prefer_generated_visuals is False
+    assert horror.image_sourcing.open_library_fallback is True
+    assert true_stories.image_sourcing.open_library_fallback is True
 
 
 def test_thumbnail_behaviour_is_untouched():

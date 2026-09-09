@@ -601,6 +601,14 @@ async def run_pipeline(
                 f"No script or visuals were generated. Re-plan with a verified topic."
             )
 
+        if research.get("evidence_required"):
+            save_research(ws, research)
+            fail_pipeline(
+                "This true story could not be grounded in reliable retrieved "
+                "sources. No script or visuals were generated. Choose a "
+                "documented case or try again later."
+            )
+
         if research.get("brief"):
             plan["research_context"] = (
                 story_directive

@@ -156,7 +156,7 @@
     "open_library_budget": 20,
     "generate_when_rejected": true,
     "max_generated_when_rejected": 8,
-    "prefer_generated_visuals": true
+    "prefer_generated_visuals": false
   },
   "youtube": {
     "category_id": "27",

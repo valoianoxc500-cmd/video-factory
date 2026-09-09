@@ -87,6 +87,16 @@ def _is_news_channel(config: ChannelConfig) -> bool:
     return "news" in category or "football" in category or "football" in focus
 
 
+def _is_true_stories_channel(config: ChannelConfig) -> bool:
+    """The documentary case channel, deliberately distinct from Horror."""
+    return str(config.channel_id or "") == "true_stories"
+
+
+def _requires_retrieved_evidence(config: ChannelConfig) -> bool:
+    """Channels that may not start a script from model memory alone."""
+    return _is_news_channel(config) or _is_true_stories_channel(config)
+
+
 _LATIN_DESTINATION_RE = re.compile(
     r"\b(?:to|joins?|joined|signs? for|move to|transfer to|switch to)\s+"
     r"([A-Z][\w'’-]+(?:\s+[A-Z][\w'’-]+){0,2})",
@@ -479,10 +489,22 @@ async def research_topic(
     # answer has to agree with.
     evidence: list[news_sources.NewsItem] = []
     statuses: list[player_facts.PlayerStatus] = []
-    if _is_news_channel(config):
+    if _requires_retrieved_evidence(config):
         evidence = await _retrieve_current_reporting(
             topic=topic, angle=angle, config=config
         )
+
+        if _is_true_stories_channel(config) and not evidence:
+            return {
+                "brief": "",
+                "sources": [],
+                "key_entities": [],
+                "grounded": False,
+                "evidence_required": True,
+                "rejected_reason": "no reliable retrieved evidence for this true story",
+            }
+
+    if _is_news_channel(config):
 
         # Which club each named player is at *now*, from a squad and transfer
         # record rather than from memory or from a headline. A model writing
@@ -515,15 +537,15 @@ async def research_topic(
                 "player_status": _player_status_rows(statuses),
             }
 
-        if evidence:
-            prompt = (
-                f"{prompt}\n\n"
-                f"{news_sources.render_evidence(evidence)}\n\n"
-                "Ground every claim in the reporting above. Where it "
-                "contradicts what you recall, the reporting is right and your "
-                "recollection is out of date. Do not state anything it does "
-                "not support."
-            )
+    if evidence:
+        prompt = (
+            f"{prompt}\n\n"
+            f"{news_sources.render_evidence(evidence)}\n\n"
+            "Ground every claim in the reporting above. Where it "
+            "contradicts what you recall, the reporting is right and your "
+            "recollection is out of date. Do not state anything it does "
+            "not support."
+        )
 
     try:
         research = await clients.research_with_search(
