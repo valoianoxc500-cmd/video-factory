@@ -48,6 +48,7 @@ from viral.discovery import (
     sort_results,
 )
 from viral.processing import build_ffmpeg_command, build_plan, detect_subject_centre, probe
+from viral import clipping as vrf_clipping
 from viral.publishing import (
     MAX_ATTEMPTS,
     PublishRequest,
@@ -527,6 +528,85 @@ def run_ingest(client: WorkerClient, cipher: TokenCipher | None, payload: dict) 
     return {"imported": True, **processed}
 
 
+def _clip_spec_from(options: dict, source, plan) -> "vrf_clipping.ClipSpec":
+    """One clip spec from the screen's options and the plan's trims.
+
+    The range comes from the plan rather than the options so the trims keep
+    their single meaning: `build_plan` has always owned them, and having two
+    places compute a start time is how they drift apart.
+    """
+    start = float(plan.trim_start or 0.0)
+    duration = float(getattr(source, "duration", 0.0) or 0.0)
+    end = duration - float(plan.trim_end or 0.0) if duration else 0.0
+    if end <= start:
+        # No measurable duration, or trims that meet: fall back to the whole
+        # remaining file and let ffmpeg run to the end.
+        end = start + max(1.0, duration - start)
+
+    return vrf_clipping.ClipSpec(
+        id="clip_1",
+        start=round(start, 3),
+        end=round(end, 3),
+        aspect=str(options.get("aspect") or vrf_clipping.DEFAULT_ASPECT),
+        captions=bool(options.get("captions")),
+        caption_style=str(options.get("caption_style") or vrf_clipping.DEFAULT_CAPTION_STYLE),
+        focus=str(options.get("focus") or vrf_clipping.DEFAULT_FOCUS),
+        quality=str(options.get("quality") or vrf_clipping.DEFAULT_QUALITY),
+        speaker=str(options.get("speaker") or ""),
+    )
+
+
+def _build_subtitles(
+    source_path: Path,
+    spec: "vrf_clipping.ClipSpec",
+    workdir: Path,
+    payload: dict,
+) -> Path | None:
+    """A burned-in subtitle file for this clip, or None.
+
+    Returns None on every failure. Captions are something the user asked to
+    add to a clip; they are not the clip, and a recogniser being unavailable
+    must not turn a perfectly good cut into a failed job.
+
+    Uses the transcription path the rest of the repo already uses, so there is
+    no second recogniser and no second bill.
+    """
+    try:
+        audio = workdir / "clip_audio.wav"
+        extract = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error",
+             "-ss", f"{spec.start:.3f}", "-i", str(source_path),
+             "-t", f"{spec.duration:.3f}",
+             "-vn", "-ac", "1", "-ar", "16000", str(audio)],
+            capture_output=True, text=True,
+        )
+        if extract.returncode != 0 or not audio.exists():
+            logger.warning("[clipping] no audio to caption; continuing without")
+            return None
+
+        from core.audio_sourcer import _transcribe_with_timestamps
+
+        language = str(payload.get("caption_language") or "en")
+        words = _transcribe_with_timestamps(audio, language)
+
+        # The audio was already cut to the clip, so the words start at zero.
+        cues = vrf_clipping.caption_cues(
+            words, clip_start=0.0, clip_end=spec.duration
+        )
+        if not cues:
+            logger.warning("[clipping] transcript yielded no cues; continuing without")
+            return None
+
+        srt = workdir / "captions.srt"
+        srt.write_text(vrf_clipping.cues_to_srt(cues), encoding="utf-8")
+        return srt
+    except Exception as exc:  # noqa: BLE001 - captions must never fail a clip
+        logger.warning(
+            f"[clipping] captions unavailable, continuing without: {str(exc)[:200]}"
+        )
+        return None
+
+
 def run_process(client: WorkerClient, payload: dict) -> dict:
     """Format and quality work on a video the user holds rights to."""
     asset_id = str(payload.get("asset_id") or "")
@@ -575,15 +655,36 @@ def run_process(client: WorkerClient, payload: dict) -> dict:
             trim_start=float(payload.get("trim_start") or 0.0),
             trim_end=float(payload.get("trim_end") or 0.0),
         )
-        centre = detect_subject_centre(source_path) if not source.is_vertical else 0.5
-
+        # The clipping screen sends `clip_options` when the user chose an
+        # aspect, a quality, a focus mode or captions. Without it this is the
+        # original path, unchanged: an existing caller gets the same encode it
+        # has always got, and none of the new code runs.
+        options = payload.get("clip_options")
         output = Path(workdir) / "processed.mp4"
-        command = build_ffmpeg_command(source_path, output, plan, crop_centre_x=centre)
+
+        if isinstance(options, dict) and options:
+            spec = _clip_spec_from(options, source, plan)
+            centre = vrf_clipping.focus_centre(source_path, spec)
+            subtitles = (
+                _build_subtitles(source_path, spec, Path(workdir), payload)
+                if spec.captions else None
+            )
+            command = vrf_clipping.build_clip_command(
+                source_path, output, spec,
+                centre=centre,
+                subtitle_path=subtitles,
+                has_audio=source.has_audio,
+            )
+        else:
+            centre = detect_subject_centre(source_path) if not source.is_vertical else 0.5
+            command = build_ffmpeg_command(source_path, output, plan, crop_centre_x=centre)
+
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode != 0 or not output.exists():
-            raise RuntimeError(
-                f"Processing failed: {(result.stderr or '')[-300:]}"
-            )
+            # The ffmpeg tail goes to the worker log; the customer gets a
+            # sentence. Raising the raw stderr put a filter graph on screen.
+            logger.error(f"clip encode failed: {(result.stderr or '')[-500:]}")
+            raise RuntimeError(vrf_clipping.safe_clip_error(result.stderr or ""))
 
         # Measured before the temporary directory goes away.
         processed = probe(output)

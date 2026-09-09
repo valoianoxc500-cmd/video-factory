@@ -97,11 +97,28 @@ export async function POST(request: Request) {
       );
     }
 
+    // Options travel as an opaque block. They are validated on the worker,
+    // which owns the vocabulary and falls back to its own defaults, so an
+    // unknown value here degrades one setting rather than failing the clip.
+    // Absent options mean the worker takes its original path unchanged.
+    const raw = (payload.clipOptions ?? null) as Record<string, unknown> | null;
+    const clipOptions = raw
+      ? {
+          aspect: String(raw.aspect ?? ""),
+          quality: String(raw.quality ?? ""),
+          focus: String(raw.focus ?? ""),
+          captions: Boolean(raw.captions),
+          caption_style: String(raw.caption_style ?? ""),
+          speaker: String(raw.speaker ?? "").slice(0, 80),
+        }
+      : null;
+
     const task = await new TaskRepository(supabase).create(user.id, "process", {
       asset_id: asset.id,
       platform: String(payload.platform ?? "tiktok"),
       trim_start: trimStart,
       trim_end: trimEnd,
+      ...(clipOptions ? { clip_options: clipOptions } : {}),
     });
 
     return Response.json({ task }, { status: 201 });

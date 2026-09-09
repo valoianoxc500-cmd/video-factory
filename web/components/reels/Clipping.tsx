@@ -3,6 +3,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { PLATFORMS } from "@/lib/vrf";
+import {
+  ASPECTS,
+  CAPTION_STYLES,
+  FOCUS_MODES,
+  QUALITIES,
+  customerState,
+  defaultClipOptions,
+  safeClipError,
+  type ClipOptions,
+} from "@/lib/clipping";
 
 /**
  * Cut a section out of a video you own and reframe it to 9:16.
@@ -58,6 +68,11 @@ export function Clipping({
   const [platform, setPlatform] = useState<string>("tiktok");
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(0);
+  const [options, setOptions] = useState<ClipOptions>(defaultClipOptions);
+
+  function setOption<K extends keyof ClipOptions>(key: K, value: ClipOptions[K]) {
+    setOptions((prev) => ({ ...prev, [key]: value }));
+  }
   const [task, setTask] = useState<TaskState | null>(initialTask);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -114,11 +129,12 @@ export function Clipping({
           platform,
           trimStart,
           trimEnd,
+          clipOptions: options,
         }),
       });
       const body = await response.json();
       if (!response.ok) {
-        setError(body.error || "Could not start clipping.");
+        setError(safeClipError(body.error || "Could not start clipping."));
         return;
       }
       setTask(body.task);
@@ -202,6 +218,99 @@ export function Clipping({
       </div>
 
       <div className="opt-group">
+        <span className="opt-label">Format</span>
+        <div className="seg">
+          {ASPECTS.map((a) => (
+            <button
+              key={a.id}
+              type="button"
+              className={`seg-item${options.aspect === a.id ? " seg-on" : ""}`}
+              onClick={() => setOption("aspect", a.id)}
+              title={a.hint}
+            >
+              {a.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="opt-group">
+        <span className="opt-label">Framing</span>
+        <div className="seg">
+          {FOCUS_MODES.map((f) => (
+            <button
+              key={f.id}
+              type="button"
+              className={`seg-item${options.focus === f.id ? " seg-on" : ""}`}
+              onClick={() => setOption("focus", f.id)}
+              title={f.hint}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+        <p className="opt-hint">
+          Follow subject keeps the person in frame. If the subject cannot be
+          detected the crop stays centred rather than guessing.
+        </p>
+      </div>
+
+      <div className="opt-group">
+        <span className="opt-label">Captions</span>
+        <div className="seg">
+          <button
+            type="button"
+            className={`seg-item${!options.captions ? " seg-on" : ""}`}
+            onClick={() => setOption("captions", false)}
+          >
+            Off
+          </button>
+          <button
+            type="button"
+            className={`seg-item${options.captions ? " seg-on" : ""}`}
+            onClick={() => setOption("captions", true)}
+          >
+            On
+          </button>
+        </div>
+        {options.captions && (
+          <div className="seg" style={{ marginTop: 8 }}>
+            {CAPTION_STYLES.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                className={`seg-item${options.caption_style === c.id ? " seg-on" : ""}`}
+                onClick={() => setOption("caption_style", c.id)}
+              >
+                {c.label}
+              </button>
+            ))}
+          </div>
+        )}
+        <p className="opt-hint">
+          Captions are transcribed from the clip&apos;s own audio. If the
+          transcript cannot be produced the clip is still made, without them.
+        </p>
+      </div>
+
+      <div className="opt-group">
+        <span className="opt-label">Export quality</span>
+        <div className="seg">
+          {QUALITIES.map((q) => (
+            <button
+              key={q.id}
+              type="button"
+              className={`seg-item${options.quality === q.id ? " seg-on" : ""}`}
+              onClick={() => setOption("quality", q.id)}
+              title={q.hint}
+            >
+              {q.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="opt-group">
         <span className="opt-label">Trim</span>
         {duration > 0 ? (
           <>
@@ -248,10 +357,15 @@ export function Clipping({
 
       {task && (
         <div className={`notice${task.status === "failed" ? " notice-error" : ""}`}>
-          {task.status === "queued" && "Queued — the worker will pick this up shortly."}
-          {task.status === "running" && "Clipping now: trimming, reframing and re-encoding."}
-          {task.status === "done" && "Clip ready. It is on the video in My Videos."}
-          {task.status === "failed" && (task.error || "Clipping failed.")}
+          {/* One of five states, never the task row's own words. A new
+              internal stage must not become a new customer state. */}
+          {task.status === "failed"
+            ? safeClipError(task.error)
+            : `${customerState(task.status) ?? "Preparing"}${
+                task.status === "done"
+                  ? " — your clip is on the video in My Videos."
+                  : "…"
+              }`}
         </div>
       )}
 
