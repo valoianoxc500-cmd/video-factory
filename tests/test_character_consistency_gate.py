@@ -279,6 +279,77 @@ def test_no_images_means_no_review(monkeypatch, tmp_path):
     assert calls["n"] == 0
 
 
+# --- a failed redraw must not cost the beat its picture --------------------
+
+
+def _stub_failed_generate(monkeypatch):
+    """A redraw that produces nothing, which is what a 429 storm looks like."""
+
+    async def generate(*, descriptors, config, sourcing_log, **kwargs):
+        return None
+
+    monkeypatch.setattr(image_sourcer, "_generate_missing_visuals", generate)
+
+
+def test_a_failed_redraw_keeps_the_previous_frame(monkeypatch, tmp_path):
+    """Deleting first cost a real run sixteen of twenty-one beats.
+
+    The gate used to unlink the drifted image and then ask the generator for a
+    new one. When the generator was rate-limited the beat ended up with no file
+    at all, and the sourcer's last resort covered it with a text card showing
+    the slot's own image brief -- character-bible text on screen. A drifted
+    character is a defect; an empty beat is a hole.
+    """
+    _stub_review(
+        monkeypatch,
+        [{"passed": False, "rejected": ["section_001_01.jpg"], "reason": "drift"}],
+    )
+    _stub_failed_generate(monkeypatch)
+
+    raw_dir = tmp_path / "images" / "raw"
+    desc = _descriptor(raw_dir)
+
+    _run(_animated_config(), [desc], raw_dir, [desc["img_path"]])
+
+    assert desc["img_path"].exists(), "the beat lost its only picture"
+    assert desc["img_path"].read_bytes() == b"drawn"
+    assert desc["sourced"] is True, "an existing frame must still count as sourced"
+
+
+def test_a_failed_redraw_leaves_no_backup_files_behind(monkeypatch, tmp_path):
+    _stub_review(
+        monkeypatch,
+        [{"passed": False, "rejected": ["section_001_01.jpg"], "reason": "drift"}],
+    )
+    _stub_failed_generate(monkeypatch)
+
+    raw_dir = tmp_path / "images" / "raw"
+    desc = _descriptor(raw_dir)
+
+    _run(_animated_config(), [desc], raw_dir, [desc["img_path"]])
+
+    assert list(raw_dir.glob("*.prechar")) == []
+
+
+def test_a_successful_redraw_discards_the_previous_frame(monkeypatch, tmp_path):
+    _stub_review(
+        monkeypatch,
+        [
+            {"passed": False, "rejected": ["section_001_01.jpg"], "reason": "drift"},
+            {"passed": True, "rejected": [], "reason": "ok"},
+        ],
+    )
+    _stub_generate(monkeypatch, [])
+
+    raw_dir = tmp_path / "images" / "raw"
+    desc = _descriptor(raw_dir)
+
+    _run(_animated_config(), [desc], raw_dir, [desc["img_path"]])
+
+    assert desc["img_path"].read_bytes() == b"redrawn"
+    assert list(raw_dir.glob("*.prechar")) == []
+
+
 # --- wired into the stage, not merely defined ------------------------------
 
 

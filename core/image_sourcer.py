@@ -2287,10 +2287,20 @@ async def enforce_character_consistency(
             f"[character_review] redrawing {len(targets)} drifted scene(s) "
             f"from their locked briefs (attempt {attempt})"
         )
+        # The old frame is moved aside, never deleted. A drifted character is
+        # a defect; an empty beat is a hole, and the sourcer's last resort
+        # fills a hole with a text card showing the slot's own image brief --
+        # strictly worse than a frame whose character wandered. A redraw also
+        # fails for reasons that have nothing to do with the character (a
+        # rate-limited generator, a refused prompt), so the previous image has
+        # to survive long enough to come back.
+        backups: dict[str, Path] = {}
         for desc in targets:
             path = Path(desc["img_path"])
             if path.exists():
-                path.unlink()
+                backup = path.with_name(f"{path.name}.prechar")
+                path.replace(backup)
+                backups[str(path)] = backup
             desc["sourced"] = False
 
         await _generate_missing_visuals(
@@ -2301,7 +2311,36 @@ async def enforce_character_consistency(
             limit_override=len(targets),
             operation_label="character_consistency_redraw",
         )
-        redrawn += len(targets)
+
+        for desc in targets:
+            path = Path(desc["img_path"])
+            backup = backups.get(str(path))
+            if backup is None:
+                continue
+            # The generator may land on either suffix, so the beat is judged
+            # by what is on disk under its own name rather than by the path
+            # the descriptor happened to record.
+            fresh = next(
+                (
+                    candidate
+                    for candidate in (
+                        path, path.with_suffix(".jpg"), path.with_suffix(".png")
+                    )
+                    if _is_usable_asset(candidate)
+                ),
+                None,
+            )
+            if fresh is not None:
+                backup.unlink(missing_ok=True)
+                redrawn += 1
+                continue
+            backup.replace(path)
+            desc["sourced"] = True
+            logger.warning(
+                f"[character_review] redraw produced no image for "
+                f"{path.name}; keeping the previous frame rather than "
+                f"leaving the beat empty"
+            )
 
         image_paths[:] = sorted(raw_dir.glob("section_*_*.jpg")) or sorted(
             raw_dir.glob("section_*_*.png")
