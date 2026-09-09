@@ -629,6 +629,16 @@ def _image_source_for_slot(
         # News visuals must be photographs of the actual subject: everything
         # photographic goes through web image search, never image generation.
         return "serper"
+    if (
+        config is not None
+        and config.image_sourcing.prefer_generated_visuals
+        and not preferred_photo_source
+    ):
+        # Story beats are generated from the beat's own meaning rather than
+        # searched for by keyword. A slot that explicitly named a photo source
+        # is left alone: that is the case where a real visual was actually
+        # wanted, and generation must not displace it.
+        return "ai_gen"
     return source
 
 

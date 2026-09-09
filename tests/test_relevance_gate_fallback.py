@@ -178,6 +178,8 @@ def test_generation_is_still_available_to_other_channels(monkeypatch, tmp_path):
     assert generated, "the last-resort generator was removed for every channel"
 
 
-def test_horror_is_a_web_photo_only_channel():
-    """The fix only binds because Horror declares web_photos_only."""
-    assert image_sourcer_config().image_sourcing.web_photos_only is True
+def test_horror_now_generates_its_story_beats():
+    """Horror moved from web-photo-only to generation-first."""
+    cfg = image_sourcer_config()
+    assert cfg.image_sourcing.prefer_generated_visuals is True
+    assert cfg.image_sourcing.web_photos_only is False

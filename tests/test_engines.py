@@ -109,6 +109,9 @@ def test_every_registered_web_engine_has_a_channel_config():
     slugs = _registered_engine_slugs()
     assert set(slugs) == {
         "football_news", "horror_stories", "true_stories",
+        # Added as a third standalone section, not a replacement for any of
+        # the three above.
+        "animated_stories",
     }, slugs
     for slug in slugs:
         assert (CHANNELS / f"{slug}.json").exists(), f"no channel config for {slug}"

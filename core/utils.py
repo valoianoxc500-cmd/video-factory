@@ -226,6 +226,35 @@ class VoiceConfig(BaseModel):
     voice_id: str = ""
 
 
+class AnimationConfig(BaseModel):
+    """Image-to-video settings. Present only on the Animated Stories path.
+
+    Absent on every other channel, which is how the pipeline knows not to
+    animate: Football, Horror and True Stories have no `animation` block and
+    never reach the provider.
+    """
+
+    enabled: bool = False
+    #: fal endpoint. Configuration rather than a constant -- image-to-video
+    #: pricing and model availability move fast.
+    model: str = "fal-ai/wan/v2.2-5b/image-to-video"
+    #: Flat price per generated clip, used by the planner to decide how many
+    #: beats fit the ceiling before spending anything.
+    cost_per_clip_usd: float = 0.15
+    #: Hard ceiling on animation spend for one video. Beats that do not fit
+    #: are held as stills rather than the run going over.
+    max_animation_usd: float = 0.60
+    min_clip_seconds: float = 3.0
+    max_clip_seconds: float = 6.0
+    resolution: str = "720p"
+    #: Attempts per scene before it is left as a still. The scene image is
+    #: always preserved.
+    max_attempts_per_scene: int = 2
+    #: Hold the generated still for the beat's span when animation fails or
+    #: is unaffordable. The alternative is a gap, which is worse.
+    still_fallback: bool = True
+
+
 class ImageSourcingConfig(BaseModel):
     generation_model: str = "gemini-3.1-flash-image-preview"
     # News/documentary channels must show real photographs of the actual
@@ -311,6 +340,17 @@ class ImageSourcingConfig(BaseModel):
     # images, it is short of a subject that can be illustrated honestly.
     max_generated_fallback_images: int = 5
     generated_fallback_model: str = "gemini-3.1-flash-lite-image"
+    # Story channels generate the beat rather than searching for it.
+    #
+    # A bespoke cinematic frame of the scene the narration is describing beats
+    # a stock photograph that merely shares a keyword, and the evidence is in
+    # the review log: on a lighthouse story the reviewer rejected sourced
+    # photos as "a movie poster", "a Greek flag and a crowd of people" and
+    # "too sunny and touristy", while every generated frame passed. Off by
+    # default -- a news channel must still show the actual event -- and it
+    # never overrides a slot that explicitly names a photo source, so a beat
+    # with a strong licensed visual still gets it.
+    prefer_generated_visuals: bool = False
     generate_info_slide_illustrations: bool = True
     generate_info_card_illustrations: bool = True
     style_prompt_suffix: str = ""
@@ -529,6 +569,9 @@ class ChannelConfig(BaseModel):
     video_types: dict[str, VideoTypeConfig] = {}
     voice: VoiceConfig = VoiceConfig()
     image_sourcing: ImageSourcingConfig = ImageSourcingConfig()
+    # Animated Stories only. Every other channel leaves this at its default,
+    # where `enabled` is False and no animation provider is ever constructed.
+    animation: AnimationConfig = AnimationConfig()
     youtube: YouTubeConfig
     script_style: ScriptStyleConfig = ScriptStyleConfig()
     business_strategy: BusinessStrategyConfig | None = None
@@ -704,6 +747,7 @@ def compute_sub_durations(
     crossfade: float = 0.3,
     *,
     max_visual_hold_seconds: float | None = None,
+    min_visual_hold_seconds: float | None = None,
     override_duration: float | None = None,
 ) -> list[float]:
     """Compute per-slot durations using word timestamps when available.
@@ -712,11 +756,25 @@ def compute_sub_durations(
     words and uses them as transition points (images change at natural pauses).
     Without: falls back to uniform split.
 
+    The narration is the master timeline. Slot count is capped by what the
+    narration can actually carry: `min_visual_hold_seconds` decides how many
+    visuals a span supports, so a 12.3s section does not get nine images at
+    1.63s each. Faster narration still changes more often -- the cap is on how
+    *short* a hold may be, not on how many beats the script may have -- and a
+    slow section still holds longer, up to `max_visual_hold_seconds`.
+
     override_duration: if set, use this instead of section duration (e.g. for
     remaining time after subtracting pre-rendered chart clips).
     """
     duration = override_duration or section.actual_duration_seconds or section.estimated_duration_seconds
 
+    # `min_visual_hold_seconds` is advisory here and deliberately does not
+    # change the number of durations returned: the renderer indexes this list
+    # per slot, and returning fewer would drop a beat's own visual and let a
+    # neighbour cover narration it does not illustrate. The slot count is
+    # bounded where it is decided -- see `maximum_visual_slots_for_duration`
+    # and the scripter's pacing validator -- so by the time a script reaches
+    # here the floor is already satisfied.
     if num_slots <= 1:
         return [max(duration, 1.0)]
 
@@ -795,6 +853,26 @@ def minimum_visual_slots_for_duration(
         raise ValueError("max_hold_seconds must be greater than crossfade")
     required = (duration_seconds - crossfade) / (max_hold_seconds - crossfade)
     return max(1, math.ceil(required))
+
+
+def maximum_visual_slots_for_duration(
+    duration_seconds: float,
+    min_hold_seconds: float,
+    crossfade: float = 0.3,
+) -> int:
+    """Most visible slots a span can carry without cutting too fast.
+
+    The counterpart to `minimum_visual_slots_for_duration`. Together they say
+    the narration owns the timeline: a section must have enough visuals not to
+    stall, and no more than it can hold. Without this second bound a 12.3s
+    section was written with nine beats and every image flashed for 1.63s.
+
+    Floored at one, because a very short section still needs a picture.
+    """
+    if duration_seconds <= 0 or min_hold_seconds <= 0:
+        return 1
+    affordable = (duration_seconds + crossfade) / (min_hold_seconds + crossfade)
+    return max(1, int(affordable))
 
 
 def find_output_video(workspace: Path) -> Path:

@@ -18,7 +18,8 @@ from core.utils import (
 )
 from core.utils import (
     ChannelConfig, Script, ScriptSection, VisualSlot,
-    compute_sections_range, minimum_visual_slots_for_duration, save_script,
+    compute_sections_range, minimum_visual_slots_for_duration,
+    maximum_visual_slots_for_duration, save_script,
 )
 from settings import settings
 
@@ -1110,6 +1111,37 @@ def _apply_word_based_duration_estimates(
     return data
 
 
+def _language_errors(content: dict, *, language: str) -> list[str]:
+    """Fields of a raw script dict written in the wrong language.
+
+    Runs on the dict rather than the parsed Script because validation happens
+    before parsing, and a language slip should be corrected in the same
+    revision round as a pacing or structure problem.
+    """
+    from core import language_guard
+
+    problems: list[str] = []
+    for field in ("title", "thumbnail_text", "thumbnail_brief"):
+        problems += language_guard.violations(
+            content.get(field, ""), language=language, field=field
+        )
+    for section in content.get("sections") or []:
+        label = f"section {section.get('id', '?')}"
+        problems += language_guard.violations(
+            section.get("narration", ""), language=language,
+            field=f"{label} narration",
+        )
+        for index, slot in enumerate(section.get("slots") or [], start=1):
+            for key in ("title", "text", "headline", "caption"):
+                value = (slot.get("props") or {}).get(key)
+                if value:
+                    problems += language_guard.violations(
+                        str(value), language=language,
+                        field=f"{label} slot {index} {key}",
+                    )
+    return problems
+
+
 def _script_validation_errors(
     data: dict,
     *,
@@ -1121,6 +1153,9 @@ def _script_validation_errors(
     min_words: int | None = None,
     max_words: int | None = None,
     web_photos_only: bool = False,
+    #: Floor on how long one visual owns the screen. Bounds the slot count
+    #: from above, the way max_visual_hold_seconds bounds it from below.
+    min_visible_beat_seconds: float = 2.5,
 ) -> tuple[list[str], list[dict]]:
     sections = data.get("sections", [])
     errors = _title_banner_numbering_errors(data, numbering_order)
@@ -1209,6 +1244,44 @@ def _script_validation_errors(
                     f"{word_count} narration words; needs at least {minimum_slots} slots "
                     f"to keep beats under {max_visual_hold_seconds:.0f}s, so add more slots "
                     "or split the section."
+                ),
+            }
+            pacing_issues.append(issue)
+            errors.append(issue["message"])
+
+        # The other side of the same rule: the narration is the master
+        # timeline, so a section may not ask for more visuals than it can
+        # hold. A 12.3s section written with nine beats put every image on
+        # screen for 1.63s -- a flicker, not an illustration. Bounded here
+        # rather than at render time on purpose: dropping a slot later would
+        # leave a neighbouring image covering narration it does not
+        # illustrate, which is the alignment this rule exists to protect.
+        # Computed on the same margin-adjusted duration as the minimum above.
+        # Using the bare estimate here made the two bounds disagree: a 12.3s
+        # section wanted at least 5 slots and at most 4, which no script can
+        # satisfy and which would have rejected every revision until the
+        # attempts ran out. Clamped to the minimum for the same reason -- the
+        # hold cap is a hard render requirement, the floor is a quality
+        # preference, and the cap wins where a short section cannot have both.
+        maximum_slots = max(
+            minimum_slots,
+            maximum_visual_slots_for_duration(
+                planning_seconds, min_visible_beat_seconds, crossfade,
+            ),
+        )
+        if len(slots) > maximum_slots:
+            issue = {
+                "section_id": section_id,
+                "word_count": word_count,
+                "current_slots": len(slots),
+                "maximum_slots": maximum_slots,
+                "recommended_action": "merge_slots",
+                "message": (
+                    f"Section {section_id}: {len(slots)} slots is too many for "
+                    f"{word_count} narration words; at most {maximum_slots} fit "
+                    f"while holding each visual for {min_visible_beat_seconds:.1f}s, "
+                    f"so merge the shortest beats into their neighbours or split "
+                    f"the narration across more sections."
                 ),
             }
             pacing_issues.append(issue)
@@ -1544,7 +1617,14 @@ async def generate_script(
             crossfade=intra_crossfade,
             timing_profile=timing_profile,
             web_photos_only=config.image_sourcing.web_photos_only,
+            min_visible_beat_seconds=config.rendering_defaults.image_slot_min_duration,
         )
+        # One video, one language. An English run ended on an Arabic
+        # sentence because the English instructions carried an Arabic example;
+        # the config is fixed, but a prompt is only an instruction and the
+        # output is what ships. Treated as a validation error so the existing
+        # revision loop rewrites it, rather than as a late failure.
+        errors += _language_errors(content, language=config.language)
         return errors, pacing_issues, n_sections, total_words, min_words, max_words
 
     def _script_validation_feedback(

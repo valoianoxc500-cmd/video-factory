@@ -54,9 +54,14 @@ def test_both_documentary_channels_opted_in(channel):
 
 
 @pytest.mark.parametrize("channel", ["horror_stories", "football_news"])
-def test_photographs_still_carry_the_channel(channel):
-    """web_photos_only is unchanged: stills are still sourced from the web."""
-    assert _channel(channel)["image_sourcing"]["web_photos_only"] is True
+def test_each_channel_declares_how_its_stills_are_obtained(channel):
+    """Football sources photographs; Horror generates its beats."""
+    src = _channel(channel)["image_sourcing"]
+    if channel == "football_news":
+        assert src["web_photos_only"] is True
+        assert src.get("prefer_generated_visuals", False) is False
+    else:
+        assert src["prefer_generated_visuals"] is True
 
 
 def test_the_two_channels_stay_separate():

@@ -86,10 +86,28 @@ def test_horror_keeps_the_shared_vertical_render_contract():
     assert horror.video.fps == football.video.fps == 30
 
 
-def test_horror_uses_real_photos_only():
-    """No AI-generated photograph may stand in for a real case or place."""
+def test_horror_never_fabricates_a_real_case():
+    """Story beats may be generated; a real case may never be fabricated.
+
+    Horror now generates its scene visuals (prefer_generated_visuals), so the
+    old `web_photos_only` assertion no longer describes the channel. What must
+    never change is the refusal rule underneath it and the provenance flag
+    that keeps a generated frame from reading as a photograph.
+    """
+    from core import generated_visuals
+
     cfg = load_channel_config("horror_stories")
-    assert cfg.image_sourcing.web_photos_only is True
+    assert cfg.image_sourcing.prefer_generated_visuals is True
+    assert cfg.image_sourcing.generated_fallback_model == "fal-ai/flux/schnell"
+    # The guard that actually protects truthfulness.
+    assert not generated_visuals.is_safe_to_generate(
+        "archival photograph of the victim"
+    )
+    assert not generated_visuals.is_safe_to_generate("portrait of the suspect")
+    # Football is untouched and still photograph-only.
+    assert load_channel_config(
+        "football_news"
+    ).image_sourcing.web_photos_only is True
 
 
 def test_horror_paces_one_visual_per_beat():

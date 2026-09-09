@@ -190,8 +190,19 @@ def test_horror_handles_cases_with_no_photograph_of_the_person():
 
 # --- nothing was relaxed to achieve this -----------------------------------
 
-def test_web_photos_only_is_still_on():
-    assert load_channel_config("horror_stories").image_sourcing.web_photos_only is True
+def test_horror_generates_its_beats_and_still_refuses_real_cases():
+    """The flag changed; the truthfulness rule under it did not.
+
+    Horror now generates its story visuals rather than searching for them.
+    What must never change is that a real case is not fabricated -- enforced
+    by the refusal rules, not by the sourcing flag.
+    """
+    from core import generated_visuals
+
+    cfg = load_channel_config("horror_stories")
+    assert cfg.image_sourcing.prefer_generated_visuals is True
+    assert not generated_visuals.is_safe_to_generate("the police file on the case")
+    assert not generated_visuals.is_safe_to_generate("portrait of the victim")
 
 
 def test_no_illustration_fallback_was_opened():
@@ -209,7 +220,12 @@ def test_no_illustration_fallback_was_opened():
 
 def test_review_gate_and_hold_cap_are_untouched():
     cfg = load_channel_config("horror_stories")
-    assert cfg.review_thresholds.image_review_max_attempts == 2
+    # Raised from 2 to 3. The gate is unwaivable now, and a real run showed
+    # two passes cannot converge: attempt 1 rejected 9 beats, the retry fixed
+    # them, and attempt 2 then rejected 3 *different* beats it had previously
+    # passed. Three attempts give the loop the round it needs; the reviewer's
+    # criteria are untouched.
+    assert cfg.review_thresholds.image_review_max_attempts == 3
     assert cfg.rendering_defaults.max_visual_hold_seconds == 5.0
 
 

@@ -53,6 +53,19 @@
       ]
     },
     {
+      "service": "image_to_video",
+      "model": "fal-ai/wan/v2.2-5b/image-to-video",
+      "output_image_rate_usd_per_image": 0.15,
+      "reconciliation_supported": false,
+      "source_url": "https://fal.ai/models/fal-ai/wan/v2.2-5b/image-to-video",
+      "notes": [
+        "Animated Stories only. Football, Horror Stories and True Stories have no animation block and never reach this model.",
+        "fal publishes a flat $0.15 per video, up to 5 seconds at 720p/24fps, so one generated clip is one billable unit and the per-image rate field carries the per-clip price.",
+        "A fully animated 60s story is twelve clips, about $1.80. The channel's max_animation_usd ceiling (default $0.60) therefore animates the longest beats and holds the remaining scenes as stills rather than overspending.",
+        "reconciliation_supported is false because fal bills separately from Google Cloud."
+      ]
+    },
+    {
       "service": "generate_content_image",
       "model": "fal-ai/flux/schnell",
       "output_image_rate_usd_per_image": 0.009,

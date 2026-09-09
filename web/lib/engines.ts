@@ -30,11 +30,15 @@ export type ScriptLanguage = {
  * they are the same act -- a researched story turned into a narrated video --
  * differing only in what they promise about the truth of it.
  */
-export type EngineSection = "football" | "story";
+export type EngineSection = "football" | "story" | "animated";
 
 export const SECTIONS: { id: EngineSection; label: string }[] = [
   { id: "football", label: "Football" },
   { id: "story", label: "Story To Video" },
+  // A third standalone section, not a mode of the other two: an animated
+  // story is drawn and animated rather than sourced and narrated over
+  // photographs, and it runs its own generation path.
+  { id: "animated", label: "Animated Stories" },
 ];
 
 export type Engine = {
@@ -70,7 +74,11 @@ export type Engine = {
    */
   captionLanguages?: ScriptLanguage[];
   /** Applies the cinematic horror theme to the page. */
-  theme?: "horror" | "true" | "football";
+  theme?: "horror" | "true" | "football" | "animated";
+  /** Scene lengths this engine offers, in seconds. Animated engines only. */
+  sceneDurations?: number[];
+  /** Whether the page offers character-style controls. */
+  hasCharacterStyle?: boolean;
   /** Which narrator this engine speaks with, stated plainly in the UI. */
   voiceNote?: string;
 };
@@ -180,6 +188,40 @@ export const ENGINES: Engine[] = [
       "اختفاء عائلة سوديف",
       "قضية دي بي كوبر",
       "لغز سفينة ماري سيليست",
+    ],
+  },
+  {
+    slug: "animated_stories",
+    label: "Animated Stories",
+    section: "animated",
+    theme: "animated",
+    headline: "Your story, drawn and animated",
+    sub:
+      "Enter a story and the pipeline writes it, designs one character, draws " +
+      "every scene in that character's style, and animates the beats that " +
+      "carry motion.",
+    blurb:
+      "Premium stick-figure animation: one consistent character, cinematic backgrounds, real movement.",
+    inputLabel: "Story or idea",
+    placeholder: "e.g. The night shift nobody else applied for",
+    submitLabel: "Create Animated Story",
+    voiceNote:
+      "Scenes are drawn with FLUX Schnell and animated with a fal.ai image-to-video model.",
+    voiceLanguages: [AR, EN],
+    captionLanguages: CAPTION_LANGUAGES,
+    sceneDurations: [3, 4, 5, 6],
+    hasCharacterStyle: true,
+    styles: [
+      {
+        slug: "stick_figure",
+        label: "Stick Figure",
+        hint: "Large round white heads, expressive faces, thin bodies, colourful clothing, cinematic backgrounds.",
+      },
+    ],
+    examples: [
+      "The night shift nobody else applied for",
+      "The boy who found a door in the school basement",
+      "The delivery driver who kept getting the same address",
     ],
   },
 ];

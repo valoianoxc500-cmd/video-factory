@@ -140,7 +140,7 @@
   },
   "image_sourcing": {
     "generation_model": "gemini-2.5-flash-image",
-    "web_photos_only": true,
+    "web_photos_only": false,
     "generate_info_slide_illustrations": false,
     "generate_info_card_illustrations": false,
     "style_prompt_suffix": "cinematic photorealistic still, shot on 35mm film, natural available light, shallow depth of field, true-to-period wardrobe and setting, muted desaturated palette, documentary realism, no text, no watermark, no logo, no illustration, no painting, no CGI look",
@@ -155,7 +155,8 @@
     "scene_audio": true,
     "open_library_budget": 20,
     "generate_when_rejected": true,
-    "max_generated_when_rejected": 8
+    "max_generated_when_rejected": 8,
+    "prefer_generated_visuals": true
   },
   "youtube": {
     "category_id": "27",
@@ -278,7 +279,7 @@
       "language": "en",
       "script_style": {
         "tone": "Cinematic English horror narration: intimate, deliberate, and escalating. Short sentences. Concrete detail over adjectives. Never campy.",
-        "instructions": "Write English horror narration with a complete dramatic arc: a hook in the first sentence that plants a specific unsettling question, rising suspense with escalating detail, a climax where the worst thing is revealed, and an ending that resolves the emotional beat even when the case itself is unsolved.\n\nSTORY TYPE drives how truth is handled. The plan's story_type is one of true_story, paranormal, urban_legend, or custom_horror.\n\nFor true_story: this is a real case involving real people. Use ONLY the research brief. State [VERIFIED] facts plainly. Attribute [REPORTED] claims (\"according to reports\", \"witnesses said\"). Mark [UNVERIFIED] material explicitly as unconfirmed, or omit it. Never invent a name, a date, a quote, a cause of death, or a culprit. If the case is unsolved, say so; do not manufacture a resolution.\n\nFor paranormal and urban_legend: these are accounts and folklore, not established fact. Narrate them as what people claim, tell or believe (\"the story goes\", \"locals claim\"), and say plainly when there is no evidence. Never assert a supernatural event as a documented fact.\n\nFor custom_horror: this is openly fiction. Do not dress it as a real case, do not attach it to a real place, person or crime, and do not use documentary framing.\n\nEvery visual slot must name a real, photographable subject tied to the sentence it accompanies -- the actual place, building, road, object, document or landscape being described. When nothing real can be shown, ask for an atmospheric shot of the setting rather than a stand-in for a person or event.\n\nCLOSING QUESTION. The final spoken sentence of the last section MUST be a short question to the viewer, built from this story's own unresolved detail. It has to be answerable as an opinion -- the viewer should feel they could argue either side -- and it must be specific to this case, not a phrase that would fit any story. Name the real people, places or facts already established in the narration and pose the open question the case leaves behind: 'برأيك... هل مات دي بي كوبر ليلة القفزة، أم أنه عاش واختفى بهوية جديدة؟'. Keep it to one sentence, in the same calm voice as the rest of the narration, and end it with ؟. Introduce NO new fact, name, date, theory or claim in it -- ask only about what the video has already established, and never imply the case is solved. Do NOT end on a like, follow or subscribe request; the question is the ending."
+        "instructions": "Write English horror narration with a complete dramatic arc: a hook in the first sentence that plants a specific unsettling question, rising suspense with escalating detail, a climax where the worst thing is revealed, and an ending that resolves the emotional beat even when the case itself is unsolved.\n\nSTORY TYPE drives how truth is handled. The plan's story_type is one of true_story, paranormal, urban_legend, or custom_horror.\n\nFor true_story: this is a real case involving real people. Use ONLY the research brief. State [VERIFIED] facts plainly. Attribute [REPORTED] claims (\"according to reports\", \"witnesses said\"). Mark [UNVERIFIED] material explicitly as unconfirmed, or omit it. Never invent a name, a date, a quote, a cause of death, or a culprit. If the case is unsolved, say so; do not manufacture a resolution.\n\nFor paranormal and urban_legend: these are accounts and folklore, not established fact. Narrate them as what people claim, tell or believe (\"the story goes\", \"locals claim\"), and say plainly when there is no evidence. Never assert a supernatural event as a documented fact.\n\nFor custom_horror: this is openly fiction. Do not dress it as a real case, do not attach it to a real place, person or crime, and do not use documentary framing.\n\nEvery visual slot must name a real, photographable subject tied to the sentence it accompanies -- the actual place, building, road, object, document or landscape being described. When nothing real can be shown, ask for an atmospheric shot of the setting rather than a stand-in for a person or event.\n\nCLOSING QUESTION. The final spoken sentence of the last section MUST be a short question to the viewer, built from this story's own unresolved detail. It has to be answerable as an opinion -- the viewer should feel they could argue either side -- and it must be specific to this case, not a phrase that would fit any story. Name the real people, places or facts already established in the narration and pose the open question the case leaves behind: 'So what do you think -- did the keeper really see a ship that night, or had sixty years of fog finally caught up with him?'. Keep it to one sentence, in the same calm voice as the rest of the narration, and end it with ?. Introduce NO new fact, name, date, theory or claim in it -- ask only about what the video has already established, and never imply the case is solved. Do NOT end on a like, follow or subscribe request; the question is the ending."
       },
       "voice": {
         "language": "en-US",
@@ -292,6 +293,21 @@
       "business_strategy": {
         "cta_rules": [
           "End with a natural closing line. Use the Part 2 call to action -- \"If you want part two, tell me in the comments.\" -- ONLY when the story genuinely leaves an unresolved thread worth a second video: another victim, a later development, a second case. If the story is complete, close on the story itself and do not promise a part two."
+        ]
+      },
+      "closing_question_fallback": "What do you think really happened?",
+      "youtube": {
+        "tags": [
+          "horror",
+          "mystery",
+          "unsolved",
+          "true crime",
+          "unexplained",
+          "disappearance",
+          "horror stories",
+          "scary stories",
+          "mystery",
+          "unsolved mysteries"
         ]
       }
     }

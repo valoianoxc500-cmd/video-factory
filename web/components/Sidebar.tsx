@@ -23,6 +23,8 @@ const Icon = {
     "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.4-3a7.4 7.4 0 0 0-.1-1.1l2-1.6-2-3.4-2.4 1a7.5 7.5 0 0 0-1.9-1.1L14.6 3H9.4l-.4 2.8c-.7.3-1.3.6-1.9 1.1l-2.4-1-2 3.4 2 1.6a7.4 7.4 0 0 0 0 2.2l-2 1.6 2 3.4 2.4-1c.6.5 1.2.8 1.9 1.1l.4 2.8h5.2l.4-2.8c.7-.3 1.3-.6 1.9-1.1l2.4 1 2-3.4-2-1.6c.1-.4.1-.7.1-1.1Z",
   analyzer:
     "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14Zm10 17-5.2-5.2M8.5 11h5M11 8.5v5",
+  animated:
+    "M12 3a2.2 2.2 0 1 0 0 4.4A2.2 2.2 0 0 0 12 3Zm0 4.4v6.2m0 0-3 6.4m3-6.4 3 6.4M7 10.2l5 1.4 5-1.4",
   credits:
     "M3 8h18v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8Zm0 0 2-3h14l2 3M8 13h4",
 } as const;
@@ -109,6 +111,20 @@ export function Sidebar({ email }: { email: string }) {
             </span>
           </Link>
         </span>
+
+        {/* A third standalone section. Football and Story To Video above are
+            untouched; this sits beside them, not inside them. */}
+        <Link
+          href="/dashboard/animated"
+          data-surface="animated"
+          className={is("/dashboard/animated") ? "active" : ""}
+        >
+          <NavIcon d={Icon.animated} />
+          <span>
+            Animated Stories
+            <span className="nav-sub">Stick-figure scenes, animated</span>
+          </span>
+        </Link>
 
         <Link
           href="/dashboard/clipping"

@@ -280,10 +280,17 @@ def test_football_generation_is_untouched():
 
 
 @pytest.mark.parametrize("slug", ["horror_stories", "true_stories"])
-def test_real_media_is_still_preferred(slug):
+def test_story_beats_are_generated_and_licensed_sources_remain(slug):
+    """Story channels generate their beats; the licensed tiers stay wired.
+
+    Changed deliberately: the reviewer kept rejecting keyword-matched stock
+    ("a movie poster", "a Greek flag and a crowd") while every generated frame
+    passed. Generation is now first for these two channels only -- a slot that
+    names its own photo source still gets a real photograph, and the
+    open-library tier is still configured.
+    """
     cfg = load_channel_config(slug)
-    # Generation remains a fallback tier, not a first resort.
-    assert cfg.image_sourcing.web_photos_only is True
+    assert cfg.image_sourcing.prefer_generated_visuals is True
     assert cfg.image_sourcing.open_library_fallback is True
 
 

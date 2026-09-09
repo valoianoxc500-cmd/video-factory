@@ -1135,3 +1135,82 @@ body {
 /* The video cards on Clipping are 16:9 frames; without a thumbnail they were
    mostly empty. A floor rather than a fixed height, so real art still fills. */
 .chan-grid .chan { min-height: 128px; }
+
+/* =====================================================================
+   Animated Stories
+   ---------------------------------------------------------------------
+   A third identity beside Football's green and the two story channels'
+   red and blue. Warmer and higher-key than either: this is drawn, not
+   photographed, and the section should read that way before a word.
+   ===================================================================== */
+
+[data-engine="animated_stories"], [data-surface="animated"] {
+  --accent: #FFC24B;
+  --accent-ink: #1A1203;
+}
+
+/* The masthead does not sit on a photograph: a drawn section should not
+   borrow a still. Ink-and-paper gradient with a soft spotlight instead. */
+.anim-head::before { opacity: .18; filter: saturate(.3) brightness(.35); }
+.anim-head::after {
+  background:
+    radial-gradient(760px 380px at 18% 14%, rgba(255, 194, 75, .22), transparent 64%),
+    radial-gradient(620px 340px at 84% 86%, rgba(139, 107, 255, .16), transparent 62%),
+    linear-gradient(180deg, rgba(6, 8, 11, .62) 0%, rgba(6, 8, 11, .9) 62%, var(--sa-bg) 100%);
+}
+
+/* ── cost, shown before anything is spent ──────────────────────── */
+
+.cost-panel {
+  margin: 22px 0 4px;
+  padding: 16px 18px;
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-deep));
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.cost-row {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 16px; padding: 5px 0; font-size: 13px; color: var(--sa-dim);
+}
+.cost-row strong { color: var(--sa-text); font-variant-numeric: tabular-nums; }
+.cost-total {
+  margin-top: 8px; padding-top: 12px;
+  border-top: 1px solid var(--sa-line);
+  font-size: 14px;
+}
+.cost-total strong {
+  font-family: var(--sa-display); font-size: 19px; font-weight: 740;
+  color: var(--accent);
+}
+
+/* ── per-scene status ──────────────────────────────────────────── */
+
+.scene-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.scene-row {
+  display: grid;
+  grid-template-columns: 26px 1fr auto auto;
+  align-items: center; gap: 12px;
+  padding: 9px 12px;
+  border-radius: var(--r-sm);
+  background: var(--bg-deep);
+  border: 1px solid var(--sa-line);
+  font-size: 12.5px;
+}
+.scene-idx {
+  display: grid; place-items: center;
+  width: 22px; height: 22px; border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent); font-weight: 680; font-size: 11px;
+}
+.scene-beat {
+  color: var(--sa-dim); min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.scene-time {
+  color: var(--sa-faint); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .scene-row { grid-template-columns: 22px 1fr auto; }
+  .scene-time { display: none; }
+}

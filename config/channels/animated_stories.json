@@ -1,6 +1,6 @@
 {
-  "channel_name": "Horror Stories",
-  "channel_id": "horror_stories",
+  "channel_name": "Animated Stories",
+  "channel_id": "animated_stories",
   "language": "ar",
   "content_mode": "visual",
   "style": {
@@ -40,10 +40,19 @@
     "vertical_thumbnail": true
   },
   "niche": {
-    "category": "Horror storytelling",
-    "focus": "Short Arabic horror videos: true crime and unexplained cases, paranormal accounts, urban legends, and original horror fiction.",
-    "audience": "Arabic speakers who watch horror and true-crime shorts",
-    "content_style": "Cinematic, suspenseful, escalating, honest about what is known"
+    "category": "animation",
+    "focus": "animated stick-figure story shorts",
+    "audience": "viewers who want a short story told visually, not a documentary",
+    "content_style": "A single narrated story told in animated stick-figure scenes. Every beat is a drawn scene with one consistent main character.",
+    "example_topics": [
+      "The delivery driver who kept getting the same address",
+      "The boy who found a door in the school basement",
+      "The night shift nobody else applied for"
+    ],
+    "avoid_topics": [
+      "Real crimes involving real named victims",
+      "Anything presented as a documented true event"
+    ]
   },
   "video": {
     "target_duration_minutes": 1,
@@ -90,7 +99,7 @@
       "example": "5 Details From This Disappearance That Were Never Explained",
       "numbering_order": "ascending",
       "allowed_thumbnail_strategies": [
-        "horror_case_thumbnail"
+        "animated_story_thumbnail"
       ],
       "narrative_hooks": [
         "Open on the single strangest detail, then work back through the rest in order.",
@@ -104,7 +113,7 @@
       "pacing": "The question -> what the record actually establishes -> what was only ever claimed or theorised -> what is still unanswered today.",
       "example": "Why This Vanishing Was Never Solved",
       "allowed_thumbnail_strategies": [
-        "horror_case_thumbnail"
+        "animated_story_thumbnail"
       ],
       "narrative_hooks": [
         "Open with the theory everyone believes, then show what the evidence does not support.",
@@ -118,7 +127,7 @@
       "pacing": "Ordinary setting -> the first thing that is wrong -> escalation as the situation slips out of control -> the reveal or the silence where a resolution should be.",
       "example": "The Night He Stepped Out Of The Plane And Vanished",
       "allowed_thumbnail_strategies": [
-        "horror_case_thumbnail"
+        "animated_story_thumbnail"
       ],
       "narrative_hooks": [
         "Open in the last ordinary minute before anything went wrong.",
@@ -144,15 +153,15 @@
     "web_photos_only": false,
     "generate_info_slide_illustrations": false,
     "generate_info_card_illustrations": false,
-    "style_prompt_suffix": "cinematic photorealistic still, shot on 35mm film, natural available light, shallow depth of field, true-to-period wardrobe and setting, muted desaturated palette, documentary realism, no text, no watermark, no logo, no illustration, no painting, no CGI look",
-    "illustration_style_prompt_suffix": "clean educational illustration, simple shapes, warm balanced colors, no text",
+    "style_prompt_suffix": "Stick figure animation style: large round white head, expressive cartoon eyes with visible eyebrows and an expressive mouth, thin stick-figure limbs, colourful thematic clothing, cinematic cartoon environment, rich detailed background, dramatic lighting, saturated colours, professional animated series look, no text, no watermark",
+    "illustration_style_prompt_suffix": "Stick figure animation style, clean vector line work, saturated colours, no text",
     "allow_generated_fallback": true,
     "max_generated_fallback_images": 40,
     "generated_fallback_model": "fal-ai/flux/schnell",
-    "allow_video_broll": true,
+    "allow_video_broll": false,
     "max_broll_ratio": 0.34,
     "complete_over_coverage": true,
-    "open_library_fallback": true,
+    "open_library_fallback": false,
     "scene_audio": true,
     "open_library_budget": 20,
     "generate_when_rejected": true,
@@ -162,16 +171,12 @@
   "youtube": {
     "category_id": "27",
     "tags": [
-      "horror",
-      "mystery",
-      "unsolved",
-      "true crime",
-      "unexplained",
-      "disappearance",
-      "رعب",
-      "قصص رعب",
-      "غموض",
-      "قضايا غامضة"
+      "animated story",
+      "stick figure",
+      "animation",
+      "short story",
+      "animated shorts",
+      "storytime"
     ],
     "title_formats": [
       {
@@ -267,14 +272,15 @@
   },
   "thumbnail_strategies": [
     {
-      "name": "horror_case_thumbnail",
-      "instruction": "Create a dark, cinematic true-mystery thumbnail for THIS specific case.\nSUBJECT: exactly one focal subject, drawn from the real case -- the actual person, the actual object, the actual aircraft, vehicle, building, or location named in the narration. When a reliable photograph or a real archival likeness of that subject exists, base the composition on it. When it does not, use the real place or object instead; never substitute a stand-in person.\nCOMPOSITION: dark, high-contrast, cinematic. Deep shadow with a single directional light on the subject. Muted, desaturated palette -- cold blues, greys and blacks with at most one warm accent. Heavy negative space. Shallow depth of field. Unsettling stillness rather than gore, shock imagery or jump-scare faces.\nHONESTY: this is a real unsolved case, so the image must not fabricate evidence. Do NOT invent documents, police files, ransom notes, tickets, news clippings, photographs of unidentified people, crime-scene imagery, or anything that could be mistaken for a genuine historical record or a real forensic artefact. Do not depict a named real person committing a crime. Do not imply the case is solved when it is not.\nTEXT: add no captions, headlines, dates, arrows, circles, watermarks, logos or channel branding -- the Arabic headline is composited separately. Keep the bottom third and the centre-right visually simple and free of detail so right-to-left Arabic text stays readable over it.\nThe thumbnail must depict the story actually being narrated. A generic horror image that does not show this case's subject is a failure."
+      "name": "animated_story_thumbnail",
+      "instruction": "A single dramatic moment from the story drawn in the channel's stick figure style: large round white head, expressive face, colourful clothing, rich cinematic background, saturated colours. The character must match the story's character sheet. Leave the lower third simple -- the headline is composited there in code. Render NO text of any kind in the image."
     }
   ],
-  "closing_question_fallback": "ما تفسيرك لهذه القصة؟",
+  "closing_question_fallback": "What would you have done?",
   "language_variants": {
     "ar": {
-      "language": "ar"
+      "language": "ar",
+      "closing_question_fallback": "ماذا كنت ستفعل؟"
     },
     "en": {
       "language": "en",
@@ -298,7 +304,7 @@
           "End with a natural closing line. Use the Part 2 call to action -- \"If you want part two, tell me in the comments.\" -- ONLY when the story genuinely leaves an unresolved thread worth a second video: another victim, a later development, a second case. If the story is complete, close on the story itself and do not promise a part two."
         ]
       },
-      "closing_question_fallback": "What do you think really happened?",
+      "closing_question_fallback": "What would you have done?",
       "youtube": {
         "tags": [
           "horror",
@@ -314,5 +320,16 @@
         ]
       }
     }
+  },
+  "animation": {
+    "enabled": true,
+    "model": "fal-ai/wan/v2.2-5b/image-to-video",
+    "cost_per_clip_usd": 0.15,
+    "max_animation_usd": 0.6,
+    "min_clip_seconds": 3.0,
+    "max_clip_seconds": 6.0,
+    "resolution": "720p",
+    "max_attempts_per_scene": 2,
+    "still_fallback": true
   }
 }

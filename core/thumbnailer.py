@@ -8,7 +8,7 @@ from PIL import Image, ImageOps
 import clients
 import prompts
 from core.reviewer import review_gate
-from core import thumbnail_source
+from core import language_guard, thumbnail_source
 from core.thumbnail_text import draw_headline, is_rtl_text
 from core.utils import Script, ChannelConfig, ThumbnailStrategyConfig
 from settings import ASSETS_DIR
@@ -141,6 +141,22 @@ async def create_thumbnail(
     content_context = _thumbnail_content_context(script)
     logger.info(f"Thumbnail strategy: {strategy.name}")
 
+    # The headline is composited in code, so it is exactly the string the
+    # script wrote -- but the script is what has to be in the right language.
+    # Checked before the artwork is paid for rather than after.
+    language_problems = language_guard.violations(
+        script.thumbnail_text, language=config.language, field="thumbnail_text"
+    ) + language_guard.violations(
+        script.thumbnail_brief, language=config.language, field="thumbnail_brief"
+    )
+    for problem in language_problems:
+        logger.error(f"[thumbnail] {problem}")
+    if language_problems:
+        raise ValueError(
+            f"Thumbnail text is not in the video's language "
+            f"({config.language}): {language_problems[0]}"
+        )
+
     # The photograph the thumbnail is built on. Chosen once and reused across
     # every review attempt: a regeneration should change the composition, not
     # silently change who is on the cover.
@@ -238,9 +254,19 @@ async def _generate_ai_thumbnail(
     source_people: list[list[str]] | None = None,
     depicts_person: bool = False,
 ) -> None:
-    # Image models cannot spell right-to-left script, so for those languages
-    # the artwork is generated text-free and the headline composited below.
-    overlay_text = is_rtl_text(thumbnail_text)
+    # The image model never renders text. Any of it.
+    #
+    # This used to composite only for right-to-left scripts, on the reasoning
+    # that Latin was safe. It is not: asked to draw an English headline the
+    # model wrote "THE GHOST SHIP LOG" correctly and then hallucinated a line
+    # of Arabic-shaped glyphs underneath it, on an English video. final_review
+    # caught it as "nonsensical AI-generated Arabic text".
+    #
+    # Generating text-free artwork and compositing the exact headline in code
+    # removes the failure mode rather than narrowing it: the text on the
+    # thumbnail is now always the string the script wrote, in the video's own
+    # language, rendered by us.
+    overlay_text = True
     prompt = prompts.thumbnail_generation_prompt(
         title=title,
         thumbnail_text=thumbnail_text,
