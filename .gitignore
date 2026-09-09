@@ -38,6 +38,8 @@ assets/channels/senior_health/
 rendering/remotion/node_modules/
 rendering/remotion/dist/
 rendering/remotion/out/
+# Compiled TypeScript the Remotion test run emits. Build output, not source.
+rendering/remotion/.test-build/
 rendering/remotion/.remotion/
 rendering/remotion/public/_sections/
 rendering/remotion/public/_preview/
