@@ -178,8 +178,8 @@ def test_generation_is_still_available_to_other_channels(monkeypatch, tmp_path):
     assert generated, "the last-resort generator was removed for every channel"
 
 
-def test_horror_now_generates_its_story_beats():
-    """Horror moved from web-photo-only to generation-first."""
+def test_horror_uses_real_media_before_its_generated_fallback():
+    """Horror keeps FLUX available without displacing real media."""
     cfg = image_sourcer_config()
-    assert cfg.image_sourcing.prefer_generated_visuals is True
+    assert cfg.image_sourcing.prefer_generated_visuals is False
     assert cfg.image_sourcing.web_photos_only is False

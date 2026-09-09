@@ -280,8 +280,8 @@ def test_rescue_is_skipped_when_no_section_is_thin(tmp_path, monkeypatch):
 
 # --- settings that must survive this fix -----------------------------------
 
-def test_horror_generates_its_story_beats():
-    assert HORROR.image_sourcing.prefer_generated_visuals is True
+def test_horror_uses_real_media_before_its_generated_fallback():
+    assert HORROR.image_sourcing.prefer_generated_visuals is False
 
 
 def test_the_hold_cap_is_unchanged():

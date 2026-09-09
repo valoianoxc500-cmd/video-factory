@@ -767,6 +767,16 @@ def _image_source_for_slot(
         return "serper"
     if (
         config is not None
+        and config.channel_id == "horror_stories"
+        and source == "ai_gen"
+        and not preferred_photo_source
+    ):
+        # A script may call a beat `ai_photo`, but Horror's channel contract
+        # is still real-first. Its guarded FLUX pass will revisit this exact
+        # beat after the photo and subject-rescue tiers have genuinely missed.
+        return "serper"
+    if (
+        config is not None
         and config.image_sourcing.prefer_generated_visuals
         and not preferred_photo_source
     ):
@@ -3291,6 +3301,26 @@ async def _source_single_image(
             image_source in {"pexels", "serper"}
             and config.image_sourcing.open_library_fallback
         ):
+            # Horror starts on a broad web-photo search, but Pexels is a
+            # distinct licensed catalogue rather than a duplicate query. Try
+            # it before the wider free/open sources so a genuine, reviewed
+            # atmospheric visual wins before FLUX is considered.
+            if config.channel_id == "horror_stories" and image_source == "serper":
+                try:
+                    if await _search_pexels(
+                        keywords,
+                        prompt,
+                        output_path,
+                        client,
+                        seen_hashes,
+                        tuple(config.video.resolution),
+                        narration=narration,
+                    ):
+                        logger.info(f"Sourced {output_path.name} from Pexels")
+                        return "pexels"
+                except Exception as e:
+                    logger.warning(f"{output_path.name}: Pexels fallback failed: {e}")
+
             try:
                 if await _search_open_libraries(
                     keywords,
@@ -3316,6 +3346,13 @@ async def _source_single_image(
         if not allow_generation_fallback:
             return None
         if config.test.preview_ai_image_prompts:
+            return None
+
+        if config.channel_id == "horror_stories":
+            # Horror's FLUX pass is deliberately later than every real-media
+            # tier and applies the shared refusal policy for real people,
+            # archival material and undocumented events. Do not let this
+            # convenience generation path bypass those truthfulness gates.
             return None
 
     if config.test.preview_ai_image_prompts:

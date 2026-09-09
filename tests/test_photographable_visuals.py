@@ -190,17 +190,17 @@ def test_horror_handles_cases_with_no_photograph_of_the_person():
 
 # --- nothing was relaxed to achieve this -----------------------------------
 
-def test_horror_generates_its_beats_and_still_refuses_real_cases():
-    """The flag changed; the truthfulness rule under it did not.
+def test_horror_sources_real_beats_first_and_still_refuses_real_cases():
+    """The truthfulness rule remains strict through the generated fallback.
 
-    Horror now generates its story visuals rather than searching for them.
+    Horror now searches for real story visuals before its FLUX fallback.
     What must never change is that a real case is not fabricated -- enforced
     by the refusal rules, not by the sourcing flag.
     """
     from core import generated_visuals
 
     cfg = load_channel_config("horror_stories")
-    assert cfg.image_sourcing.prefer_generated_visuals is True
+    assert cfg.image_sourcing.prefer_generated_visuals is False
     assert not generated_visuals.is_safe_to_generate("the police file on the case")
     assert not generated_visuals.is_safe_to_generate("portrait of the victim")
 

@@ -144,7 +144,7 @@
     "web_photos_only": false,
     "generate_info_slide_illustrations": false,
     "generate_info_card_illustrations": false,
-    "style_prompt_suffix": "cinematic photorealistic still, shot on 35mm film, natural available light, shallow depth of field, true-to-period wardrobe and setting, muted desaturated palette, documentary realism, no text, no watermark, no logo, no illustration, no painting, no CGI look",
+    "style_prompt_suffix": "cinematic dark horror still, atmospheric practical lighting, deep shadows, restrained desaturated palette, story-specific setting and period details, 35mm film texture, natural composition, no text, no watermark, no logo, no gore, no illustration, no painting, no CGI look",
     "illustration_style_prompt_suffix": "clean educational illustration, simple shapes, warm balanced colors, no text",
     "allow_generated_fallback": true,
     "max_generated_fallback_images": 40,
@@ -157,7 +157,7 @@
     "open_library_budget": 20,
     "generate_when_rejected": true,
     "max_generated_when_rejected": 8,
-    "prefer_generated_visuals": true
+    "prefer_generated_visuals": false
   },
   "youtube": {
     "category_id": "27",

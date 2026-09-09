@@ -279,11 +279,11 @@ def test_football_generation_is_untouched():
     assert "fal" not in cfg.image_sourcing.generated_fallback_model
 
 
-def test_story_channels_keep_their_distinct_visual_priority():
-    """Horror is fictional; True Stories must exhaust real sourcing first."""
+def test_story_channels_keep_real_media_before_generated_fallbacks():
+    """Documentary and Horror both exhaust real sourcing before FLUX."""
     horror = load_channel_config("horror_stories")
     true_stories = load_channel_config("true_stories")
-    assert horror.image_sourcing.prefer_generated_visuals is True
+    assert horror.image_sourcing.prefer_generated_visuals is False
     assert true_stories.image_sourcing.prefer_generated_visuals is False
     assert horror.image_sourcing.open_library_fallback is True
     assert true_stories.image_sourcing.open_library_fallback is True

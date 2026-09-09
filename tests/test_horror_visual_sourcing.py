@@ -76,11 +76,11 @@ def test_a_missing_exact_photo_falls_back_to_real_archival_material():
 
 # --- the settings the fix must not have weakened ---------------------------
 
-def test_horror_generates_its_beats_but_never_a_real_case():
+def test_horror_sources_real_beats_first_but_never_generates_a_real_case():
     from core import generated_visuals
 
     cfg = load_channel_config("horror_stories")
-    assert cfg.image_sourcing.prefer_generated_visuals is True
+    assert cfg.image_sourcing.prefer_generated_visuals is False
     assert not generated_visuals.is_safe_to_generate(
         "archival photograph of the scene"
     )

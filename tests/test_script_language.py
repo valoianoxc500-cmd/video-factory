@@ -77,7 +77,7 @@ def test_safety_and_sourcing_settings_are_identical_in_both(code):
     cfg = load_channel_config("horror_stories", language=code)
     # Both language variants source their visuals the same way: what changes
     # between ar and en is the words, never the sourcing or safety policy.
-    assert cfg.image_sourcing.prefer_generated_visuals is True
+    assert cfg.image_sourcing.prefer_generated_visuals is False
     assert cfg.image_sourcing.web_photos_only is False
     assert cfg.rendering_defaults.max_visual_hold_seconds == 5.0
     assert cfg.video.resolution == [1080, 1920]
