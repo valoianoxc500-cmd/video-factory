@@ -141,12 +141,8 @@ def test_update_without_a_library_block_is_still_valid(monkeypatch):
     assert "library" not in client.posts[0]
 
 
-def test_a_refused_registration_does_not_strand_a_finished_job():
-    """An unowned job is refused by the RPC; the job must still complete.
-
-    Without the retry the app registers before it marks done, so a refusal
-    would leave a rendered, uploaded video parked at 99% forever.
-    """
+def test_a_refused_registration_keeps_completion_retryable():
+    """A customer must not see complete before their Library is consistent."""
     client = FakeClient(fail_with_library=True)
     with_library = worker_mod.post_update(
         client, "job-1", attempts=1, status="done",
@@ -154,11 +150,8 @@ def test_a_refused_registration_does_not_strand_a_finished_job():
     )
     assert with_library is False
 
-    without_library = worker_mod.post_update(
-        client, "job-1", attempts=1, status="done"
-    )
-    assert without_library is True
-    assert "library" not in client.posts[-1]
+    assert len(client.posts) == 1
+    assert "library" in client.posts[-1]
 
 
 # --- the wiring itself -----------------------------------------------------

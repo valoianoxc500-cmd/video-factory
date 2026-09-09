@@ -912,6 +912,10 @@ class Checkpoint(BaseModel):
     workspace_dir: str = ""
     stage_timings: dict[str, dict[str, Any]] = Field(default_factory=dict)
     total_duration_seconds: float | None = None
+    # Kept in checkpoint.json so old workspaces remain readable and a worker
+    # restart has the exact recovery state beside its already-finished assets.
+    run_attempt: dict[str, Any] = Field(default_factory=dict)
+    fallback_contract_version: int = 1
     review_log: dict[str, Any] = Field(default_factory=lambda: {
         "script_review": None,
         "image_review": None,
@@ -1060,9 +1064,14 @@ def select_least_recent(
 
 # ── Workspace management ─────────────────────────────────────────
 
-def create_workspace(channel_slug: str) -> Path:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    ws = WORKSPACE_DIR / f"{channel_slug}_{timestamp}_{uuid.uuid4().hex[:6]}"
+def create_workspace(channel_slug: str, run_id: str | None = None) -> Path:
+    """Create a legacy timestamp workspace or reopen a stable job workspace."""
+    if run_id:
+        from core.reliability import deterministic_workspace
+        ws = deterministic_workspace(WORKSPACE_DIR, channel_slug, run_id)
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        ws = WORKSPACE_DIR / f"{channel_slug}_{timestamp}_{uuid.uuid4().hex[:6]}"
     for sub in ("images/raw", "images/ready", "audio/sections", "frames", "videos/raw", "data"):
         (ws / sub).mkdir(parents=True, exist_ok=True)
     return ws

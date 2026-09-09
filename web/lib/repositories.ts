@@ -12,6 +12,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { customerJobMessage, customerSafeError } from "./customer-errors";
 
 /** Channel slugs the pipeline can actually run. */
 export const CHANNELS = [
@@ -132,6 +133,16 @@ export interface JobRow {
   updated_at: string;
 }
 
+/** Strip diagnostics at the customer repository boundary. Raw job columns
+ * remain untouched for worker/admin diagnostics. */
+function customerJob(row: JobRow): JobRow {
+  return {
+    ...row,
+    message: customerJobMessage(row.status, row.stage, row.message),
+    error: row.error ? customerSafeError(row.error) : null,
+  };
+}
+
 const JOB_FIELDS =
   "id, topic, status, progress, stage, message, title, error, " +
   "channel_slug, style, language, caption_language, created_at, updated_at";
@@ -146,7 +157,7 @@ export class JobRepository {
       .order("created_at", { ascending: false })
       .limit(limit);
     if (error) throw new RepositoryError(error.message);
-    return (data ?? []) as unknown as JobRow[];
+    return ((data ?? []) as unknown as JobRow[]).map(customerJob);
   }
 
   async getOwned(id: string): Promise<JobRow> {
@@ -157,7 +168,7 @@ export class JobRepository {
       .maybeSingle();
     if (error) throw new RepositoryError(error.message);
     if (!data) throw new NotFoundError("That job does not exist.");
-    return data as unknown as JobRow;
+    return customerJob(data as unknown as JobRow);
   }
 
   /**
@@ -184,14 +195,18 @@ export class JobRepository {
     const { data, error } = await this.db
       .from("jobs")
       .update({
-        status: "error",
-        message: "Abandoned",
-        error:
-          "The worker stopped reporting progress on this job. It may have " +
-          "been interrupted or the machine restarted. Start it again.",
+        // A queued job has a deterministic checkpoint workspace now, so a
+        // stale heartbeat is a bounded recovery opportunity, not a terminal
+        // customer failure. The worker resumes completed stages in place.
+        status: "queued",
+        stage: "queued",
+        message: "Saved progress is ready to resume.",
+        error: null,
         updated_at: new Date().toISOString(),
       })
-      .in("status", ["running", "queued"])
+      // Queued work can legitimately wait for capacity. Only a worker that
+      // claimed a job and then stopped heartbeating needs recovery.
+      .eq("status", "running")
       .lt("updated_at", cutoff)
       .select("id");
 
@@ -212,7 +227,8 @@ export class JobRepository {
       .order("created_at", { ascending: false })
       .limit(1);
     if (error) throw new RepositoryError(error.message);
-    return (((data ?? [])[0] as unknown) as JobRow) ?? null;
+    const row = ((data ?? [])[0] as unknown) as JobRow | undefined;
+    return row ? customerJob(row) : null;
   }
 
   /**

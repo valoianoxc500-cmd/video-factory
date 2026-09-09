@@ -237,6 +237,7 @@ async def run_pipeline(
     allow_review_failures: set[str] | None = None,
     language: str | None = None,
     caption_language: str | None = None,
+    run_id: str | None = None,
 ) -> None:
     """Run the full video factory pipeline."""
     logger = setup_logging(channel_slug)
@@ -279,6 +280,15 @@ async def run_pipeline(
             logger.info(f"Using workspace: {ws.name}")
         else:
             raise RuntimeError(f"No checkpoint in workspace: {ws}")
+    elif run_id:
+        # Jobs use a stable workspace.  This replaces the worker's former
+        # "newest directory" guess and allows an interrupted job to resume.
+        ws = create_workspace(channel_slug, run_id=run_id)
+        checkpoint = load_checkpoint(ws)
+        if checkpoint:
+            logger.info(f"Resuming job workspace: {ws.name}")
+        else:
+            checkpoint = None
     else:
         # Starting mid-pipeline requires an existing workspace
         needs_existing_ws = start_from and start_from != STAGES[0]
@@ -312,7 +322,15 @@ async def run_pipeline(
             workspace_dir=str(ws),
         )
     if not checkpoint.run_id:
-        checkpoint.run_id = costs.generate_run_id()
+        checkpoint.run_id = run_id or costs.generate_run_id()
+    from core.reliability import RunAttempt, fallback_contract
+    attempt = RunAttempt.model_validate(checkpoint.run_attempt or {})
+    if checkpoint.run_attempt:
+        attempt.begin_resume()
+    checkpoint.run_attempt = attempt.model_dump(mode="json")
+    # Persist the contract with the run for diagnosis without exposing it to
+    # customers or changing any provider's existing behaviour.
+    checkpoint.run_attempt["current_fallback"] = fallback_contract(checkpoint.current_stage or "planning").model_dump()
     save_checkpoint(ws, checkpoint)
 
     fixture_mode = "off"
@@ -403,6 +421,7 @@ async def run_pipeline(
     def start_stage(stage: str) -> None:
         stage_start_time[stage] = datetime.now()
         checkpoint.current_stage = stage
+        checkpoint.run_attempt["current_fallback"] = fallback_contract(stage).model_dump()
         save_checkpoint(ws, checkpoint)
         logger.info(f"[stage] {stage} started")
 
@@ -490,6 +509,9 @@ async def run_pipeline(
     def fail_pipeline(message: str) -> None:
         logger.error(message)
         checkpoint.last_error = message
+        state = RunAttempt.model_validate(checkpoint.run_attempt or {})
+        state.finish(recoverable=True, reason=message)
+        checkpoint.run_attempt = state.model_dump(mode="json")
         save_checkpoint(ws, checkpoint)
         _finalize_outputs()
         raise RuntimeError(message)
@@ -1075,6 +1097,10 @@ async def run_pipeline(
             _finalize_outputs()
             return
 
+    state = RunAttempt.model_validate(checkpoint.run_attempt or {})
+    state.complete()
+    checkpoint.run_attempt = state.model_dump(mode="json")
+    save_checkpoint(ws, checkpoint)
     estimate_report = _finalize_outputs()
 
     timing_lines = []
@@ -1242,6 +1268,7 @@ def _apply_settings_overrides(overrides: list[str]) -> None:
                    "the spoken language from the transcript itself.")
 @click.option("--stage", "stage_spec", default=None, help="Run specific stage(s): 'script', 'process..thumbnail', '..script'")
 @click.option("--workspace", type=click.Path(exists=True, file_okay=False), default=None, help="Target a specific workspace (skips auto-detection)")
+@click.option("--run-id", default=None, help="Stable queued-job id; resumes its deterministic workspace when present.")
 @click.option("--fixtures", type=click.Choice(["record", "replay"]), default=None, help="Record or replay API responses via .fixtures/")
 @click.option("--set", "overrides", multiple=True, help="Override config (e.g. --set video.target_duration_minutes=1)")
 @click.option("--preview-remotion", is_flag=True, help="Run through process, then open a full-video Remotion Studio preview instead of rendering/exporting")
@@ -1250,7 +1277,7 @@ def _apply_settings_overrides(overrides: list[str]) -> None:
     default="",
     help="Comma-separated review gates to continue after max retries (e.g. image_review,thumbnail,final_review)",
 )
-def main(channel, language, caption_language, stage_spec, workspace, fixtures,
+def main(channel, language, caption_language, stage_spec, workspace, run_id, fixtures,
          overrides, preview_remotion, allow_review_failures):
     """Video Factory — Autonomous YouTube video pipeline."""
     if fixtures:
@@ -1288,13 +1315,33 @@ def main(channel, language, caption_language, stage_spec, workspace, fixtures,
             allow_review_failures=allowed_review_failures,
             language=language,
             caption_language=caption_language,
+            run_id=run_id,
         ))
-    except Exception:
-        failed_ws = workspace_path or find_latest_workspace(channel)
+    except Exception as exc:
+        if workspace_path:
+            failed_ws = workspace_path
+        elif run_id:
+            failed_ws = create_workspace(channel, run_id=run_id)
+        else:
+            failed_ws = find_latest_workspace(channel)
         if failed_ws:
             failed_log = failed_ws / "pipeline.log"
             failed_checkpoint = load_checkpoint(failed_ws)
             if failed_checkpoint:
+                try:
+                    from core.reliability import RunAttempt
+                    attempt = RunAttempt.model_validate(failed_checkpoint.run_attempt or {})
+                    # Individual provider implementations continue to own
+                    # their retry logic. This durable record captures the
+                    # failed stage without serialising raw provider details.
+                    attempt.record_provider_failure(
+                        "pipeline", failed_checkpoint.current_stage or "unknown", str(exc)
+                    )
+                    attempt.finish(recoverable=True, reason=str(exc))
+                    failed_checkpoint.run_attempt = attempt.model_dump(mode="json")
+                    save_checkpoint(failed_ws, failed_checkpoint)
+                except Exception:
+                    pass
                 try:
                     costs.write_estimate_reports(failed_ws, failed_checkpoint.model_dump())
                 except Exception:

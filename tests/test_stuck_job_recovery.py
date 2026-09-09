@@ -9,7 +9,7 @@ Three defences, each covering the previous one's failure:
 
   worker heartbeat  a healthy slow render keeps touching its row, so silence
                     means something is actually wrong
-  server expiry     a row untouched past the window is failed on the next read
+  server expiry     a row untouched past the window is safely requeued on the next read
   client guard      if both of those fail, the view still stops claiming work
                     is happening
 """
@@ -78,19 +78,19 @@ def test_the_repository_can_expire_stale_jobs():
     assert "async expireStale(" in source
 
 
-def test_expiry_covers_queued_as_well_as_running():
-    """A job claimed and then abandoned can sit in either state."""
+def test_expiry_covers_only_running_jobs():
+    """Queued work may be waiting for capacity; it is not a dead worker."""
     source = _read(REPOSITORIES)
     block = source[source.index("async expireStale("):]
     block = block[: block.index("\n  /**")]
-    assert '"running", "queued"' in block
+    assert '.eq("status", "running")' in block
 
 
-def test_expiry_explains_itself_to_the_user():
+def test_expiry_requeues_with_a_safe_recovery_message():
     source = _read(REPOSITORIES)
     block = source[source.index("async expireStale("):]
-    assert "stopped reporting progress" in block
-    assert "Start it again" in block
+    assert 'status: "queued"' in block
+    assert "Saved progress is ready to resume." in block
 
 
 def test_expiry_never_fails_the_request_that_triggered_it():

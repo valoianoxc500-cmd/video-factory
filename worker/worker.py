@@ -41,6 +41,7 @@ import settings  # noqa: E402,F401
 
 import storage  # noqa: E402
 import diskspace  # noqa: E402
+from core.reliability import deterministic_workspace  # noqa: E402
 from singleton import (  # noqa: E402
     RESTART_GRACE_SECONDS,
     AlreadyRunningError,
@@ -99,6 +100,7 @@ HEARTBEAT_SECONDS = float(os.environ.get("WORKER_HEARTBEAT_SECONDS", "60"))
 # and standard storage runs about $0.02/GB/month. Pruning the oldest keeps the
 # bill flat as the factory runs continuously.
 VIDEO_RETENTION = int(os.environ.get("VIDEO_RETENTION", os.environ.get("BLOB_VIDEO_RETENTION", "12")))
+MAX_RECOVERY_ATTEMPTS = int(os.environ.get("MAX_RECOVERY_ATTEMPTS", "3"))
 
 # Fraction of overall progress attributed to each pipeline stage, cumulative.
 # Weighted by observed wall-clock share so the bar tracks reality.
@@ -287,6 +289,17 @@ def _newest_new_workspace(before: set[Path]) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def workspace_for_job(job: dict) -> Path:
+    """The only workspace a queued job may use.
+
+    Older manually-run workspaces keep their timestamped names; queued work
+    gets a stable name derived from its immutable job id.
+    """
+    return deterministic_workspace(
+        REPO_ROOT / "workspace", _channel_for_job(job), str(job["id"])
+    )
+
+
 # Workspace pruning and free-space measurement now live in diskspace.py, which
 # escalates beyond pruning when the disk is full of something that is not ours.
 
@@ -337,7 +350,6 @@ def _register_in_library(
     """
     import storage
     from library import VideoLibrary, VideoRecord
-
     from core.review_status import classify_review_log
 
     review_status = "approved"
@@ -421,10 +433,11 @@ def run_pipeline(client: httpx.Client, job: dict) -> None:
             f"MIN_FREE_DISK_GB."
         )
 
-    before = _workspaces_before()
+    workspace = workspace_for_job(job)
     cmd = [
         sys.executable, "factory.py",
         "--channel", _channel_for_job(job),
+        "--run-id", job_id,
         "--allow-review-failures", ALLOWED_REVIEW_FAILURES,
         "--set", f"plan.topic={topic}",
     ]
@@ -537,9 +550,8 @@ def run_pipeline(client: httpx.Client, job: dict) -> None:
         detail = "\n".join(tail[-12:])
         raise RuntimeError(f"pipeline exited {code}\n{detail}")
 
-    workspace = _newest_new_workspace(before)
-    if workspace is None:
-        raise RuntimeError("pipeline finished but produced no workspace")
+    if not workspace.exists():
+        raise RuntimeError("pipeline finished but its job workspace is unavailable")
 
     videos = sorted(workspace.glob("*.mp4"))
     if not videos:
@@ -568,27 +580,36 @@ def run_pipeline(client: httpx.Client, job: dict) -> None:
     prune_stored_videos()
 
     # The job is only marked done after BOTH the upload and the metadata write
-    # succeed; upload_media raises on failure, and the completion update
-    # below is retried, so a job can never read "done" without a playable URL.
-    video_url = upload_media(
-        mp4, f"videos/{job_id}.mp4", "video/mp4"
-    )
+    # succeed. Stable object names make a completion retry idempotent.
     thumb = workspace / "thumbnail.png"
-    thumb_url = (
-        upload_media(thumb, f"thumbnails/{job_id}.png", "image/png")
-        if thumb.exists()
-        else None
-    )
+    completion_manifest = workspace / "completion_manifest.json"
+    manifest: dict = {}
+    try:
+        manifest = json.loads(completion_manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        manifest = {}
 
-    # Confirm the uploaded object is really retrievable before claiming done.
-    check = httpx.head(video_url, timeout=60.0, follow_redirects=True)
-    if check.status_code >= 400:
-        raise RuntimeError(
-            f"uploaded video is not retrievable ({check.status_code}): {video_url}"
+    video_url = str(manifest.get("video_url") or "")
+    thumb_url = manifest.get("thumbnail_url")
+    if not video_url:
+        video_url = upload_media(mp4, f"videos/{job_id}.mp4", "video/mp4")
+        thumb_url = (
+            upload_media(thumb, f"thumbnails/{job_id}.png", "image/png")
+            if thumb.exists() else None
         )
-    logger.info(
-        f"verified upload: {int(check.headers.get('content-length', 0)) / 1e6:.1f} MB"
-    )
+
+        # Confirm the uploaded object is really retrievable before claiming
+        # done, then durably record it before any library/database action.
+        check = httpx.head(video_url, timeout=60.0, follow_redirects=True)
+        if check.status_code >= 400:
+            raise RuntimeError("uploaded video could not be verified")
+        completion_manifest.write_text(json.dumps({
+            "job_id": job_id, "video_url": video_url,
+            "thumbnail_url": thumb_url,
+        }, indent=2), encoding="utf-8")
+        logger.info("verified upload and wrote completion manifest")
+    else:
+        logger.info("reusing verified upload from completion manifest")
 
     # Save a permanent copy in the channel's library. The job row is a queue
     # record -- it gets pruned and superseded -- so this is what the website
@@ -640,23 +661,7 @@ def run_pipeline(client: httpx.Client, job: dict) -> None:
         **({"library": library_payload} if library_payload else {}),
     )
 
-    if not delivered and library_payload:
-        # The app registers the video before it marks the job done, so a
-        # refused registration -- an unowned legacy job, most often -- would
-        # otherwise strand a finished video at 99%. Complete the job without
-        # it rather than lose the run, and say so loudly: the video is in
-        # storage but will not appear in anyone's Library.
-        logger.error(
-            f"could not register {job_id} in the owner's library; retrying "
-            f"the completion update without it"
-        )
-        delivered = post_update(client, job_id, attempts=3, **completion)
-        if delivered:
-            logger.error(
-                f"job {job_id} completed but its video is NOT in public.videos "
-                f"and will not show in any Library"
-            )
-    elif delivered and library_payload:
+    if delivered and library_payload:
         logger.info(
             f"registered {job_id} in the {channel} library "
             f"-> {record.video_path}"
@@ -664,8 +669,7 @@ def run_pipeline(client: httpx.Client, job: dict) -> None:
 
     if not delivered:
         raise RuntimeError(
-            f"video uploaded to {video_url} but the completion update could "
-            f"not be delivered to {APP_URL}"
+            "video upload is retained but customer library registration is pending"
         )
     logger.info(f"job {job_id} complete -> {video_url}")
 
@@ -795,17 +799,34 @@ def _serve(lock: SingleInstanceLock, once: bool) -> int:
                 run_pipeline(client, job)
             except Exception as exc:
                 logger.error(f"job {job['id']} failed: {exc}")
+                # A checkpoint is the source of truth for recoverability. A
+                # bounded queue retry resumes it; it never starts a second
+                # workspace or blindly repeats completed paid stages.
+                recoverable = True
+                retries = 0
+                try:
+                    from core.utils import load_checkpoint
+                    checkpoint = load_checkpoint(workspace_for_job(job))
+                    state = (checkpoint.run_attempt if checkpoint else {}) or {}
+                    recoverable = bool(state.get("recoverable", True))
+                    retries = int(state.get("retry_count", 0))
+                except Exception:
+                    recoverable = False
+                should_requeue = recoverable and retries < MAX_RECOVERY_ATTEMPTS
                 post_update(
                     client, job["id"],
                     attempts=4,
-                    status="error", progress=0,
-                    message="Generation failed",
-                    error=str(exc)[:1500],
+                    status="queued" if should_requeue else "error", progress=0,
+                    message=("Saved progress will resume automatically." if should_requeue else "This generation could not be completed."),
+                    # Diagnostics remain in worker logs and checkpoint.json;
+                    # never hand a process tail or provider detail to a user.
+                    error=(None if should_requeue else "Generation could not be completed. Please try again."),
                 )
                 # A failed run leaves the same intermediates a successful one
                 # does, minus anything worth keeping. Without this, repeated
                 # failures fill the disk faster than successes would.
-                _release_run_scratch(REPO_ROOT / "workspace")
+                if not should_requeue:
+                    _release_run_scratch(workspace_for_job(job))
             if once:
                 return 0
 
