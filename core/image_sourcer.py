@@ -938,6 +938,11 @@ async def source_images(
     """
     raw_dir = workspace / "images" / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
+    if config.channel_id == "animated_stories":
+        # One persisted ledger spans character sheets, first-pass scene art,
+        # redraws and motion for this workspace.
+        from core import animated_budget
+        animated_budget.activate(workspace, config)
     _reset_provenance()
     _reset_pexels_dedup()
     # Before the first beat is generated, not after: a sheet attached only at
@@ -2604,6 +2609,19 @@ async def _generate_missing_visuals(
         target = item.get("output_path")
         if not target:
             continue
+        if config.channel_id == "animated_stories":
+            from core import animated_budget
+            if not animated_budget.reserve(
+                config,
+                kind="scene_art_fallback",
+                cost_usd=config.animation.scene_image_cost_usd,
+                detail=Path(target).name,
+            ):
+                logger.warning(
+                    f"{Path(target).name}: animated generation budget exhausted; "
+                    "leaving the beat for safe coverage"
+                )
+                continue
         reference = _character_reference_for(item["prompt"])
         try:
             written = await clients.generate_scene_image(
@@ -3372,6 +3390,19 @@ async def _source_single_image(
 
     # Generate with AI generation. Use illustration style when flagged.
     try:
+        if config.channel_id == "animated_stories":
+            from core import animated_budget
+            if not animated_budget.reserve(
+                config,
+                kind="scene_art",
+                cost_usd=config.animation.scene_image_cost_usd,
+                detail=output_path.name,
+            ):
+                logger.warning(
+                    f"{output_path.name}: animated generation budget exhausted; "
+                    "deferring to local-safe coverage"
+                )
+                return None
         effective_lane: GenerationLane = (
             "illustration"
             if lane == "illustration"

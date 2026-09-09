@@ -243,7 +243,12 @@ class AnimationConfig(BaseModel):
     cost_per_clip_usd: float = 0.15
     #: Hard ceiling on animation spend for one video. Beats that do not fit
     #: are held as stills rather than the run going over.
-    max_animation_usd: float = 0.60
+    max_animation_usd: float = 0.40
+    #: Total paid character-sheet, scene-art, redraw and motion allowance for
+    #: one finished Animated Stories video. This is enforced before calls.
+    total_generation_budget_usd: float = 0.40
+    character_sheet_cost_usd: float = 0.039
+    scene_image_cost_usd: float = 0.039
 
     # -- local animation ------------------------------------------------
     #: Every scene is animated locally, for free, by default. Remotion moves

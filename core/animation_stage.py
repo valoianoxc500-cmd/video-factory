@@ -66,6 +66,9 @@ async def build_character_sheet(
     if not enabled(config):
         return None
 
+    from core import animated_budget
+    budget = animated_budget.activate(workspace, config)
+
     sheet_dir = workspace / "character"
     sheet_dir.mkdir(parents=True, exist_ok=True)
 
@@ -100,9 +103,32 @@ async def build_character_sheet(
     main_sheet: Path | None = None
     for character in bible.characters:
         sheet_path = sheet_dir / f"{character.id}_sheet.png"
+        # A resumed job must reuse its valid reference sheet. Regenerating it
+        # changes the visual authority that every already-approved scene was
+        # compared against, wastes a paid call, and can introduce drift after
+        # the fact. A non-empty sheet is sufficient here; image generation
+        # validates its output before reaching this stage.
+        if sheet_path.exists() and sheet_path.stat().st_size > 1024:
+            character.sheet = sheet_path.name
+            if character.role == "main":
+                main_sheet = sheet_path
+            logger.info(
+                f"[character] reusing existing sheet for {character.id} "
+                f"({character.name})"
+            )
+            continue
         prompt = bible_mod.sheet_prompt(
             character, style, anim.STYLE_EXCLUSIONS
         )
+        if budget is not None and not budget.reserve(
+            kind="character_sheet",
+            cost_usd=config.animation.character_sheet_cost_usd,
+            detail=character.id,
+        ):
+            if character.role == "main":
+                raise RuntimeError("animated generation budget exhausted before character sheet")
+            logger.warning(f"[character] budget exhausted before sheet for {character.id}")
+            continue
         logger.info(
             f"[character] sheet for {character.id} ({character.name}) "
             f"on {sheet_model}"
@@ -314,6 +340,9 @@ async def animate_scenes(
     if not enabled(config):
         return None
 
+    from core import animated_budget
+    total_budget = animated_budget.activate(workspace, config)
+
     from core.providers.animation import FalImageToVideoProvider
 
     settings_a = config.animation
@@ -336,7 +365,10 @@ async def animate_scenes(
     # The ceiling is the *emergency* budget now, not the animation budget:
     # local motion costs nothing, so this bounds only the exceptions.
     budget = AnimationBudget(
-        ceiling_usd=float(settings_a.ai_motion_budget_usd),
+        ceiling_usd=min(
+            float(settings_a.ai_motion_budget_usd),
+            float(settings_a.max_animation_usd),
+        ),
         cost_per_clip_usd=float(settings_a.cost_per_clip_usd),
     )
     anim.plan_scenes(
@@ -395,6 +427,22 @@ async def animate_scenes(
             motion = anim.motion_prompt(scene.beat)
             for attempt in range(1, int(settings_a.max_attempts_per_scene) + 1):
                 scene.attempts = attempt
+                if total_budget is not None and not total_budget.reserve(
+                    kind="image_to_video",
+                    cost_usd=settings_a.cost_per_clip_usd,
+                    detail=label,
+                ):
+                    # plan_scenes reserves a motion slot locally; no provider
+                    # call occurred, so do not report it as actual spend.
+                    budget.spent_usd = max(0.0, round(
+                        budget.spent_usd - settings_a.cost_per_clip_usd, 6
+                    ))
+                    if budget.clips:
+                        budget.clips -= 1
+                    scene.kind = "local" if scene.local_motion else "still"
+                    scene.generation_status = "budget_fell_back_to_local"
+                    scene.error = "total animated generation budget exhausted"
+                    break
                 try:
                     data = await provider.animate(
                         source, motion, client=client,
@@ -432,7 +480,25 @@ async def animate_scenes(
                     )
                     out.unlink(missing_ok=True)
                     if attempt < settings_a.max_attempts_per_scene:
-                        budget.charge(retry=True)
+                        if budget.can_afford_one():
+                            budget.charge(retry=True)
+                        else:
+                            # The first attempted clip is already accounted
+                            # for by plan_scenes. Do not spend past the
+                            # configured ceiling merely to retry it: the
+                            # local recipe remains valid and is the intended
+                            # recovery path.
+                            scene.kind = "local" if scene.local_motion else "still"
+                            scene.generation_status = "failed_fell_back_to_local"
+                            scene.error = (
+                                f"{scene.error}; retry skipped because the "
+                                "AI motion budget is exhausted"
+                            )[:200]
+                            logger.warning(
+                                f"[animation] scene {scene.index}: retry budget "
+                                "exhausted; falling back to local motion"
+                            )
+                            break
             else:
                 # Every attempt failed. The beat falls back to the free
                 # recipe already on its slot, so it still moves -- a failed
