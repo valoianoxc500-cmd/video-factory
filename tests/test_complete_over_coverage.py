@@ -40,10 +40,10 @@ def test_horror_opted_in():
     assert _channel("horror_stories")["image_sourcing"]["complete_over_coverage"] is True
 
 
-def test_football_news_is_unchanged():
-    """A news channel must still refuse to ship a half-covered video."""
+def test_football_news_finishes_through_its_safe_coverage_ladder():
+    """Football may cover a miss, but must not reuse an unrelated beat."""
     sourcing = _channel("football_news")["image_sourcing"]
-    assert sourcing.get("complete_over_coverage", False) is False
+    assert sourcing.get("complete_over_coverage", False) is True
 
 
 # --- the abort becomes a warning, but only where opted in ------------------

@@ -114,7 +114,7 @@ _PERSON_RE = re.compile("|".join(_PERSON_PATTERNS), re.I)
 # [A-Z][a-z]{2,}. That gap let "the D.B. Cooper ransom note" through, which is
 # exactly the kind of subject this check exists to stop.
 _PROPER_NOUN_RE = re.compile(
-    r"(?<![.!?]\s)(?<!^)\b[A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}\b"
+    r"\b[A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}\b"
     r"|\b(?:[A-Z]\.\s*){1,3}\s*[A-Z][a-z]{2,}\b"
     r"|\b[A-Z][a-z]{2,}\s+(?:[A-Z]\.\s*){1,2}[A-Z][a-z]{2,}\b"
 )

@@ -654,6 +654,11 @@ def _build_sections_context(
                 # the images it was shown.
                 "slot_uid": file_label,
                 "is_b_roll": is_b_roll,
+                # The review gate needs to know this is an illustrative
+                # reconstruction, never evidence from the reported event.
+                "generated_reconstruction": bool(
+                    (slot.props or {}).get("generated_reconstruction")
+                ),
             })
     return sections_context
 
@@ -1314,7 +1319,17 @@ async def source_images(
                 raw_dir=raw_dir,
             )
 
-    # Fourth pass, and the last thing tried before beats start being thrown
+    # Fourth pass: a Football slot carrying a verified player/current-club
+    # marker may use its dedicated, visibly generated reconstruction only
+    # after every licensed-photo tier has failed. Generic fallbacks still
+    # refuse named people and reported events.
+    await _generate_football_player_reconstructions(
+        descriptors=descriptors,
+        config=config,
+        sourcing_log=sourcing_log,
+    )
+
+    # Fifth pass, and the last thing tried before beats start being thrown
     # away: generate an atmospheric frame for slots that web search and subject
     # rescue both failed to fill. Off unless the channel opts in, capped per
     # video, and refused outright for anything that would fabricate evidence or
@@ -1325,7 +1340,7 @@ async def source_images(
         sourcing_log=sourcing_log,
     )
 
-    # Fifth pass: cover whatever is still empty with a licensed clip or a text
+    # Sixth pass: cover whatever is still empty with a licensed clip or a text
     # card, so a beat nothing could be found for costs the beat rather than
     # the whole video. Opt-in per channel.
     await _cover_unsourced_slots(
@@ -1445,6 +1460,15 @@ async def source_images(
                     sourcing_log=sourcing_log,
                     raw_dir=raw_dir,
                 )
+            # A rejected Football reconstruction gets a fresh chance at a
+            # licensed source first. Only a still-empty, already-verified
+            # player slot can return to its dedicated reconstruction fallback;
+            # the image reviewer remains the final decision-maker.
+            await _generate_football_player_reconstructions(
+                descriptors=targets,
+                config=config,
+                sourcing_log=sourcing_log,
+            )
         elif targets:
             # The channel has asked for a purpose-built image when a real one
             # was found and judged wrong. Hunting for another stock photo is
@@ -2619,6 +2643,116 @@ async def _generate_missing_visuals(
             f"cost ${summary['total_cost_usd']:.4f})"
         )
     return budget
+
+
+async def _generate_football_player_reconstructions(
+    *,
+    descriptors: list[dict],
+    config: ChannelConfig,
+    sourcing_log: list[dict],
+) -> int:
+    """Rescue a verified Football player beat after every real-photo tier misses.
+
+    This is deliberately not part of the generic generated-visual fallback.
+    Generic channels must continue to refuse named people and real events.
+    Football supplies a verified name/current-club pair from research in the
+    slot metadata, and this path records the result as a reconstruction before
+    it can reach the image reviewer or renderer.
+    """
+    sourcing = config.image_sourcing
+    if (
+        config.channel_id != "football_news"
+        or not getattr(sourcing, "allow_generated_player_reconstruction", False)
+    ):
+        return 0
+
+    candidates: list[tuple[dict, str, str]] = []
+    for desc in descriptors:
+        if desc.get("sourced", True):
+            continue
+        props = dict(getattr(desc.get("slot"), "props", None) or {})
+        if props.get("football_subject") != "player":
+            continue
+        name = str(props.get("football_player_name") or "").strip()
+        club = str(props.get("football_current_club") or "").strip()
+        if name and club:
+            candidates.append((desc, name, club))
+
+    limit = max(0, int(getattr(sourcing, "max_generated_player_reconstructions", 0)))
+    if not candidates or not limit:
+        return 0
+
+    generated = 0
+    target_size = tuple(config.video.resolution)
+    model = str(getattr(sourcing, "generated_player_reconstruction_model", "") or sourcing.generation_model)
+    for desc, name, club in candidates[:limit]:
+        section = desc["section"]
+        sub_idx = desc.get("sub_idx", 0) + 1
+        target = desc.get("img_path")
+        if not target:
+            continue
+        prompt = (
+            f"Clearly generated editorial reconstruction of footballer {name}, "
+            f"in current {club} club context. Preserve the known appearance and "
+            "current-club context only. Stylised sports editorial illustration, "
+            "not documentary photography, not match footage, not archival evidence, "
+            "no invented transfer presentation, no readable text. Vertical 9:16."
+        )
+        try:
+            written = await clients.generate_scene_image(
+                prompt,
+                Path(target),
+                model=model,
+                aspect_ratio=generation_aspect_ratio(target_size),
+                image_size="1K",
+                target_size=target_size,
+                operation_label="football_player_reconstruction",
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Football player reconstruction failed for section {section.id} "
+                f"sub-image {sub_idx}: {type(exc).__name__}: {exc}"
+            )
+            continue
+
+        if written is None or not _is_usable_asset(Path(target)):
+            logger.warning(
+                f"Football player reconstruction produced no usable file for "
+                f"section {section.id} sub-image {sub_idx}"
+            )
+            continue
+        if not _conform_image_to_target(
+            Path(target), target_size=target_size,
+            label=f"football player reconstruction s{section.id}.{sub_idx}",
+        ):
+            continue
+
+        slot = desc["slot"]
+        slot.props = dict(slot.props or {})
+        slot.props["generated_reconstruction"] = True
+        slot.props["generated_reconstruction_label"] = "Generated reconstruction"
+        provenance = {
+            "section_id": section.id,
+            "sub_image_index": sub_idx,
+            "file": Path(target).name,
+            "generated": True,
+            "generated_reconstruction": True,
+            "source": "football_player_reconstruction",
+            "provenance": "AI-generated player reconstruction, not real news photography or archival evidence",
+            "subject": name,
+            "current_club_context": club,
+            "model": model,
+            "prompt": prompt,
+        }
+        _record_generated_asset_provenance(target, provenance)
+        sourcing_log.append(provenance)
+        desc["sourced"] = True
+        desc["generated"] = True
+        generated += 1
+
+    if generated:
+        logger.info(f"Football: generated {generated} clearly-labelled player reconstruction(s) after licensed sources were exhausted")
+    return generated
 
 
 async def _rescue_underpopulated_sections(

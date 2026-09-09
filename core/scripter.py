@@ -793,6 +793,52 @@ def repair_outdated_club_briefs(script_data: dict, player_status: list) -> int:
     return repaired
 
 
+def annotate_football_player_slots(script_data: dict, player_status: list) -> int:
+    """Attach verified player identity to its own visual briefs only.
+
+    Image sourcing cannot infer whether a capitalised name is a player, a
+    manager, or an event. The researcher has already resolved the player and
+    current club before this script exists, so carry that narrow fact forward
+    in slot metadata. It is used solely by Football's final reconstruction
+    fallback after every licensed-photo tier has failed.
+    """
+    rows = [
+        row for row in (player_status or [])
+        if isinstance(row, dict) and row.get("name") and row.get("current_club")
+    ]
+    annotated = 0
+    for section in script_data.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        narration = str(section.get("narration") or "")
+        for slot in section.get("slots") or []:
+            if not isinstance(slot, dict):
+                continue
+            if str(slot.get("visual") or "") not in _SEARCHED_VISUAL_TYPES:
+                continue
+            searchable = " ".join(
+                (str(slot.get("keywords") or ""), str(slot.get("prompt") or ""), narration)
+            )
+            folded = _fold(searchable)
+            for row in rows:
+                name = str(row["name"])
+                surname = name.split()[-1] if name.split() else ""
+                if len(_fold(surname)) < 3 or _fold(surname) not in folded:
+                    continue
+                props = dict(slot.get("props") or {})
+                wanted = {
+                    "football_subject": "player",
+                    "football_player_name": name,
+                    "football_current_club": str(row["current_club"]),
+                }
+                if any(props.get(key) != value for key, value in wanted.items()):
+                    props.update(wanted)
+                    slot["props"] = props
+                    annotated += 1
+                break
+    return annotated
+
+
 def _fold(text: str) -> str:
     """Lowercased and accent-stripped, so "Álvarez" matches "Alvarez"."""
     decomposed = unicodedata.normalize("NFKD", str(text or ""))
@@ -1591,6 +1637,9 @@ async def generate_script(
             # right player in the wrong shirt passes the relevance gate and is
             # still two years out of date.
             repair_outdated_club_briefs(content, plan.get("player_status") or [])
+            annotate_football_player_slots(
+                content, plan.get("player_status") or []
+            )
         _repair_slot_fields(
             content,
             web_photos_only=config.image_sourcing.web_photos_only,

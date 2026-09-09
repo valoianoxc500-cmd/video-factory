@@ -288,9 +288,8 @@ def test_the_hold_cap_is_unchanged():
     assert HORROR.rendering_defaults.max_visual_hold_seconds == 5.0
 
 
-def test_football_news_is_also_protected_by_the_same_rule():
-    """The enforcement is engine-agnostic, not horror-specific."""
+def test_football_news_can_finish_with_its_own_safe_fallbacks():
+    """Football's fallback ladder avoids an avoidable whole-run failure."""
     football = load_channel_config("football_news")
     script = FakeScript([_section(1, 2, 40.0)])
-    with pytest.raises(RuntimeError):
-        enforce_minimum_slots(script, football)
+    enforce_minimum_slots(script, football)

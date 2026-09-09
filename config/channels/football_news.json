@@ -151,6 +151,14 @@
     "allow_video_broll": true,
     "max_broll_ratio": 0.34,
     "open_library_fallback": true,
+    "open_library_budget": 12,
+    "allow_generated_fallback": true,
+    "generated_fallback_model": "fal-ai/flux/schnell",
+    "max_generated_fallback_images": 4,
+    "allow_generated_player_reconstruction": true,
+    "generated_player_reconstruction_model": "gemini-2.5-flash-image",
+    "max_generated_player_reconstructions": 2,
+    "complete_over_coverage": true,
     "scene_audio": true
   },
   "youtube": {

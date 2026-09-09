@@ -234,7 +234,7 @@ def test_the_fallback_is_off_by_default():
     )
 
 
-def test_football_news_did_not_gain_a_generation_lane():
+def test_football_news_has_a_bounded_generic_fallback_after_real_sources():
     import json
 
     config = json.loads(
@@ -243,5 +243,9 @@ def test_football_news_did_not_gain_a_generation_lane():
         )
     )
     sourcing = config.get("image_sourcing", {})
-    assert sourcing.get("allow_generated_fallback", False) is False
+    assert sourcing.get("allow_generated_fallback", False) is True
+    assert sourcing.get("generated_fallback_model") == "fal-ai/flux/schnell"
+    assert sourcing.get("max_generated_fallback_images") == 4
+    assert sourcing.get("allow_generated_player_reconstruction") is True
+    assert sourcing.get("max_generated_player_reconstructions") == 2
     assert sourcing.get("web_photos_only") is True

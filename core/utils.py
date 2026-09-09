@@ -354,6 +354,13 @@ class ImageSourcingConfig(BaseModel):
     # images, it is short of a subject that can be illustrated honestly.
     max_generated_fallback_images: int = 5
     generated_fallback_model: str = "gemini-3.1-flash-lite-image"
+    # A tightly-scoped exception for current football coverage. It is reached
+    # only after every licensed-photo tier has missed a slot whose script
+    # explicitly identifies a player with a verified current club. The output
+    # is recorded as a generated reconstruction, never as a photograph.
+    allow_generated_player_reconstruction: bool = False
+    generated_player_reconstruction_model: str = "gemini-2.5-flash-image"
+    max_generated_player_reconstructions: int = 2
     # Story channels generate the beat rather than searching for it.
     #
     # A bespoke cinematic frame of the scene the narration is describing beats
