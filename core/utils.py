@@ -244,6 +244,20 @@ class AnimationConfig(BaseModel):
     #: Hard ceiling on animation spend for one video. Beats that do not fit
     #: are held as stills rather than the run going over.
     max_animation_usd: float = 0.60
+
+    # -- local animation ------------------------------------------------
+    #: Every scene is animated locally, for free, by default. Remotion moves
+    #: the camera, drives the subject and renders weather, fire, smoke and
+    #: light over the still. A paid clip is an exception this path has to
+    #: justify, not the normal way a scene is made.
+    local_first: bool = True
+    #: Emergency/premium budget for the paid model. One Wan clip at
+    #: `cost_per_clip_usd` fits in the default and a second does not, which is
+    #: the intended shape: escalation is rare and visible in the cost line.
+    ai_motion_budget_usd: float = 0.15
+    #: Hard cap on paid clips per video, applied before the budget. A short
+    #: video should normally spend nothing at all.
+    max_ai_clips: int = 1
     min_clip_seconds: float = 3.0
     max_clip_seconds: float = 6.0
     resolution: str = "720p"

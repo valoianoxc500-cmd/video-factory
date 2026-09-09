@@ -11,6 +11,7 @@ import {
 import type { ComponentType } from "react";
 import { getTransition } from "../lib/transitions";
 import { ImageScene } from "./ImageScene";
+import { LocalAnimatedScene } from "./LocalAnimatedScene";
 import { AnimatedLineChart } from "./AnimatedLineChart";
 import { BackdropFigureScene } from "./BackdropFigureScene";
 import { TitleCard } from "./TitleCard";
@@ -89,6 +90,10 @@ const COMPONENTS: Record<string, ComponentType<any>> = {
   InfoSlide,
   TextOnlySlide,
   ImageScene,
+  // Animated Stories' default scene renderer. Reached only when the Python
+  // side attaches a motion recipe, so every other channel keeps the plain
+  // `image` slot path unchanged.
+  LocalAnimatedScene,
   NarrationSubtitle,
   TitleBanner,
   AnimatedBarChart,

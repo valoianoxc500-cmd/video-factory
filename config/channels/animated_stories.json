@@ -330,6 +330,9 @@
     "max_clip_seconds": 6.0,
     "resolution": "720p",
     "max_attempts_per_scene": 2,
-    "still_fallback": true
+    "still_fallback": true,
+    "local_first": true,
+    "ai_motion_budget_usd": 0.15,
+    "max_ai_clips": 1
   }
 }

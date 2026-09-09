@@ -63,6 +63,66 @@ def test_the_animation_provider_is_not_reachable_from_other_paths():
         assert "FalImageToVideoProvider" not in text
 
 
+# ── the two stages exist and are inert elsewhere ─────────────────────
+
+def test_the_pipeline_declares_the_two_new_stages():
+    import factory
+
+    assert "character" in factory.STAGES
+    assert "animation" in factory.STAGES
+    # Order matters: the sheet binds the prompts before artwork is drawn, and
+    # animation runs after artwork so only reviewed frames are animated.
+    assert factory.STAGES.index("character") < factory.STAGES.index("image_source")
+    assert factory.STAGES.index("image_source") < factory.STAGES.index("animation")
+    assert factory.STAGES.index("animation") < factory.STAGES.index("audio_source")
+
+
+def test_the_original_stage_order_is_preserved():
+    import factory
+
+    without_new = [s for s in factory.STAGES if s not in ("character", "animation")]
+    assert without_new == [
+        "planning", "script", "image_source", "audio_source", "process",
+        "render_sections", "assemble", "thumbnail", "final_review",
+    ]
+
+
+@pytest.mark.parametrize("slug", EXISTING)
+def test_the_new_stages_are_disabled_for_existing_channels(slug):
+    from core import animation_stage
+
+    assert animation_stage.enabled(load_channel_config(slug)) is False
+
+
+def test_the_new_stages_are_enabled_for_animated_stories():
+    from core import animation_stage
+
+    assert animation_stage.enabled(load_channel_config("animated_stories")) is True
+
+
+def test_a_disabled_channel_skips_both_stages(tmp_path):
+    """Calling them directly on a non-animating channel does nothing."""
+    from core import animation_stage
+
+    cfg = load_channel_config("horror_stories")
+    assert asyncio.run(
+        animation_stage.build_character_sheet(_Script([]), cfg, tmp_path)
+    ) is None
+    assert asyncio.run(
+        animation_stage.animate_scenes(_Script([]), cfg, tmp_path)
+    ) is None
+
+
+def test_an_unplayable_result_is_not_counted_as_a_clip(tmp_path):
+    """A byte count is not proof; ffprobe decides."""
+    from core import animation_stage
+
+    junk = tmp_path / "not_a_video.mp4"
+    junk.write_bytes(b"x" * 4096)
+    assert animation_stage._playable(junk) == 0.0
+    assert animation_stage._playable(tmp_path / "missing.mp4") == 0.0
+
+
 # ── the new channel ──────────────────────────────────────────────────
 
 def test_animated_stories_channel_exists_and_animates():
@@ -270,54 +330,85 @@ def test_a_scene_records_everything_the_timeline_needs():
 
 # ── the cost guard ───────────────────────────────────────────────────
 
-def test_the_budget_animates_only_what_it_can_afford():
+def test_every_scene_animates_locally_and_costs_nothing():
+    """The default outcome for a beat is free local motion, not a still."""
     scenes = [
-        AnimatedScene(index=i, section_id=1, beat=f"b{i}",
+        AnimatedScene(index=i, section_id=1, beat=f"the room is quiet {i}",
                       start_time=i * 5.0, end_time=i * 5.0 + 5.0)
         for i in range(12)
     ]
-    budget = AnimationBudget(ceiling_usd=0.60, cost_per_clip_usd=0.15)
+    budget = AnimationBudget(ceiling_usd=0.15, cost_per_clip_usd=0.15)
     anim.plan_scenes(scenes, budget)
-    animated = [s for s in scenes if s.kind == "clip"]
-    assert len(animated) == 4          # 0.60 / 0.15
-    assert len(scenes) - len(animated) == 8
-    assert budget.skipped
+
+    assert all(s.kind == "local" for s in scenes)
+    assert all(s.local_motion for s in scenes), "every scene needs a recipe"
+    assert budget.spent_usd == pytest.approx(0.0)
 
 
-def test_unaffordable_scenes_are_stills_not_gaps():
+def test_only_articulated_motion_is_escalated_to_the_paid_model():
+    """A quiet beat stays free; stacked limb motion is what costs money."""
     scenes = [
-        AnimatedScene(index=i, section_id=1, beat="b",
+        AnimatedScene(index=1, section_id=1, beat="the lamp flickers quietly",
+                      start_time=0, end_time=4.0),
+        AnimatedScene(index=2, section_id=1,
+                      beat="he runs down the hall and climbs the railing",
+                      start_time=4, end_time=8.0),
+    ]
+    budget = AnimationBudget(ceiling_usd=0.15, cost_per_clip_usd=0.15)
+    anim.plan_scenes(scenes, budget)
+
+    assert scenes[0].kind == "local"
+    assert scenes[1].kind == "clip"
+    assert budget.spent_usd == pytest.approx(0.15)
+
+
+def test_the_paid_clip_cap_holds_even_when_the_budget_would_allow_more():
+    scenes = [
+        AnimatedScene(index=i, section_id=1,
+                      beat="she runs and jumps over the barrier",
                       start_time=i * 4.0, end_time=i * 4.0 + 4.0)
         for i in range(6)
     ]
-    budget = AnimationBudget(ceiling_usd=0.15, cost_per_clip_usd=0.15)
-    anim.plan_scenes(scenes, budget)
-    assert all(s.kind in ("clip", "still") for s in scenes)
+    # Budget alone would buy six clips; the cap is what stops it.
+    budget = AnimationBudget(ceiling_usd=10.0, cost_per_clip_usd=0.15)
+    anim.plan_scenes(scenes, budget, max_ai_clips=1)
+
     assert sum(1 for s in scenes if s.kind == "clip") == 1
+    assert sum(1 for s in scenes if s.kind == "local") == 5
+    assert budget.spent_usd == pytest.approx(0.15)
 
 
-def test_beats_too_short_or_too_long_are_never_animated():
+def test_beats_outside_the_clip_window_are_never_escalated():
+    """Too short or too long still animates -- locally, for nothing."""
     scenes = [
-        AnimatedScene(index=1, section_id=1, beat="tiny", start_time=0, end_time=1.0),
-        AnimatedScene(index=2, section_id=1, beat="huge", start_time=1, end_time=21.0),
-        AnimatedScene(index=3, section_id=1, beat="fine", start_time=21, end_time=25.0),
+        AnimatedScene(index=1, section_id=1, beat="he runs and jumps",
+                      start_time=0, end_time=1.0),
+        AnimatedScene(index=2, section_id=1, beat="he runs and jumps",
+                      start_time=1, end_time=21.0),
+        AnimatedScene(index=3, section_id=1, beat="he runs and jumps",
+                      start_time=21, end_time=25.0),
     ]
     budget = AnimationBudget(ceiling_usd=10.0, cost_per_clip_usd=0.15)
     anim.plan_scenes(scenes, budget)
-    assert scenes[0].kind == "still"
-    assert scenes[1].kind == "still"
+
+    assert scenes[0].kind == "local"
+    assert scenes[1].kind == "local"
     assert scenes[2].kind == "clip"
 
 
-def test_the_longest_beats_are_animated_first():
+def test_without_the_paid_provider_every_scene_still_animates():
+    """Wan being unavailable degrades cost, never the video."""
     scenes = [
-        AnimatedScene(index=1, section_id=1, beat="short", start_time=0, end_time=3.1),
-        AnimatedScene(index=2, section_id=1, beat="long", start_time=4, end_time=9.9),
+        AnimatedScene(index=1, section_id=1,
+                      beat="he runs down the hall and climbs the railing",
+                      start_time=0, end_time=4.0),
     ]
     budget = AnimationBudget(ceiling_usd=0.15, cost_per_clip_usd=0.15)
-    anim.plan_scenes(scenes, budget)
-    assert scenes[1].kind == "clip"
-    assert scenes[0].kind == "still"
+    anim.plan_scenes(scenes, budget, allow_ai=False)
+
+    assert scenes[0].kind == "local"
+    assert scenes[0].local_motion
+    assert budget.spent_usd == pytest.approx(0.0)
 
 
 def test_the_budget_never_goes_over():

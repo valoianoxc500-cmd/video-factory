@@ -27,6 +27,8 @@ const Icon = {
     "M12 3a2.2 2.2 0 1 0 0 4.4A2.2 2.2 0 0 0 12 3Zm0 4.4v6.2m0 0-3 6.4m3-6.4 3 6.4M7 10.2l5 1.4 5-1.4",
   credits:
     "M3 8h18v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8Zm0 0 2-3h14l2 3M8 13h4",
+  quotes:
+    "M9 7H6a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h1a3 3 0 0 1-3 3m14-10h-3a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h1a3 3 0 0 1-3 3",
 } as const;
 
 function NavIcon({ d }: { d: string }) {
@@ -123,6 +125,21 @@ export function Sidebar({ email }: { email: string }) {
           <span>
             Animated Stories
             <span className="nav-sub">Stick-figure scenes, animated</span>
+          </span>
+        </Link>
+
+        {/* A fourth standalone product. Not a video engine: it queues no job
+            and finishes in seconds, so it sits beside the sections rather
+            than inside any of them. */}
+        <Link
+          href="/dashboard/quotes"
+          data-surface="quotes"
+          className={is("/dashboard/quotes") ? "active" : ""}
+        >
+          <NavIcon d={Icon.quotes} />
+          <span>
+            Quote Studio
+            <span className="nav-sub">Photo to quote carousel</span>
           </span>
         </Link>
 

@@ -110,8 +110,9 @@ class AnimatedScene:
     beat: str
     start_time: float
     end_time: float
-    #: "clip" once animated, "still" when the budget or a failure left the
-    #: scene as its source image. Never "clip" without a file.
+    #: "local" when Remotion animates the still for free -- the normal case;
+    #: "clip" once a paid image-to-video file exists; "still" only when even
+    #: local animation could not be planned. Never "clip" without a file.
     kind: str = "still"
     source_image: str = ""
     clip_path: str = ""
@@ -120,6 +121,12 @@ class AnimatedScene:
     generation_status: str = "pending"
     attempts: int = 0
     error: str = ""
+    #: The free recipe Remotion renders. Present on every scene, including
+    #: ones that were later escalated, so a failed paid clip can fall back to
+    #: local motion rather than to a frozen frame.
+    local_motion: dict = field(default_factory=dict)
+    #: Why this beat was or was not escalated to the paid model.
+    escalation_reason: str = ""
 
     @property
     def duration(self) -> float:
@@ -255,40 +262,90 @@ def plan_scenes(
     *,
     min_clip_seconds: float = 3.0,
     max_clip_seconds: float = 6.0,
+    max_ai_clips: int = 1,
+    allow_ai: bool = True,
 ) -> list[AnimatedScene]:
-    """Decide which scenes are animated, inside the budget.
+    """Give every scene local motion, and escalate only what needs it.
 
-    Longest beats first. A five-second beat carries motion; a one-second beat
-    animated is a flicker that costs the same. Everything unaffordable stays a
-    still, which is a complete scene rather than a missing one.
+    The default outcome for a beat is `local`: Remotion animates the still for
+    nothing. A beat is escalated to the paid model only when
+    `local_motion.needs_ai_motion` says the movement is articulated -- limbs
+    moving relative to each other, which no camera transform reproduces -- and
+    then only while both `max_ai_clips` and the budget allow it.
+
+    `allow_ai=False` is the provider-unavailable path. It is not an error:
+    every scene still animates, the video still ships, and the manifest says
+    why nothing was escalated.
     """
-    eligible = [
-        s for s in scenes
-        if min_clip_seconds <= s.duration <= max_clip_seconds
-    ]
-    # Longest first, then in story order so the choice is deterministic.
-    eligible.sort(key=lambda s: (-s.duration, s.index))
+    from core.local_motion import needs_ai_motion, plan_local_motion
 
-    for scene in eligible:
+    # 1. Everything animates locally first. Nothing below can take this away;
+    #    an escalated scene keeps its recipe so a failed clip falls back to
+    #    motion rather than to a frozen frame.
+    for scene in scenes:
+        scene.local_motion = plan_local_motion(
+            scene.beat, scene.index, seconds=scene.duration
+        ).to_record()
+        scene.kind = "local"
+        scene.generation_status = "local"
+
+    # 2. Candidates: beats whose motion local compositing cannot fake, and
+    #    that are long enough for a clip to be worth generating.
+    candidates = []
+    for scene in scenes:
+        needs, reason = needs_ai_motion(scene.beat)
+        scene.escalation_reason = reason
+        if not needs:
+            continue
+        if not (min_clip_seconds <= scene.duration <= max_clip_seconds):
+            scene.escalation_reason = (
+                f"{reason}, but {scene.duration:.1f}s is outside the clip window"
+            )
+            continue
+        candidates.append(scene)
+
+    if not allow_ai:
+        for scene in candidates:
+            scene.escalation_reason = (
+                f"{scene.escalation_reason}; animated locally "
+                "(paid model unavailable)"
+            )
+        budget.skip(f"{len(candidates)} candidate(s): paid model unavailable")
+        candidates = []
+
+    # Hardest motion first, then story order so the choice is deterministic.
+    candidates.sort(key=lambda s: (-s.duration, s.index))
+
+    escalated = 0
+    for scene in candidates:
+        if escalated >= max_ai_clips:
+            scene.escalation_reason = (
+                f"{scene.escalation_reason}; animated locally "
+                f"(cap of {max_ai_clips} paid clip(s) reached)"
+            )
+            budget.skip(f"scene {scene.index}: paid clip cap reached")
+            continue
         if not budget.can_afford_one():
+            scene.escalation_reason = (
+                f"{scene.escalation_reason}; animated locally "
+                f"(${budget.remaining_usd:.3f} left)"
+            )
             budget.skip(
-                f"scene {scene.index}: animation budget exhausted "
+                f"scene {scene.index}: AI motion budget exhausted "
                 f"(${budget.remaining_usd:.3f} left)"
             )
             continue
         # Charge as the scene is committed, not after it is generated.
-        # Planning without charging left the budget permanently affordable and
-        # every eligible beat was marked for animation -- the ceiling existed
-        # and bounded nothing.
         budget.charge()
         scene.kind = "clip"
+        scene.generation_status = "pending"
+        escalated += 1
 
-    animated = sum(1 for s in scenes if s.kind == "clip")
     logger.info(
-        f"Animated Stories plan: {len(scenes)} scene(s), {animated} to animate "
-        f"within ${budget.ceiling_usd:.2f} "
-        f"(${budget.cost_per_clip_usd:.2f}/clip), "
-        f"{len(scenes) - animated} held as stills"
+        f"Animated Stories plan: {len(scenes)} scene(s), "
+        f"{len(scenes) - escalated} animated locally at $0, "
+        f"{escalated} escalated to the paid model "
+        f"(cap {max_ai_clips}, ${budget.ceiling_usd:.2f} budget)"
     )
     return scenes
 
@@ -298,8 +355,12 @@ def timeline_record(scenes: list[AnimatedScene], budget: AnimationBudget) -> dic
     return {
         "scenes": [s.to_record() for s in scenes],
         "total_scenes": len(scenes),
+        #: Paid image-to-video clips only.
         "animated_scenes": sum(1 for s in scenes if s.kind == "clip"),
-        "still_scenes": sum(1 for s in scenes if s.kind != "clip"),
+        #: Free Remotion-animated scenes -- normally all of them.
+        "local_scenes": sum(1 for s in scenes if s.kind == "local"),
+        #: Neither animated nor escalated. Should be zero.
+        "still_scenes": sum(1 for s in scenes if s.kind == "still"),
         "narration_seconds": round(
             max((s.end_time for s in scenes), default=0.0), 3
         ),

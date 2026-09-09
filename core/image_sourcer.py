@@ -63,6 +63,12 @@ _STOCK_DOMAINS = {
 
 _MAX_CONCURRENT_SOURCES = 6
 
+# How many times a drifted animated scene is redrawn before the decision is
+# left to image_review. Two: one redraw is the fix, and a character that is
+# still wrong after that is not going to be fixed by asking a third time --
+# it costs another full generation per beat to learn the same thing.
+_CHARACTER_REVIEW_MAX_ATTEMPTS = 2
+
 # How long one slot's recovery ladder may run, and how long the whole retry
 # pass may take. A slot walks several queries and pays for a vision review on
 # each, so without a clock a handful of stubborn beats ran back to back for
@@ -1414,6 +1420,19 @@ async def source_images(
         script_mutated = script_mutated or repaired
 
     try:
+        # Before the relevance gate: a frame with the wrong character is a
+        # defect whatever it depicts, and the animation stage downstream will
+        # otherwise animate it.
+        await enforce_character_consistency(
+            script=script,
+            config=config,
+            workspace=workspace,
+            descriptors=descriptors,
+            sourcing_log=sourcing_log,
+            raw_dir=raw_dir,
+            image_paths=image_paths,
+        )
+
         try:
             result = await review_gate(
                 content=None,
@@ -2193,6 +2212,102 @@ def _corrected_brief(desc: dict) -> str:
     # Suggestion first: it is the correction, and the generator weights the
     # opening of a prompt most heavily.
     return f"{suggestion}. {brief}"
+
+
+async def enforce_character_consistency(
+    *,
+    script: Script,
+    config: ChannelConfig,
+    workspace: Path,
+    descriptors: list[dict],
+    sourcing_log: list[dict],
+    raw_dir: Path,
+    image_paths: list[Path],
+) -> int:
+    """Redraw scenes whose character drifted from the reference sheet.
+
+    `animation_stage.review_character_consistency` names the files whose
+    character changed; this is the caller its docstring describes. Without it
+    the review was dead code and a run could ship twenty-one scenes of
+    twenty-one different people -- the failure the Character Bible was written
+    for.
+
+    Runs before image_review because a drifted character is a defect whatever
+    the frame depicts, and the animation stage downstream turns whatever is on
+    disk into motion. Fixing it after the relevance gate would mean animating
+    a frame the gate had already approved.
+
+    Beats are redrawn, not re-searched: the character stage has already
+    written each one a locked brief naming the exact character, so the fix is
+    to draw it again from that brief rather than to hunt for a photograph.
+
+    Animated channels only -- `animation_stage.enabled()` is false wherever
+    there is no `animation` block, so Football, Horror Stories and True
+    Stories never reach this. Returns how many scenes were redrawn.
+
+    `image_paths` is edited in place so the caller's later gates see the files
+    that actually exist afterwards.
+    """
+    from core import animation_stage
+
+    if not animation_stage.enabled(config) or not image_paths:
+        return 0
+
+    redrawn = 0
+    for attempt in range(1, _CHARACTER_REVIEW_MAX_ATTEMPTS + 1):
+        verdict = await animation_stage.review_character_consistency(
+            script, config, workspace, image_paths=list(image_paths)
+        )
+        if verdict.get("passed", True):
+            return redrawn
+
+        rejected = {str(name) for name in verdict.get("rejected") or []}
+        targets = [
+            d for d in descriptors
+            if d.get("img_path") and Path(d["img_path"]).name in rejected
+        ]
+        if not targets:
+            # Named a file no descriptor owns: nothing to redraw here, and
+            # image_review still gets its own look at it.
+            logger.warning(
+                f"[character_review] {len(rejected)} rejected file(s) matched "
+                f"no beat; leaving them to image_review"
+            )
+            return redrawn
+
+        if attempt == _CHARACTER_REVIEW_MAX_ATTEMPTS:
+            logger.warning(
+                f"[character_review] still inconsistent after {attempt} "
+                f"attempt(s); leaving the decision to image_review rather "
+                f"than redrawing indefinitely"
+            )
+            return redrawn
+
+        logger.info(
+            f"[character_review] redrawing {len(targets)} drifted scene(s) "
+            f"from their locked briefs (attempt {attempt})"
+        )
+        for desc in targets:
+            path = Path(desc["img_path"])
+            if path.exists():
+                path.unlink()
+            desc["sourced"] = False
+
+        await _generate_missing_visuals(
+            descriptors=targets,
+            config=config,
+            sourcing_log=sourcing_log,
+            allow_override=True,
+            limit_override=len(targets),
+            operation_label="character_consistency_redraw",
+        )
+        redrawn += len(targets)
+
+        image_paths[:] = sorted(raw_dir.glob("section_*_*.jpg")) or sorted(
+            raw_dir.glob("section_*_*.png")
+        )
+
+    return redrawn
 
 
 async def _generate_missing_visuals(

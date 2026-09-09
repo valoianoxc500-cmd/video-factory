@@ -1,4 +1,4 @@
-"""Video Factory — Main orchestrator + CLI entry point.
+﻿"""Video Factory — Main orchestrator + CLI entry point.
 
 Usage:
     python factory.py --channel demo_channel
@@ -38,6 +38,7 @@ from core.utils import (
     load_checkpoint,
     load_script,
     save_checkpoint,
+    save_script,
     setup_logging,
     find_output_video,
     parse_override_value,
@@ -73,7 +74,12 @@ def _output_video_path(workspace: Path, script: Script) -> Path:
 STAGES = [
     "planning",
     "script",
+    # Animated Stories only. Both are skipped outright on every channel whose
+    # config has no `animation.enabled`, which is all three of the others --
+    # they run the same stage list they always did.
+    "character",
     "image_source",
+    "animation",
     "audio_source",
     "process",
     "render_sections",
@@ -660,6 +666,32 @@ async def run_pipeline(
     else:
         script = load_script(ws)
 
+    # Character sheet, before any scene artwork. One reference drawing, then
+    # every slot prompt is rewritten to restate that same character -- which
+    # is what makes the scenes a series rather than twelve strangers.
+    # Skipped entirely unless the channel declares animation.
+    from core import animation_stage
+
+    if should_run("character") and animation_stage.enabled(config):
+        start_stage("character")
+        console.print(Panel("Stage 1b: Character Sheet", style="bold cyan"))
+        try:
+            with costs.bound_context(stage="character"):
+                await animation_stage.build_character_sheet(
+                    script, config, ws, plan=plan
+                )
+            save_script(ws, script)
+        except Exception as exc:
+            checkpoint.last_error = str(exc)
+            save_checkpoint(ws, checkpoint)
+            _finalize_outputs()
+            fail_pipeline(f"character sheet failed: {exc}")
+        complete_stage("character")
+        if should_stop("character"):
+            logger.info("Stopped after character")
+            _finalize_outputs()
+            return
+
     # Match footage, before media sourcing so that a slot backed by an
     # authorized clip is skipped by the image sourcer rather than sourced
     # twice. Gated on the channel declaring match_footage, so Football News
@@ -860,6 +892,27 @@ async def run_pipeline(
 
         # Both stages validated their own outputs before being marked
         # complete, so reaching here means the assets are on disk.
+
+        # Animation, after image_review has passed. Animating a rejected
+        # frame is the expensive way of shipping it, so only pictures that
+        # cleared the gate are ever sent. Skipped unless the channel animates.
+        if should_run("animation") and animation_stage.enabled(config):
+            start_stage("animation")
+            console.print(Panel("Stage 2b: Scene Animation", style="bold cyan"))
+            try:
+                with costs.bound_context(stage="animation"):
+                    await animation_stage.animate_scenes(script, config, ws)
+                save_script(ws, script)
+            except Exception as exc:
+                checkpoint.last_error = str(exc)
+                save_checkpoint(ws, checkpoint)
+                _finalize_outputs()
+                fail_pipeline(f"animation failed: {exc}")
+            complete_stage("animation")
+            if should_stop("animation"):
+                logger.info("Stopped after animation")
+                _finalize_outputs()
+                return
 
         if should_stop("image_source") or should_stop("audio_source"):
             logger.info("Stopped after sourcing")

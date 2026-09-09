@@ -37,6 +37,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Inter:wght@400;500;600&family=Caveat:wght@600&display=swap"
           rel="stylesheet"
         />
+        {/* Quote Studio's typography choices. Loaded here rather than in the
+            page because a slide is exported through canvas, and canvas can
+            only draw a face the document has already loaded -- a font
+            requested at export time renders as the fallback. Arabic faces
+            are listed first: they are the ones with no usable default. */}
+        <link
+          href="https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;700&family=Noto+Kufi+Arabic:wght@400;700&family=Cairo:wght@600;800&family=Playfair+Display:wght@700;900&family=JetBrains+Mono:wght@600&display=swap"
+          rel="stylesheet"
+        />
       </head>
       <body>{children}</body>
     </html>

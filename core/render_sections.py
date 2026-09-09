@@ -978,6 +978,23 @@ def _build_slot(
             f"{file_label}{img_path.suffix}",
         )
 
+        # Animated Stories attaches a motion recipe to the slot when the beat
+        # was animated locally. That is the whole difference between a scene
+        # that costs nothing and one that costs fifteen cents, so it takes
+        # priority over the plain pan-and-scan below. No other channel sets
+        # it, so their entries are unchanged.
+        local_motion = (slot.props or {}).get("local_motion")
+        if local_motion:
+            return {
+                "type": "component",
+                "component": "LocalAnimatedScene",
+                "props": {
+                    "image_path": static_name,
+                    "motion": local_motion,
+                },
+                "durationFrames": duration_frames,
+            }
+
         preset, direction = _image_motion_profile(section_id, sub_idx)
 
         return {
