@@ -88,6 +88,13 @@ class Settings(BaseSettings):
     elevenlabs_api_key: str = Field(default="", alias="ELEVENLABS_API_KEY")
     freesound_api_key: str = Field(default="", alias="FREESOUND_API_KEY")
 
+    # Thumbnails. fal.ai hosts the edit model every channel's thumbnail is
+    # composed with; it is used for nothing else, and scene visuals never
+    # reach it. Declared here rather than read straight from .env because
+    # `core.providers.base.credential` resolves through settings, so a
+    # provider cannot see a key that has no field.
+    fal_key: str = Field(default="", alias="FAL_KEY")
+
     # Research providers. Wikimedia Commons needs no key, only a User-Agent.
     youtube_api_key: str = Field(default="", alias="YOUTUBE_API_KEY")
     # NEWSAPI_KEY is the spelling already in use; NEWSAPI_API_KEY is also

@@ -200,8 +200,14 @@ def test_apply_settings_overrides_updates_settings(monkeypatch):
 
 
 def test_parse_allowed_review_failures_normalizes_aliases():
+    # `image_review` still parses -- the worker passes it -- but is dropped:
+    # it is unwaivable, so a rejected visual can no longer ship.
     assert _parse_allowed_review_failures("image_review,thumbnail,final_review") == {
-        "image_review",
+        "thumbnail_review",
+        "final_review",
+    }
+    assert _parse_allowed_review_failures("script,thumbnail,final") == {
+        "script_review",
         "thumbnail_review",
         "final_review",
     }
@@ -744,8 +750,9 @@ def test_main_passes_preview_flag_to_run_pipeline(monkeypatch):
 
     assert result.exit_code == 0
     assert calls["preview_remotion"] is True
+    # image_review is stripped at parse time. Preview mode re-adds it inside
+    # run_pipeline, where it is safe: that mode exports no video.
     assert calls["allow_review_failures"] == {
-        "image_review",
         "thumbnail_review",
         "final_review",
     }

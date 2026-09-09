@@ -1415,6 +1415,274 @@ async def generate_image_gemini(
 
 
 # ---------------------------------------------------------------------------
+# Scene visuals — generated only where real photography could not be found
+# ---------------------------------------------------------------------------
+
+
+async def generate_scene_image(
+    prompt: str,
+    output_path: Path,
+    *,
+    model: str | None = None,
+    aspect_ratio: str = "16:9",
+    image_size: str = "1K",
+    target_size: tuple[int, int] | None = None,
+    operation_label: str | None = None,
+) -> Path | None:
+    """Generate one scene still, on whichever generator the channel configures.
+
+    A single entry point so the *channel* decides its generator and the
+    sourcing code does not have to know which one it got. `model` comes from
+    `image_sourcing.generated_fallback_model`, so Horror and True Stories
+    reach fal's FLUX Schnell and every other channel keeps the Gemini path
+    byte for byte.
+
+    Returns the path on success and None on failure, matching
+    `generate_image_gemini`, so the caller's existing "the beat is still
+    unsourced" handling applies unchanged whichever generator ran.
+    """
+    if str(model or "").startswith("fal-ai/"):
+        return await _generate_scene_image_fal(
+            prompt,
+            output_path,
+            model=str(model),
+            aspect_ratio=aspect_ratio,
+            target_size=target_size,
+            operation_label=operation_label or "generate_scene_image",
+        )
+    # Module-global lookup on purpose: tests monkeypatch
+    # `clients.generate_image_gemini`, and the Gemini path must stay exactly
+    # what it was for every channel that has not opted in.
+    return await generate_image_gemini(
+        prompt,
+        output_path,
+        model=model,
+        aspect_ratio=aspect_ratio,
+        image_size=image_size,
+        operation_label=operation_label,
+    )
+
+
+async def _generate_scene_image_fal(
+    prompt: str,
+    output_path: Path,
+    *,
+    model: str,
+    aspect_ratio: str,
+    target_size: tuple[int, int] | None,
+    operation_label: str,
+) -> Path | None:
+    """One generated scene still from fal, traced and priced like the rest."""
+    from core.providers.scene_images import (
+        FluxSchnellProvider,
+        dimensions_for,
+        megapixels,
+    )
+
+    provider = FluxSchnellProvider()
+    status = provider.status()
+    if not status.usable:
+        logger.error(f"[scene] fal unavailable: {status.reason}")
+        return None
+
+    width, height = dimensions_for(aspect_ratio, target_size or (0, 0))
+    trace_ref = reserve_trace(
+        operation=operation_label,
+        service="generate_content_image",
+        model=provider.MODEL,
+    )
+    logger.info(
+        f"[scene] {provider.MODEL} {width}x{height} "
+        f"prompt=\"{prompt[:70]}…\"{_trace_suffix(trace_ref)}"
+    )
+
+    started_at = datetime.now()
+    t0 = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(provider.TIMEOUT, connect=10.0)
+        ) as http:
+            image_bytes = await provider.generate(
+                prompt, client=http, width=width, height=height
+            )
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(image_bytes)
+        elapsed = time.perf_counter() - t0
+
+        # fal bills per megapixel rounded up; the catalog rate is stated per
+        # *image* at the sizes this pipeline requests, so one image is
+        # recorded as one image. Counting megapixels here would price
+        # correctly but report three images for every one generated, and
+        # `images_generated` is a number people read.
+        billed = megapixels(width, height)
+        costs.record_generate_content_cost(
+            model=provider.MODEL,
+            usage_metadata=SimpleNamespace(),
+            operation=operation_label,
+            service="generate_content_image",
+            provider="fal_ai",
+            generated_images=1,
+        )
+        logger.info(
+            f"[scene] done — {elapsed:.1f}s → {output_path.name} "
+            f"({len(image_bytes):,} bytes, {billed}MP billed)"
+            f"{_trace_suffix(trace_ref)}"
+        )
+        if trace_ref:
+            payload = base_payload(
+                trace_ref,
+                started_at=started_at,
+                duration_seconds=elapsed,
+                status="ok",
+            )
+            payload["request"] = {
+                "provider": provider.name,
+                "model": provider.MODEL,
+                "prompt": prompt,
+                "width": width,
+                "height": height,
+                "aspect_ratio": aspect_ratio,
+                "output_path": str(output_path),
+            }
+            payload["response"] = {
+                "output_path": str(output_path),
+                "bytes": len(image_bytes),
+                "billed_megapixels": billed,
+            }
+            write_trace(trace_ref, payload)
+        return output_path
+
+    except Exception as e:
+        if trace_ref:
+            payload = base_payload(trace_ref, started_at=started_at, status="error")
+            payload["request"] = {
+                "provider": provider.name,
+                "model": provider.MODEL,
+                "prompt": prompt,
+                "output_path": str(output_path),
+            }
+            payload["response"] = {"error": str(e)}
+            write_trace(trace_ref, payload)
+        logger.error(f"Scene image generation failed: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Thumbnails — edited from a real photograph
+# ---------------------------------------------------------------------------
+
+
+@cached_file("image")
+async def edit_thumbnail_image(
+    prompt: str,
+    output_path: Path,
+    *,
+    source_images: list[Path],
+    aspect_ratio: str = "16:9",
+    operation_label: str | None = None,
+) -> Path | None:
+    """Compose a thumbnail by editing real photographs.
+
+    Deliberately a separate entry point from `generate_image_gemini`: scene
+    visuals and thumbnails are different jobs with different truth rules, and
+    keeping them apart is what stops a change to one from silently altering
+    the other. Nothing in scene sourcing reaches this function.
+
+    Returns the path on success, None on failure, exactly like the image
+    generator beside it -- so the thumbnail stage's existing retry and review
+    gate behave the same whichever produced the picture.
+    """
+    from core.providers.thumbnails import FalGeminiFlashEditProvider
+
+    provider = FalGeminiFlashEditProvider()
+    status = provider.status()
+    if not status.usable:
+        logger.error(f"[thumbnail] fal unavailable: {status.reason}")
+        return None
+
+    operation = operation_label or "thumbnail_edit"
+    trace_ref = reserve_trace(
+        operation=operation,
+        service="generate_content_image",
+        model=provider.MODEL,
+    )
+    bases = [Path(p).name for p in source_images]
+    logger.info(
+        f"[thumbnail] {provider.MODEL} editing {len(source_images)} source "
+        f"image(s) [{', '.join(bases)}] ar={aspect_ratio}"
+        f"{_trace_suffix(trace_ref)}"
+    )
+
+    started_at = datetime.now()
+    t0 = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(provider.TIMEOUT, connect=10.0)
+        ) as http:
+            image_bytes = await provider.edit(
+                prompt, list(source_images), client=http, aspect_ratio=aspect_ratio
+            )
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(image_bytes)
+        elapsed = time.perf_counter() - t0
+
+        # Priced per image rather than per token, so the Gemini token model
+        # does not describe it. Recorded as one generated image and left for
+        # the pricing table; a missing entry is reported rather than counted
+        # as free.
+        costs.record_generate_content_cost(
+            model=provider.MODEL,
+            usage_metadata=SimpleNamespace(),
+            operation=operation,
+            service="generate_content_image",
+            provider="fal_ai",
+            generated_images=1,
+        )
+        logger.info(
+            f"[thumbnail] done — {elapsed:.1f}s → {output_path.name} "
+            f"({len(image_bytes):,} bytes){_trace_suffix(trace_ref)}"
+        )
+        if trace_ref:
+            payload = base_payload(
+                trace_ref,
+                started_at=started_at,
+                duration_seconds=elapsed,
+                status="ok",
+            )
+            payload["request"] = {
+                "provider": provider.name,
+                "model": provider.MODEL,
+                "prompt": prompt,
+                "source_images": [str(p) for p in source_images],
+                "aspect_ratio": aspect_ratio,
+                "output_path": str(output_path),
+            }
+            payload["response"] = {
+                "output_path": str(output_path),
+                "bytes": len(image_bytes),
+            }
+            write_trace(trace_ref, payload)
+        return output_path
+
+    except Exception as e:
+        if trace_ref:
+            payload = base_payload(trace_ref, started_at=started_at, status="error")
+            payload["request"] = {
+                "provider": provider.name,
+                "model": provider.MODEL,
+                "prompt": prompt,
+                "source_images": [str(p) for p in source_images],
+                "output_path": str(output_path),
+            }
+            payload["response"] = {"error": str(e)}
+            write_trace(trace_ref, payload)
+        logger.error(f"Thumbnail edit failed: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # TTS — speech generation
 # ---------------------------------------------------------------------------
 

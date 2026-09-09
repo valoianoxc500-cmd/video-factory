@@ -49,12 +49,17 @@ class ElevenLabsNarrationProvider:
     #: 44.1 kHz matches what the mixer already expects from Freesound cues.
     OUTPUT_FORMAT = "mp3_44100_128"
 
+    #: Shared across every instance, deliberately.
+    #:
+    #: A per-instance limiter limits nothing here: the caller builds a fresh
+    #: provider for each section and then runs the sections concurrently, so
+    #: five "concurrency=1" limiters allowed five simultaneous requests and
+    #: ElevenLabs refused the run with `concurrent_limit_exceeded` (free plans
+    #: allow 2). One limiter on the class is what actually serialises them.
+    _limiter = RateLimiter(concurrency=1, min_interval=0.35)
+
     def __init__(self, api_key: str | None = None) -> None:
         self._key = api_key if api_key is not None else credential("elevenlabs_api_key")
-        # Narration is requested per section, several sections at once. One at
-        # a time keeps a long run inside the account's concurrency allowance
-        # rather than failing half the sections on a burst.
-        self._limiter = RateLimiter(concurrency=1, min_interval=0.35)
 
     def status(self) -> ProviderStatus:
         if not self._key:
@@ -114,7 +119,16 @@ class ElevenLabsNarrationProvider:
                 headers={"xi-api-key": self._key, "Content-Type": "application/json"},
                 json=payload,
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                # `raise_for_status` reports the status and nothing else. A
+                # bare 401 reads as "wrong key" when it is usually "right key,
+                # no scopes" -- ElevenLabs names the missing permission, and
+                # only the body carries it. A run that dies at narration
+                # should say which switch to flip.
+                raise RuntimeError(
+                    f"ElevenLabs returned {response.status_code}: "
+                    f"{response.text[:400]}"
+                )
             return response.content
 
         async with self._limiter:

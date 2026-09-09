@@ -48,8 +48,10 @@ def test_speaking_nothing_is_an_error():
 
 
 class _FakeResponse:
-    def __init__(self, content: bytes) -> None:
+    def __init__(self, content: bytes, status_code: int = 200, text: str = "") -> None:
         self.content = content
+        self.status_code = status_code
+        self.text = text
 
     def raise_for_status(self) -> None:
         pass
@@ -86,6 +88,35 @@ def test_the_request_names_the_configured_voice_and_nothing_else():
     assert "voice_prompt" not in json.dumps(client.payload)
 
 
+def test_concurrency_is_capped_across_instances_not_per_instance():
+    """The caller builds one provider per section and runs them together.
+
+    A per-instance limiter let five sections issue five simultaneous requests
+    and ElevenLabs refused the run with `concurrent_limit_exceeded`.
+    """
+    a = ElevenLabsNarrationProvider(api_key="sk_a")
+    b = ElevenLabsNarrationProvider(api_key="sk_b")
+    assert a._limiter is b._limiter, "each provider got its own limiter"
+
+
+def test_a_permissions_error_names_the_missing_scope(tmp_path):
+    """A bare 401 reads as "wrong key"; it is usually "key with no scopes"."""
+
+    class _Denied(_FakeClient):
+        async def post(self, url, *, params=None, headers=None, json=None):
+            return _FakeResponse(
+                b"",
+                status_code=401,
+                text='{"detail":{"message":"The API key you used is missing '
+                     'the permission text_to_speech to execute this '
+                     'operation.","status":"missing_permissions"}}',
+            )
+
+    provider = ElevenLabsNarrationProvider(api_key="sk_test")
+    with pytest.raises(RuntimeError, match="text_to_speech"):
+        asyncio.run(provider.speak("x", voice_id="v", client=_Denied()))
+
+
 def test_voice_settings_are_clamped_to_the_api_range():
     provider = ElevenLabsNarrationProvider(api_key="sk_test")
     client = _FakeClient()
@@ -104,17 +135,26 @@ def test_voice_settings_are_clamped_to_the_api_range():
 
 # ── the channel configs ───────────────────────────────────────────────
 
-def test_horror_asks_for_the_rudra_elevenlabs_voice():
+def test_horror_narrates_on_a_configured_elevenlabs_voice():
+    """Which voice is a deployment choice; that there IS one is the invariant.
+
+    It was Rudra, which is a `professional` Voice Library voice. ElevenLabs
+    refuses those on free plans via the API (402 payment_required), so the
+    channel runs on a premade voice until the account is upgraded. Asserting
+    the name here would fail on that switch without anything being wrong.
+
+    What must never change is the pair below: an empty id is the one failure
+    that does not announce itself -- routing falls through to Gemini, the run
+    completes, and the video ships in the wrong voice with nothing downstream
+    to catch it.
+    """
     config = load_channel_config("horror_stories")
     assert config.voice.provider == "elevenlabs"
-    assert "Rudra" in config.voice.voice_name
-    # An empty id is the one failure that does not announce itself: routing
-    # falls through to Gemini, the run completes, and the video is narrated by
-    # the wrong voice. Nothing downstream would catch it.
     assert config.voice.voice_id, (
         "horror_stories has no ElevenLabs voice_id, so narration would "
         "silently fall back to Gemini TTS"
     )
+    assert config.voice.voice_name, "the configured voice should be named"
 
 
 @pytest.mark.parametrize("language", ["ar", "en"])

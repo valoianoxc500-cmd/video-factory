@@ -90,6 +90,21 @@ _ALLOWED_REVIEW_FAILURE_GATES = {
     "thumbnail_review",
     "final_review",
 }
+
+#: Gates that may be named on the command line but can never be waived.
+#:
+#: `image_review` is the visual truth gate. Waiving it shipped a real video
+#: whose reviewer had said "several images were completely unrelated to the
+#: requested prompts... a movie poster, a street lamp instead of a car seat" --
+#: the run continued only because the gate was on the allow-fail list. The
+#: rejected beats are re-sourced and regenerated first, and when the channel's
+#: configured attempts are exhausted the video fails rather than shipping
+#: visuals its own reviewer rejected.
+#:
+#: Still accepted as a token rather than rejected outright: the worker passes
+#: `image_review` in its default ALLOWED_REVIEW_FAILURES, and making it a
+#: BadParameter would fail every production run at argument parsing.
+_UNWAIVABLE_REVIEW_GATES = {"image_review"}
 _REVIEW_FAILURE_GATE_ALIASES = {
     "script": "script_review",
     "image": "image_review",
@@ -159,6 +174,13 @@ def _parse_allowed_review_failures(raw: str | None) -> set[str]:
                 f"Unknown review gate '{token}'. Valid values: {valid}",
                 param_hint="--allow-review-failures",
             )
+        if gate_name in _UNWAIVABLE_REVIEW_GATES:
+            logger.warning(
+                f"[{gate_name}] cannot be waived and is being ignored: rejected "
+                f"visuals are re-sourced and regenerated, and a run that still "
+                f"fails the gate fails rather than shipping them"
+            )
+            continue
         allowed.add(gate_name)
     return allowed
 
@@ -214,6 +236,10 @@ async def run_pipeline(
     logger = setup_logging(channel_slug)
     allowed_review_failures = set(allow_review_failures or ())
     if preview_remotion:
+        # The one place image_review may still be waived. `--preview-remotion`
+        # stops before rendering and exports nothing, so a rejected frame can
+        # be looked at but can never reach a finished video -- which is the
+        # thing _UNWAIVABLE_REVIEW_GATES exists to prevent.
         allowed_review_failures.update({"script_review", "image_review"})
 
     # A language variant swaps the narration language, the voice and the

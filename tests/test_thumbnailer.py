@@ -1,4 +1,4 @@
-"""Tests for thumbnail strategy generation helpers."""
+﻿"""Tests for thumbnail strategy generation helpers."""
 
 import asyncio
 
@@ -177,15 +177,20 @@ def test_generate_ai_thumbnail_passes_prompt_inputs(monkeypatch, tmp_path):
         captured.update(kwargs)
         return "thumbnail prompt"
 
-    async def fake_generate_image_gemini(prompt, output_path, *, reference_image=None, operation_label=None):
-        assert prompt == "thumbnail prompt"
-        assert reference_image is None
+    async def fake_edit(prompt, output_path, *, source_images, aspect_ratio="16:9",
+                        operation_label=None):
+        # The strategy prompt still leads; the identity instruction is
+        # appended after it.
+        assert prompt.startswith("thumbnail prompt")
         assert operation_label == "thumbnail_generate"
         Image.new("RGB", THUMBNAIL_SIZE, color=(0, 0, 0)).save(output_path)
         return output_path
 
     monkeypatch.setattr(thumbnailer.prompts, "thumbnail_generation_prompt", fake_prompt)
-    monkeypatch.setattr(thumbnailer.clients, "generate_image_gemini", fake_generate_image_gemini)
+    monkeypatch.setattr(thumbnailer.clients, "edit_thumbnail_image", fake_edit)
+
+    source = tmp_path / "source.png"
+    Image.new("RGB", (1200, 800), color=(9, 9, 9)).save(source)
 
     output_path = tmp_path / "thumbnail.png"
     asyncio.run(_generate_ai_thumbnail(
@@ -197,6 +202,7 @@ def test_generate_ai_thumbnail_passes_prompt_inputs(monkeypatch, tmp_path):
         config=_config(),
         output_path=output_path,
         revision_notes="Make text clearer",
+        source_images=[source],
     ))
 
     assert output_path.exists()
@@ -214,15 +220,16 @@ def test_generate_ai_thumbnail_passes_reference_image(monkeypatch, tmp_path):
     def fake_prompt(**kwargs):
         return "thumbnail prompt"
 
-    async def fake_generate_image_gemini(prompt, output_path, *, reference_image=None, operation_label=None):
+    async def fake_edit(prompt, output_path, *, source_images, aspect_ratio="16:9",
+                        operation_label=None):
         captured["prompt"] = prompt
-        captured["reference_image"] = reference_image
+        captured["source_images"] = list(source_images)
         captured["operation_label"] = operation_label
         Image.new("RGB", THUMBNAIL_SIZE, color=(0, 0, 0)).save(output_path)
         return output_path
 
     monkeypatch.setattr(thumbnailer.prompts, "thumbnail_generation_prompt", fake_prompt)
-    monkeypatch.setattr(thumbnailer.clients, "generate_image_gemini", fake_generate_image_gemini)
+    monkeypatch.setattr(thumbnailer.clients, "edit_thumbnail_image", fake_edit)
 
     output_path = tmp_path / "thumbnail.png"
     asyncio.run(_generate_ai_thumbnail(
@@ -237,17 +244,23 @@ def test_generate_ai_thumbnail_passes_reference_image(monkeypatch, tmp_path):
         reference_instruction="Keep the same reference subject.",
     ))
 
-    assert captured["reference_image"] == reference_image
+    # The strategy's reference art reaches the edit as a source image rather
+    # than as its own parameter: the edit model takes pictures, not slots.
+    assert reference_image in captured["source_images"]
     assert captured["operation_label"] == "thumbnail_generate"
     assert "REFERENCE IMAGE INSTRUCTION" in captured["prompt"]
     assert "Keep the same reference subject." in captured["prompt"]
 
 
 def test_generate_ai_thumbnail_fails_when_model_returns_no_image(monkeypatch, tmp_path):
-    async def fake_generate_image_gemini(prompt, output_path, *, reference_image=None, operation_label=None):
+    async def fake_edit(prompt, output_path, *, source_images, aspect_ratio="16:9",
+                        operation_label=None):
         return None
 
-    monkeypatch.setattr(thumbnailer.clients, "generate_image_gemini", fake_generate_image_gemini)
+    monkeypatch.setattr(thumbnailer.clients, "edit_thumbnail_image", fake_edit)
+
+    source = tmp_path / "source.png"
+    Image.new("RGB", (1200, 800), color=(9, 9, 9)).save(source)
 
     with pytest.raises(RuntimeError, match="did not produce an image"):
         asyncio.run(_generate_ai_thumbnail(
@@ -258,12 +271,21 @@ def test_generate_ai_thumbnail_fails_when_model_returns_no_image(monkeypatch, tm
             content_context="Section 1: Powder",
             config=_config(),
             output_path=tmp_path / "thumbnail.png",
+            source_images=[source],
         ))
 
 
 def test_create_thumbnail_always_runs_review_gate(monkeypatch, tmp_path):
-    async def fake_generate_image_gemini(prompt, output_path, *, reference_image=None, operation_label=None):
+    async def fake_edit(prompt, output_path, *, source_images, aspect_ratio="16:9",
+                        operation_label=None):
         assert operation_label == "thumbnail_generate"
+        Image.new("RGB", THUMBNAIL_SIZE, color=(0, 0, 0)).save(output_path)
+        return output_path
+
+    # No sourced images in this workspace, so the stage generates a base and
+    # then edits it -- the final picture still comes from the edit model.
+    async def fake_base(prompt, output_path, *, reference_image=None,
+                        aspect_ratio="16:9", operation_label=None):
         Image.new("RGB", THUMBNAIL_SIZE, color=(0, 0, 0)).save(output_path)
         return output_path
 
@@ -272,7 +294,8 @@ def test_create_thumbnail_always_runs_review_gate(monkeypatch, tmp_path):
         assert kwargs["image_paths"] == [tmp_path / "thumbnail.png"]
         return {"approved": True, "attempts": 1, "flagged_for_review": False}
 
-    monkeypatch.setattr(thumbnailer.clients, "generate_image_gemini", fake_generate_image_gemini)
+    monkeypatch.setattr(thumbnailer.clients, "edit_thumbnail_image", fake_edit)
+    monkeypatch.setattr(thumbnailer.clients, "generate_image_gemini", fake_base)
     monkeypatch.setattr(thumbnailer, "review_gate", fake_review_gate)
 
     result = asyncio.run(create_thumbnail(_script(), _config(), tmp_path))

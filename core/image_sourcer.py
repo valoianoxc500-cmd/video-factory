@@ -204,6 +204,20 @@ def _record_candidate_provenance(
     }
 
 
+def _record_generated_asset_provenance(path: Path | str, record: dict) -> None:
+    """File a generated frame in the run's asset provenance.
+
+    Generated visuals were only ever appended to `sourcing_log`, which is a
+    different store from the one `asset_provenance.json` is written from. A
+    real Horror run therefore shipped three FLUX frames and reported
+    `generated: 0` -- the frames were in the video and absent from the record
+    that says which assets are photographs and which are not. That record is
+    the one downstream consumers read, so it has to carry them.
+    """
+    name = Path(path).name
+    _ASSET_PROVENANCE[name] = {**record, "file": name}
+
+
 #: How many beats in one run may fall through to the open-library tier.
 #: Six covers a normal shortfall; beyond that the run has a sourcing problem
 #: the next tier should handle rather than one more catalogue.
@@ -2265,7 +2279,7 @@ async def _generate_missing_visuals(
         if not target:
             continue
         try:
-            written = await clients.generate_image_gemini(
+            written = await clients.generate_scene_image(
                 item["prompt"],
                 Path(target),
                 model=model,
@@ -2274,6 +2288,10 @@ async def _generate_missing_visuals(
                 # minimum portrait size, and straight into final validation.
                 aspect_ratio=generation_aspect_ratio(target_size),
                 image_size="1K",
+                # Only the fal generator reads this; it sizes frames to the
+                # render target because its presets are all below the minimum
+                # source size this pipeline enforces.
+                target_size=target_size,
                 operation_label=operation_label,
             )
         except Exception as exc:
@@ -2315,7 +2333,12 @@ async def _generate_missing_visuals(
             prompt=item["prompt"],
             model=model,
         )
-        sourcing_log.append(visual.to_provenance())
+        provenance = visual.to_provenance()
+        sourcing_log.append(provenance)
+        # Both stores, not just the sourcing log: asset_provenance.json is
+        # written from _ASSET_PROVENANCE, and a generated frame missing from
+        # it reads as a sourced photograph.
+        _record_generated_asset_provenance(target, provenance)
 
         descriptor = by_slot.get((item["section_id"], item["sub_image_index"]))
         if descriptor is not None:
@@ -2889,7 +2912,7 @@ async def _source_single_image(
         if effective_lane == "illustration":
             logger.info(f"Sourcing illustration for {output_path.name}")
         target_size = tuple(config.video.resolution)
-        result = await clients.generate_image_gemini(
+        result = await clients.generate_scene_image(
             request["prompt"], output_path,
             model=request["model"],
             # Match the render target rather than the client's 16:9 default:
@@ -2897,6 +2920,7 @@ async def _source_single_image(
             # failed the minimum source size.
             aspect_ratio=generation_aspect_ratio(target_size),
             image_size="1K",
+            target_size=target_size,
             operation_label=request["operation"],
         )
         # A refusal, a safety block or a 429 comes back as None, and an
@@ -2915,6 +2939,16 @@ async def _source_single_image(
                 f"Sourced {output_path.name} from ai_gen"
                 f"{'(illustration)' if effective_lane == 'illustration' else ''}"
             )
+            # Same store as the fallback path: a generated frame absent from
+            # asset_provenance.json reads as a sourced photograph.
+            _record_generated_asset_provenance(output_path, {
+                "generated": True,
+                "source": "ai_generated_lane",
+                "provenance": "AI-generated illustration, not a photograph",
+                "model": request["model"],
+                "prompt": request["prompt"],
+                "lane": effective_lane,
+            })
             return "ai_gen"
         if result is not None:
             logger.warning(

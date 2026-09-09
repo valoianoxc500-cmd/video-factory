@@ -64,8 +64,12 @@ POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL_SECONDS", "15"))
 # (watermark on a sourced photo, kit-era accuracy on the thumbnail, a debatable
 # frame choice). Each still runs, still retries, and still writes its result
 # into the run's review log.
+# image_review is deliberately absent: it is the visual truth gate and
+# `factory._UNWAIVABLE_REVIEW_GATES` refuses to waive it anyway. Asking for it
+# here only produced a warning on every run. Rejected beats are re-sourced and
+# regenerated first; a run that still fails the gate fails.
 ALLOWED_REVIEW_FAILURES = os.environ.get(
-    "ALLOWED_REVIEW_FAILURES", "image_review,thumbnail_review,final_review"
+    "ALLOWED_REVIEW_FAILURES", "thumbnail_review,final_review"
 )
 
 # Each run leaves ~200 MB of intermediate media in workspace/. The durable copy

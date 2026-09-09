@@ -40,7 +40,31 @@ logger = logging.getLogger("video_factory")
 # Published per-image price for the fallback model. Recorded so the cost of
 # rescuing a run is visible next to the cost of the run itself, rather than
 # disappearing into the total.
+#
+# The fallback used to be one model, so one constant was the whole truth.
+# Horror and True Stories now generate on FLUX Schnell at a different rate,
+# and a single constant reported the same image at $0.0258 here and $0.009 in
+# the cost tracker -- two prices for one picture, one of them in the run's own
+# provenance. The rate is therefore looked up per model, and this constant
+# remains the fallback for a model the catalog does not price.
 COST_PER_IMAGE_USD = 0.00002 * 1290  # ~1290 output tokens per image
+
+
+def cost_per_image(model: str) -> float:
+    """The catalog's per-image rate for `model`, or the legacy estimate.
+
+    Never raises and never blocks generation: an unpriced model still gets a
+    number, and the cost tracker separately reports it as unpriced.
+    """
+    try:
+        from core.costs import _find_price
+
+        price = _find_price("generate_content_image", str(model or ""))
+        if price is not None and price.output_image_rate_usd_per_image:
+            return float(price.output_image_rate_usd_per_image)
+    except Exception:  # pragma: no cover - pricing must never break sourcing
+        pass
+    return COST_PER_IMAGE_USD
 
 
 class UnsafeVisualRequest(RuntimeError):
@@ -218,7 +242,12 @@ class FallbackBudget:
             "refused": len(self.refused),
             "refusal_reasons": self.refused[:10],
             "total_cost_usd": self.total_cost_usd,
-            "cost_per_image_usd": round(COST_PER_IMAGE_USD, 6),
+            # The rate actually charged for these frames, not a constant: a
+            # run that generated on FLUX must not report the Gemini rate.
+            "cost_per_image_usd": round(
+                self.generated[0].cost_usd if self.generated else COST_PER_IMAGE_USD,
+                6,
+            ),
         }
 
 
@@ -284,7 +313,7 @@ def record_generated(
         file=Path(path).name,
         prompt=prompt,
         model=model,
-        cost_usd=COST_PER_IMAGE_USD,
+        cost_usd=cost_per_image(model),
     )
     budget.record(visual)
     return visual

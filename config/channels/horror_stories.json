@@ -130,25 +130,25 @@
   "voice": {
     "provider": "elevenlabs",
     "language": "ar-SA",
-    "voice_name": "Rudra - Intense Documentary Narrator",
+    "voice_name": "Brian - Deep, Resonant and Comforting",
     "voice_prompt": "راوٍ بالعربية الفصحى بصوت عميق وهادئ، نبرة جادة وحميمة كأنه يتحدث إليك وحدك في غرفة مظلمة. إلقاء بطيء ومضبوط، مع وقفات مقصودة قبل التفاصيل المهمة. يبني التوتر تدريجيًا جملة بعد جملة، دون مبالغة ولا أداء مسرحي ولا رفع للصوت. مناسب لقصص الجرائم الحقيقية وحالات الاختفاء والألغاز غير المُفسَّرة.",
     "voice_prompt_variations": [
       "راوٍ بالعربية الفصحى بصوت عميق وهادئ، نبرة جادة وحميمة كأنه يتحدث إليك وحدك في غرفة مظلمة. إلقاء بطيء ومضبوط، مع وقفات مقصودة قبل التفاصيل المهمة. يبني التوتر تدريجيًا جملة بعد جملة، دون مبالغة ولا أداء مسرحي ولا رفع للصوت. مناسب لقصص الجرائم الحقيقية وحالات الاختفاء والألغاز غير المُفسَّرة.",
       "راوٍ وثائقي بالعربية الفصحى، صوت منخفض ورصين، يتحدث بهدوء وكأنه يكشف سرًّا لا يريد أن يسمعه أحد. صمت قصير بين الجمل، تصاعد محسوب في التوتر، نبرة باردة ومتزنة بلا انفعال.",
       "صوت عميق وهادئ بالعربية الفصحى، سرد متمهّل وواضح المخارج، يترك وقفة قصيرة قبل كل معلومة ثقيلة. يوحي بالغموض من خلال الهدوء لا من خلال التهويل، ولا يرفع الصوت أبدًا."
     ],
-    "voice_id": "vIdhHAZdn1bGjKe1dFw8"
+    "voice_id": "nPczCjzI2devNBz1zQrb"
   },
   "image_sourcing": {
     "generation_model": "gemini-2.5-flash-image",
     "web_photos_only": true,
     "generate_info_slide_illustrations": false,
     "generate_info_card_illustrations": false,
-    "style_prompt_suffix": "documentary photograph, natural available light, muted desaturated palette, no text, no watermark",
+    "style_prompt_suffix": "cinematic photorealistic still, shot on 35mm film, natural available light, shallow depth of field, true-to-period wardrobe and setting, muted desaturated palette, documentary realism, no text, no watermark, no logo, no illustration, no painting, no CGI look",
     "illustration_style_prompt_suffix": "clean educational illustration, simple shapes, warm balanced colors, no text",
     "allow_generated_fallback": true,
-    "max_generated_fallback_images": 5,
-    "generated_fallback_model": "gemini-3.1-flash-lite-image",
+    "max_generated_fallback_images": 40,
+    "generated_fallback_model": "fal-ai/flux/schnell",
     "allow_video_broll": true,
     "max_broll_ratio": 0.34,
     "complete_over_coverage": true,
@@ -283,14 +283,14 @@
       },
       "voice": {
         "language": "en-US",
-        "voice_name": "Rudra - Intense Documentary Narrator",
+        "voice_name": "Brian - Deep, Resonant and Comforting",
         "voice_prompt": "A deep, calm English narrator speaking as if to one listener in a dark room. Slow, controlled delivery with deliberate pauses before important details. Builds tension sentence by sentence, without theatrics or raised voice. Suited to true crime, disappearances and unexplained cases.",
         "voice_prompt_variations": [
           "A deep, calm English narrator, unhurried and intimate, letting the facts carry the dread.",
           "A restrained English documentary narrator: measured pace, precise consonants, no melodrama."
         ],
         "provider": "elevenlabs",
-        "voice_id": "vIdhHAZdn1bGjKe1dFw8"
+        "voice_id": "nPczCjzI2devNBz1zQrb"
       },
       "business_strategy": {
         "cta_rules": [

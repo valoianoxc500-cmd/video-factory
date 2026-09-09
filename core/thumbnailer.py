@@ -1,4 +1,4 @@
-"""Stage 8: full-AI thumbnail generation + Gate #3 review."""
+﻿"""Stage 8: full-AI thumbnail generation + Gate #3 review."""
 
 import logging
 from pathlib import Path
@@ -8,6 +8,7 @@ from PIL import Image, ImageOps
 import clients
 import prompts
 from core.reviewer import review_gate
+from core import thumbnail_source
 from core.thumbnail_text import draw_headline, is_rtl_text
 from core.utils import Script, ChannelConfig, ThumbnailStrategyConfig
 from settings import ASSETS_DIR
@@ -140,6 +141,27 @@ async def create_thumbnail(
     content_context = _thumbnail_content_context(script)
     logger.info(f"Thumbnail strategy: {strategy.name}")
 
+    # The photograph the thumbnail is built on. Chosen once and reused across
+    # every review attempt: a regeneration should change the composition, not
+    # silently change who is on the cover.
+    subjects = _story_subjects(script)
+    target = thumbnail_size(config)
+    picked = thumbnail_source.pick_source_images(
+        workspace, script, subjects, limit=1,
+        target_aspect=target[0] / target[1],
+        # The brief names who belongs on the cover. It outranks slot keywords,
+        # which are neither authoritative nor complete.
+        brief=script.thumbnail_brief,
+    )
+    source_images = [path for path, _ in picked]
+    # Which person each supplied image shows, in the order the images are
+    # sent, so the prompt can map face to photograph rather than leaving the
+    # model to guess which is which.
+    source_people = [
+        list(why.get("brief_people") or why.get("people") or []) for _, why in picked
+    ]
+    depicts_person = bool(picked and picked[0][1].get("depicts_person"))
+
     await _generate_ai_thumbnail(
         title=script.title,
         thumbnail_text=script.thumbnail_text,
@@ -151,6 +173,10 @@ async def create_thumbnail(
         reference_image=reference_image,
         reference_instruction=reference_instruction,
         revision_notes="",
+        source_images=source_images,
+        subjects=subjects,
+        source_people=source_people,
+        depicts_person=depicts_person,
     )
 
     async def _regenerate(content, feedback):
@@ -166,6 +192,10 @@ async def create_thumbnail(
             reference_image=reference_image,
             reference_instruction=reference_instruction,
             revision_notes=feedback_str,
+            source_images=source_images,
+            subjects=subjects,
+            source_people=source_people,
+            depicts_person=depicts_person,
         )
         return content
 
@@ -202,6 +232,11 @@ async def _generate_ai_thumbnail(
     reference_image: Path | None = None,
     reference_instruction: str | None = None,
     revision_notes: str = "",
+    source_images: list[Path] | None = None,
+    subjects: list[str] | None = None,
+    #: One list of names per source image, positionally aligned with them.
+    source_people: list[list[str]] | None = None,
+    depicts_person: bool = False,
 ) -> None:
     # Image models cannot spell right-to-left script, so for those languages
     # the artwork is generated text-free and the headline composited below.
@@ -225,16 +260,100 @@ async def _generate_ai_thumbnail(
             f"{reference_instruction}"
         )
 
-    result = await clients.generate_image_gemini(
+    # What the base actually shows decides what may be said about it.
+    #
+    # Claiming a person is present when the base is a trophy is what produced
+    # a thumbnail of two invented footballers: the instruction asserted a face
+    # to preserve, the picture had none, so the model supplied one. An object
+    # base gets an object instruction, and neither instruction ever asks for a
+    # named person to be drawn.
+    bases = list(source_images or [])
+    # Per-image people, in the order the images are sent.
+    per_image = list(source_people or [])
+    named = [n for group in per_image for n in group]
+    if bases:
+        if named:
+            # Say which photograph is whom. With two faces supplied and no
+            # mapping, the model is free to merge or swap them; naming image 1
+            # and image 2 is what makes "Bellingham on the left" actionable.
+            roster = "\n".join(
+                f"  - Image {index}: {', '.join(group)}"
+                for index, group in enumerate(per_image, start=1)
+                if group
+            )
+            prompt += (
+                "\n\nSOURCE PHOTOGRAPHS — REAL PEOPLE, PRESERVE THEM:\n"
+                f"{len(bases)} photograph(s) are supplied, in this order:\n"
+                f"{roster}\n"
+                "These are real people and they are the subject of this video. "
+                "Build the composition from them and place each where the "
+                "thumbnail description asks for that person. Preserve every "
+                "face, build, hair and kit exactly as photographed -- do not "
+                "replace, beautify, restyle, merge or substitute anyone. "
+                "Do NOT add, draw or invent any additional person: everyone "
+                "visible in the finished thumbnail must come from a supplied "
+                "photograph. You may relight, recolour, crop, cut out, extend "
+                "the background, add depth and add graphic elements around "
+                "them."
+            )
+        elif depicts_person:
+            prompt += (
+                "\n\nSOURCE PHOTOGRAPH — REAL PEOPLE, PRESERVE THEM:\n"
+                "The supplied photograph shows real people. Build the "
+                "composition around them and preserve their faces and clothing "
+                "exactly as photographed. Do not replace or substitute anyone, "
+                "and do not add any other identifiable person."
+            )
+        else:
+            prompt += (
+                "\n\nSOURCE PHOTOGRAPH — OBJECT OR PLACE, NO PEOPLE:\n"
+                "The supplied photograph shows an object or a location, not a "
+                "person. Build the composition around what is actually in it. "
+                "Do NOT add, draw or invent any recognisable person, player or "
+                "face -- a face you invent would not be anyone in this story. "
+                "You may relight, recolour, crop, extend the background, add "
+                "depth and add graphic elements."
+            )
+    # The strategy's own reference art is a separate input from the story's
+    # photograph: one says how the channel's thumbnails look, the other says
+    # who is on this one. Both are handed to the edit.
+    if reference_image is not None:
+        bases.append(reference_image)
+
+    target_size = thumbnail_size(config)
+    aspect_ratio = "9:16" if config.style.vertical_thumbnail else "16:9"
+
+    if not bases:
+        # Nothing photographic to edit. Fall back to the existing generator to
+        # obtain a base, then edit that -- so the final image still comes from
+        # the thumbnail model, as required, rather than shipping raw
+        # generator output.
+        logger.warning(
+            "No source image available for the thumbnail; generating a base "
+            "to edit"
+        )
+        base_path = output_path.with_name(f"{output_path.stem}_base.png")
+        base = await clients.generate_image_gemini(
+            prompt=prompt,
+            output_path=base_path,
+            reference_image=reference_image,
+            aspect_ratio=aspect_ratio,
+            operation_label="thumbnail_base_generate",
+        )
+        if base is None or not base_path.exists():
+            raise RuntimeError("Could not obtain a base image for the thumbnail")
+        bases = [base_path]
+
+    result = await clients.edit_thumbnail_image(
         prompt=prompt,
         output_path=output_path,
-        reference_image=reference_image,
+        source_images=bases,
+        aspect_ratio=aspect_ratio,
         operation_label="thumbnail_generate",
     )
     if result is None or not output_path.exists():
-        raise RuntimeError("Gemini thumbnail generation did not produce an image")
+        raise RuntimeError("Thumbnail edit did not produce an image")
 
-    target_size = thumbnail_size(config)
     img = Image.open(output_path).convert("RGB")
     if img.size != target_size:
         # Cover-crop rather than squash: a generated 16:9 image stretched into

@@ -184,7 +184,9 @@ def _reject_outdated_claims(research: dict, statuses: list) -> int:
     return rejected
 
 
-async def _retrieve_current_reporting(*, topic: str, angle: str) -> list:
+async def _retrieve_current_reporting(
+    *, topic: str, angle: str, config: ChannelConfig | None = None
+) -> list:
     """Dated articles about the topic from the configured news providers.
 
     Never raises: research is an enhancement, and losing it must not take down
@@ -193,7 +195,7 @@ async def _retrieve_current_reporting(*, topic: str, angle: str) -> list:
     try:
         items = await news_sources.fetch_current_news(
             topic,
-            trusted_domains=_TRUSTED_SOURCE_DOMAINS,
+            trusted_domains=trusted_domains_for(config),
             days=_STALE_AFTER_DAYS,
         )
     except Exception as exc:
@@ -478,7 +480,9 @@ async def research_topic(
     evidence: list[news_sources.NewsItem] = []
     statuses: list[player_facts.PlayerStatus] = []
     if _is_news_channel(config):
-        evidence = await _retrieve_current_reporting(topic=topic, angle=angle)
+        evidence = await _retrieve_current_reporting(
+            topic=topic, angle=angle, config=config
+        )
 
         # Which club each named player is at *now*, from a squad and transfer
         # record rather than from memory or from a headline. A model writing
@@ -547,7 +551,7 @@ async def research_topic(
         )
         return _research_from_evidence(evidence, statuses=statuses, reason="no search citations")
 
-    fabricated = _reject_fabricated_research(research)
+    fabricated = _reject_fabricated_research(research, config)
     if fabricated:
         logger.error(
             f"Research discarded — {fabricated}. Falling back to retrieved "
@@ -595,14 +599,27 @@ async def research_topic(
 # A story whose newest source predates this is background, not news.
 _STALE_AFTER_DAYS = 45
 
-# Outlets whose football reporting is reliable enough to state as fact. Matched
-# as domain suffixes, so "www.bbc.co.uk" and "bbc.co.uk" both count.
-_TRUSTED_SOURCE_DOMAINS = (
-    # Wire services and broadsheets
+# Outlets reliable enough to state as fact. Matched as domain suffixes, so
+# "www.bbc.co.uk" and "bbc.co.uk" both count.
+#
+# Split by what the channel is actually reporting on. A Horror run was being
+# judged against the football list and discarded every time -- "no citation
+# resolves to a recognised football news outlet" on a story about a highway
+# legend -- which dropped the research and left the scripter working without a
+# verified brief. The answer is a different allowlist, not a shorter one:
+# every list below is a closed set of named outlets, and a content farm or a
+# social post still resolves to nothing on any of them.
+
+# Wire services and quality press. Trusted for any subject, so shared.
+_WIRE_AND_PRESS = (
     "bbc.co.uk", "bbc.com", "reuters.com", "apnews.com", "nytimes.com",
     "theguardian.com", "telegraph.co.uk", "independent.co.uk", "thetimes.co.uk",
     "standard.co.uk", "mirror.co.uk", "dailymail.co.uk", "express.co.uk",
     "metro.co.uk", "inews.co.uk", "liverpoolecho.co.uk", "manchestereveningnews.co.uk",
+)
+
+# Football desks, governing bodies and squad data.
+_FOOTBALL_SOURCES = (
     # Sports desks
     "skysports.com", "espn.com", "espn.co.uk", "theathletic.com", "talksport.com",
     "goal.com", "football365.com", "90min.com", "fourfourtwo.com",
@@ -620,6 +637,55 @@ _TRUSTED_SOURCE_DOMAINS = (
     "bild.de", "record.pt", "abola.pt", "globo.com", "ole.com.ar",
     "kooora.com", "alkass.net", "filgoal.com", "yallakora.com",
 )
+
+# What a story channel can legitimately cite: reference works, public
+# archives, official records, and documentary journalism. Deliberately does
+# NOT include forums, video platforms, wikis anyone can edit beyond
+# Wikipedia, or the paranormal content farms that recycle each other -- a
+# legend still has to be attested somewhere accountable before the narration
+# may state anything as fact.
+_GENERAL_SOURCES = (
+    # Reference and encyclopedic
+    "wikipedia.org", "britannica.com", "snopes.com",
+    # Public archives and libraries
+    "archive.org", "loc.gov", "nationalarchives.gov.uk", "bl.uk",
+    "newspapers.com", "britishnewspaperarchive.co.uk", "trove.nla.gov.au",
+    # Official records
+    "gov.uk", "justice.gov", "fbi.gov", "ntsb.gov", "noaa.gov", "nps.gov",
+    "police.uk", "gov.au", "canada.ca",
+    # Documentary and long-form journalism
+    "npr.org", "pbs.org", "smithsonianmag.com", "nationalgeographic.com",
+    "atlasobscura.com", "history.com", "theatlantic.com", "newyorker.com",
+    "washingtonpost.com", "latimes.com", "chicagotribune.com", "abc.net.au",
+    "cbc.ca", "aljazeera.com", "dw.com", "france24.com",
+    # Academic
+    "jstor.org", "cambridge.org", "oup.com", "folklore-society.com",
+)
+
+#: Football. Unchanged in membership -- the same outlets as before the split.
+_TRUSTED_SOURCE_DOMAINS = _WIRE_AND_PRESS + _FOOTBALL_SOURCES
+
+#: Horror Stories and True Stories.
+_GENERAL_TRUSTED_DOMAINS = _WIRE_AND_PRESS + _GENERAL_SOURCES
+
+
+def trusted_domains_for(config: ChannelConfig | None) -> tuple[str, ...]:
+    """The outlets this channel's research may be built on.
+
+    A football transfer needs a football desk; a documented disappearance
+    needs an archive, a court record or a newspaper. Judging either by the
+    other's list rejects good research and teaches nothing.
+    """
+    if config is None or _is_news_channel(config):
+        return _TRUSTED_SOURCE_DOMAINS
+    return _GENERAL_TRUSTED_DOMAINS
+
+
+def _source_kind(config: ChannelConfig | None) -> str:
+    """How to name the missing source in the rejection reason."""
+    if config is None or _is_news_channel(config):
+        return "recognised football news outlet"
+    return "recognised news, archive or reference source"
 
 
 def _source_domains(research: dict) -> list[str]:
@@ -641,15 +707,20 @@ def _source_domains(research: dict) -> list[str]:
     return domains
 
 
-def _trusted_source_count(research: dict) -> int:
+def _trusted_source_count(
+    research: dict, config: ChannelConfig | None = None
+) -> int:
+    trusted = trusted_domains_for(config)
     return sum(
         1
         for d in _source_domains(research)
-        if any(d == t or d.endswith("." + t) for t in _TRUSTED_SOURCE_DOMAINS)
+        if any(d == t or d.endswith("." + t) for t in trusted)
     )
 
 
-def _reject_fabricated_research(research: dict) -> str:
+def _reject_fabricated_research(
+    research: dict, config: ChannelConfig | None = None
+) -> str:
     """Return a reason to discard the brief, or "" to keep it.
 
     Grounded search can return citations and still be fiction: a run for the
@@ -676,10 +747,10 @@ def _reject_fabricated_research(research: dict) -> str:
                 f"model is describing events that have not happened"
             )
 
-    trusted = _trusted_source_count(research)
+    trusted = _trusted_source_count(research, config)
     if research.get("sources") and trusted == 0:
         return (
-            "no citation resolves to a recognised football news outlet "
+            f"no citation resolves to a {_source_kind(config)} "
             f"(saw: {', '.join(_source_domains(research)[:6]) or 'none'})"
         )
     return ""

@@ -135,7 +135,10 @@ def test_generated_after_rejection_is_labelled_distinctly(monkeypatch, tmp_path)
         labels.append(kwargs.get("operation_label", ""))
         return None
 
-    monkeypatch.setattr(image_sourcer.clients, "generate_image_gemini", fake_generate)
+    # Patched at the dispatcher rather than at one generator: Horror now
+    # generates on FLUX and Football on Gemini, and the label has to survive
+    # either way.
+    monkeypatch.setattr(image_sourcer.clients, "generate_scene_image", fake_generate)
 
     _run(image_sourcer._generate_missing_visuals(
         descriptors=[_descriptor(1, 0, target, "x")],

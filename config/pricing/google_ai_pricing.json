@@ -54,6 +54,30 @@
     },
     {
       "service": "generate_content_image",
+      "model": "fal-ai/flux/schnell",
+      "output_image_rate_usd_per_image": 0.009,
+      "reconciliation_supported": false,
+      "source_url": "https://fal.ai/models/fal-ai/flux/schnell",
+      "notes": [
+        "Horror Stories and True Stories scene visuals only, and only for beats real photography could not fill. Football and thumbnails never reach this model.",
+        "fal publishes $0.003 per megapixel, billed rounded up to the next whole megapixel. This pipeline requests frames at its render target (1080x1920, rounded to the model's multiple-of-16 grid as 1088x1920 = 2.09MP, billed as 3MP), so one image costs 3 x $0.003 = $0.009. A channel rendering at a materially different size would need its own rate.",
+        "reconciliation_supported is false because fal bills separately from Google Cloud; these calls carry no vf_run label and never appear in the GCP billing export."
+      ]
+    },
+    {
+      "service": "generate_content_image",
+      "model": "fal-ai/gemini-25-flash-image/edit",
+      "output_image_rate_usd_per_image": 0.039,
+      "reconciliation_supported": false,
+      "source_url": "https://fal.ai/models/fal-ai/gemini-25-flash-image/edit",
+      "notes": [
+        "Thumbnails only. Every channel's final thumbnail is composed with this edit model; scene visuals never reach it.",
+        "Billed flat per generated image, not per token: fal publishes $0.039 per image ($1.00 for 25 runs). No token rates are listed because the request carries none, and the pipeline sends no usage metadata for this call.",
+        "reconciliation_supported is false because fal bills separately from Google Cloud. These calls carry no vf_run label and never appear in the GCP billing export, so tools/sql/reconcile_gcp_costs.sql cannot match them; claiming otherwise would make the reconciliation report look permanently short."
+      ]
+    },
+    {
+      "service": "generate_content_image",
       "model": "gemini-3-pro-image-preview",
       "input_rate_usd_per_1m_tokens": 2.0,
       "output_text_rate_usd_per_1m_tokens": 12.0,
