@@ -69,6 +69,101 @@ _MAX_CONCURRENT_SOURCES = 6
 # it costs another full generation per beat to learn the same thing.
 _CHARACTER_REVIEW_MAX_ATTEMPTS = 2
 
+#: char_id -> reference sheet, for the run in progress. Empty for every channel
+#: that does not animate, which is what keeps the reference path off Football,
+#: Horror Stories and True Stories entirely.
+_CHARACTER_SHEETS: dict[str, Path] = {}
+
+
+def _reset_character_sheets() -> None:
+    _CHARACTER_SHEETS.clear()
+
+
+def register_character_sheets(workspace: Path) -> int:
+    """Load this run's reference sheets so generation can attach them.
+
+    The character stage has already drawn one sheet per character and written
+    the bible. Until this, none of that reached the generator: every scene was
+    produced from the locked *text* alone (`ref=no` in the trace) and the
+    consistency review then compared the result against a picture the
+    generator had never seen. Describing a face in a paragraph is not the same
+    instruction as showing one.
+
+    Returns how many sheets are available. Zero on any non-animated channel,
+    where there is no bible to read.
+    """
+    _reset_character_sheets()
+    bible_path = workspace / "character" / "character_bible.json"
+    if not bible_path.exists():
+        return 0
+    try:
+        record = json.loads(bible_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(f"[character] could not read the bible: {str(exc)[:200]}")
+        return 0
+
+    for entry in record.get("characters") or []:
+        char_id = str((entry or {}).get("id") or "").strip()
+        sheet = str((entry or {}).get("sheet") or "").strip()
+        if not char_id or not sheet:
+            continue
+        path = workspace / "character" / sheet
+        if _is_usable_asset(path):
+            _CHARACTER_SHEETS[char_id] = path
+
+    if _CHARACTER_SHEETS:
+        logger.info(
+            f"[character] {len(_CHARACTER_SHEETS)} reference sheet(s) "
+            f"available to scene generation"
+        )
+    return len(_CHARACTER_SHEETS)
+
+
+def _character_reference_for(prompt: str) -> Path | None:
+    """The reference sheet for the first character a locked prompt names.
+
+    One sheet, not several: the generators here take a single reference image,
+    and the first ID in the prompt is the beat's own lead because
+    `characters_in_beat` orders the cast that way.
+    """
+    if not _CHARACTER_SHEETS:
+        return None
+    from core.character_bible import character_ids_in
+
+    for char_id in character_ids_in(prompt):
+        sheet = _CHARACTER_SHEETS.get(char_id)
+        if sheet is not None:
+            return sheet
+    return None
+
+
+def _with_reference_lock(prompt: str, reference: Path | None) -> str:
+    """Tell the model what the attached image is, and only when one is."""
+    if reference is None:
+        return prompt
+    from core.character_bible import REFERENCE_LOCK
+
+    return f"{prompt}\n\n{REFERENCE_LOCK}"
+
+
+def _reference_capable_model(
+    model: str, reference: Path | None, config: ChannelConfig
+) -> str:
+    """Prefer a generator that can actually see the sheet, when one exists.
+
+    Animated Stories generates most scenes on Gemini but falls back -- and
+    redraws rejected scenes -- on fal's Schnell, which is text-to-image. Those
+    were the beats with nothing but a paragraph to go on, which is why a redraw
+    so rarely fixed the drift it was asked to fix. Unreachable without a
+    reference sheet, so no sourced-photo channel changes.
+    """
+    if reference is None or not str(model or "").startswith("fal-ai/"):
+        return model
+    preferred = str(getattr(config.image_sourcing, "generation_model", "") or "")
+    if preferred and not preferred.startswith("fal-ai/"):
+        return preferred
+    return model
+
 # How long one slot's recovery ladder may run, and how long the whole retry
 # pass may take. A slot walks several queries and pays for a vision review on
 # each, so without a clock a handful of stubborn beats ran back to back for
@@ -800,6 +895,9 @@ async def source_images(
     raw_dir.mkdir(parents=True, exist_ok=True)
     _reset_provenance()
     _reset_pexels_dedup()
+    # Before the first beat is generated, not after: a sheet attached only at
+    # redraw time would leave every first-pass scene drawn blind.
+    register_character_sheets(workspace)
 
     # Per run, from the channel's own config, so a deployment whose primary
     # search is unavailable can lean on the open libraries without a code
@@ -2442,11 +2540,13 @@ async def _generate_missing_visuals(
         target = item.get("output_path")
         if not target:
             continue
+        reference = _character_reference_for(item["prompt"])
         try:
             written = await clients.generate_scene_image(
-                item["prompt"],
+                _with_reference_lock(item["prompt"], reference),
                 Path(target),
-                model=model,
+                model=_reference_capable_model(model, reference, config),
+                reference_image=reference,
                 # This call used to take the client's 16:9 default, so a
                 # 1080x1920 channel got 1376x768 frames: landscape, under the
                 # minimum portrait size, and straight into final validation.
@@ -3076,9 +3176,11 @@ async def _source_single_image(
         if effective_lane == "illustration":
             logger.info(f"Sourcing illustration for {output_path.name}")
         target_size = tuple(config.video.resolution)
+        reference = _character_reference_for(prompt)
         result = await clients.generate_scene_image(
-            request["prompt"], output_path,
-            model=request["model"],
+            _with_reference_lock(request["prompt"], reference), output_path,
+            model=_reference_capable_model(request["model"], reference, config),
+            reference_image=reference,
             # Match the render target rather than the client's 16:9 default:
             # a portrait channel was being handed landscape frames that then
             # failed the minimum source size.

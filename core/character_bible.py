@@ -106,6 +106,41 @@ IDENTITY_LOCK = (
 )
 
 
+#: Appended only when the character's reference sheet is actually attached to
+#: the generation call. Kept out of the stored prompt on purpose: a prompt that
+#: claims an attached image when none was sent describes a picture the model
+#: cannot see, which is worse than not mentioning one.
+REFERENCE_LOCK = (
+    "The attached image is the official reference sheet for the character(s) "
+    "named above. It is the authority on their appearance: copy the face, head "
+    "shape, hair, clothing, colours, accessories and proportions from it "
+    "exactly, including skin tone and any facial shading it shows. Where the "
+    "written description and the reference sheet could be read differently, "
+    "follow the reference sheet. Draw the same character in the new scene "
+    "described above -- do not redraw the reference sheet itself, and do not "
+    "copy its plain background, its multiple views or its head close-ups."
+)
+
+#: `[char_01]` markers, as `locked_description` writes them.
+_ID_PATTERN = re.compile(r"\[(char_\d+)\]")
+
+
+def character_ids_in(text: str) -> list[str]:
+    """The character IDs a locked prompt names, in order, without repeats.
+
+    The bound scene prompt is the only thing the generator call has in hand at
+    the point where a reference sheet could be attached, so the cast has to be
+    readable back out of it. `locked_description` writes the ID in brackets for
+    exactly this reason.
+    """
+    seen: list[str] = []
+    for match in _ID_PATTERN.finditer(str(text or "")):
+        char_id = match.group(1)
+        if char_id not in seen:
+            seen.append(char_id)
+    return seen
+
+
 @dataclass
 class CharacterBible:
     """The full cast, by ID."""
@@ -298,6 +333,16 @@ def sheet_prompt(character: Character, style: str, exclusions: str) -> str:
         "expression. Identical head shape, identical clothing, identical "
         "colours and identical proportions in every view.\n\n"
         f"{locked_description(character)}\n\n"
+        # The sheet is what the consistency review compares every scene
+        # against, so anything it invents becomes a rule no scene was told
+        # about. A run was rejected for scenes having "plain white faces and
+        # lacking the skin tone and blush details shown in the reference
+        # sheets" -- neither of which the description mentions. The scenes were
+        # faithful to the text; the sheet had added detail on its own.
+        "Draw ONLY what the description above states. Do not add skin tone, "
+        "blush, freckles, make-up, patterns, logos, extra clothing layers or "
+        "accessories that are not listed. Anything you invent here becomes a "
+        "rule every later scene has to match.\n\n"
         f"{IDENTITY_LOCK}\n\n"
         f"{style} {exclusions}"
     )

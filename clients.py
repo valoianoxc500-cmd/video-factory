@@ -1428,6 +1428,7 @@ async def generate_scene_image(
     image_size: str = "1K",
     target_size: tuple[int, int] | None = None,
     operation_label: str | None = None,
+    reference_image: Path | None = None,
 ) -> Path | None:
     """Generate one scene still, on whichever generator the channel configures.
 
@@ -1440,8 +1441,20 @@ async def generate_scene_image(
     Returns the path on success and None on failure, matching
     `generate_image_gemini`, so the caller's existing "the beat is still
     unsourced" handling applies unchanged whichever generator ran.
+
+    `reference_image` is how Animated Stories keeps one character across
+    twenty-one scenes: the character's reference sheet goes in with the prompt
+    so the model can see who it is drawing rather than reconstruct them from a
+    paragraph. Only the Gemini generator accepts one -- fal's Schnell is
+    text-to-image -- so a caller with a sheet in hand should choose a
+    reference-capable model; passing one to fal is a no-op, not an error.
     """
     if str(model or "").startswith("fal-ai/"):
+        if reference_image:
+            logger.debug(
+                f"{model} cannot take a reference image; "
+                f"generating {output_path.name} from the prompt alone"
+            )
         return await _generate_scene_image_fal(
             prompt,
             output_path,
@@ -1460,6 +1473,7 @@ async def generate_scene_image(
         aspect_ratio=aspect_ratio,
         image_size=image_size,
         operation_label=operation_label,
+        reference_image=reference_image,
     )
 
 
