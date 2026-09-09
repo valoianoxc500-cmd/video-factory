@@ -1,82 +1,120 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  COST_PER_SLIDE_USD,
   FONTS,
-  MAX_SLIDES,
-  MIN_SLIDES,
+  MAX_QUOTES,
+  MIN_QUOTES,
   QUOTE_LANGUAGES,
-  STYLES,
-  estimateCost,
   fontById,
   isQuoteSettable,
   isRtl,
   normaliseHandle,
-  styleById,
   type QuoteLanguage,
-  type Slide,
+  type QuoteProject,
 } from "@/lib/quotes";
+import {
+  BACKGROUNDS,
+  DEFAULT_BACKGROUND,
+  backgroundById,
+  inkFor,
+  paintBackground,
+  type BackgroundId,
+} from "@/lib/quote-backgrounds";
 import { customerSafeError } from "@/lib/customer-errors";
 
 /**
  * Quote Studio.
  *
- * The deck lives in this component and nowhere else -- there is no job row and
- * no worker. Backgrounds come back from the API as data URIs and the
- * typography is drawn over them in the DOM, which is what makes the preview
- * live: editing a quote re-renders instantly and costs nothing, because the
- * words were never part of the generated image.
+ * Everything a slide is made of is local: the background comes from a fixed
+ * library of numbers, the typography is CSS, and the export is canvas. Only
+ * the quote *words* are written by a model. That split is what makes changing
+ * a background instant and free, and what makes a saved project reopen
+ * looking exactly as it did.
  *
- * Export goes through canvas rather than screenshotting the DOM. The same
- * layout maths runs twice -- once in CSS for the preview, once on the canvas
- * for the file -- and `layoutLines` below is shared by both so they cannot
- * drift apart.
+ * The preview is DOM and the export is canvas, so the same layout is
+ * expressed twice. They are kept honest by sharing the one thing that would
+ * drift silently -- the ink palette, which both take from `inkFor` rather
+ * than hard-coding per background.
  */
 
-type Step = "brief" | "quotes" | "design" | "deck";
-
 const RATIOS = [
-  { id: "9:16", label: "9:16", hint: "Stories & Reels", w: 1080, h: 1920 },
-  { id: "4:5", label: "4:5", hint: "Feed carousel", w: 1080, h: 1350 },
+  { id: "4:5" as const, label: "4:5", hint: "Feed carousel", w: 1080, h: 1350 },
+  { id: "9:16" as const, label: "9:16", hint: "Stories & Reels", w: 1080, h: 1920 },
 ];
 
-export function QuoteStudio() {
-  // ── brief ──────────────────────────────────────────────────────────
-  const [photo, setPhoto] = useState<string>("");
-  const [photoName, setPhotoName] = useState("");
-  const [name, setName] = useState("");
-  const [username, setUsername] = useState("");
-  const [language, setLanguage] = useState<QuoteLanguage>("en");
-  const [topic, setTopic] = useState("");
+type Ratio = (typeof RATIOS)[number]["id"];
+
+type Card = {
+  id: string;
+  text: string;
+  kind: "quote" | "outro";
+};
+
+export function QuoteStudio({
+  initialProject = null,
+}: {
+  initialProject?: QuoteProject | null;
+}) {
+  // ── the person ─────────────────────────────────────────────────────
+  const snapshot = initialProject?.profileSnapshot;
+  const [photo, setPhoto] = useState(snapshot?.photo ?? "");
+  const [name, setName] = useState(snapshot?.displayName ?? "");
+  const [username, setUsername] = useState(snapshot?.username ?? "");
+  const [language, setLanguage] = useState<QuoteLanguage>(
+    initialProject?.language ?? "en",
+  );
+  const [topic, setTopic] = useState(initialProject?.topic ?? "");
 
   // ── design ─────────────────────────────────────────────────────────
-  const [fontId, setFontId] = useState("editorial");
-  const [styleId, setStyleId] = useState("noir");
-  const [ratioId, setRatioId] = useState("9:16");
-  const [slideCount, setSlideCount] = useState(6);
+  const [fontId, setFontId] = useState(initialProject?.fontId ?? FONTS.en[0].id);
+  const [ratioId, setRatioId] = useState<Ratio>(initialProject?.ratio ?? "4:5");
+  // White by default, and whatever the project was saved with when reopened.
+  const [backgroundId, setBackgroundId] = useState<BackgroundId>(
+    initialProject?.backgroundId ?? DEFAULT_BACKGROUND,
+  );
 
-  // ── generated ──────────────────────────────────────────────────────
-  const [candidates, setCandidates] = useState<string[]>([]);
-  const [chosen, setChosen] = useState<string[]>([]);
-  const [slides, setSlides] = useState<Slide[]>([]);
-  const [step, setStep] = useState<Step>("brief");
+  // ── content ────────────────────────────────────────────────────────
+  const [candidates, setCandidates] = useState<string[]>(
+    initialProject?.quotes.map((q) => q.text) ?? [],
+  );
+  const [chosen, setChosen] = useState<string[]>(
+    initialProject?.quotes.filter((q) => q.selected).map((q) => q.text) ?? [],
+  );
   const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [exporting, setExporting] = useState({ done: 0, total: 0 });
 
   const fileRef = useRef<HTMLInputElement>(null);
 
   const rtl = isRtl(language);
   const font = fontById(language, fontId);
-  const style = styleById(styleId);
+  const background = backgroundById(backgroundId);
+  const ink = useMemo(() => inkFor(background), [background]);
   const ratio = RATIOS.find((r) => r.id === ratioId) ?? RATIOS[0];
   const handle = normaliseHandle(username);
 
-  // Cost is shown before anything is spent, and counts the outro slide,
-  // because a number that excludes part of the run is worse than none.
-  const estimate = useMemo(() => estimateCost(slideCount), [slideCount]);
+  // Switching language switches the typeface with it: an Arabic quote in a
+  // Latin display face falls back mid-sentence and stops looking designed.
+  useEffect(() => {
+    if (!FONTS[language].some((f) => f.id === fontId)) {
+      setFontId(FONTS[language][0].id);
+    }
+  }, [language, fontId]);
+
+  const cards: Card[] = useMemo(
+    () => [
+      ...chosen.map((text, i) => ({ id: `q${i}`, text, kind: "quote" as const })),
+      {
+        id: "outro",
+        text: rtl ? "تابعني للمزيد" : "Follow for more",
+        kind: "outro" as const,
+      },
+    ],
+    [chosen, rtl],
+  );
 
   // ── photo ──────────────────────────────────────────────────────────
 
@@ -86,14 +124,15 @@ export function QuoteStudio() {
       setError("Choose an image file.");
       return;
     }
-    if (file.size > 8 * 1024 * 1024) {
-      setError("That photo is over 8MB. Use a smaller one.");
+    // Matches the repository's stored-photo ceiling, so a photo that uploads
+    // here cannot fail to save later.
+    if (file.size > 1_000_000) {
+      setError("That photo is over 1MB. Use a smaller one.");
       return;
     }
     const reader = new FileReader();
     reader.onload = () => {
       setPhoto(String(reader.result ?? ""));
-      setPhotoName(file.name);
       setError(null);
     };
     reader.onerror = () => setError("Could not read that file.");
@@ -113,15 +152,15 @@ export function QuoteStudio() {
       const res = await fetch("/api/quotes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic, name, language, count: slideCount }),
+        body: JSON.stringify({ topic, name, language, count: MIN_QUOTES + 1 }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(customerSafeError(data.error ?? "Could not write quotes."));
+      if (!res.ok) throw new Error(data.error ?? "Could not write quotes.");
       const list: string[] = data.quotes ?? [];
       setCandidates(list);
-      // Pre-select the first N that will actually set large.
-      setChosen(list.filter((q) => isQuoteSettable(q, language)).slice(0, slideCount));
-      setStep("quotes");
+      setChosen(
+        list.filter((q) => isQuoteSettable(q, language)).slice(0, MIN_QUOTES + 1),
+      );
     } catch (err) {
       setError(customerSafeError((err as Error).message));
     } finally {
@@ -132,7 +171,7 @@ export function QuoteStudio() {
   function toggleQuote(quote: string) {
     setChosen((prev) => {
       if (prev.includes(quote)) return prev.filter((q) => q !== quote);
-      if (prev.length >= slideCount) return prev;
+      if (prev.length >= MAX_QUOTES) return prev;
       return [...prev, quote];
     });
   }
@@ -147,112 +186,12 @@ export function QuoteStudio() {
     });
   }
 
-  // ── slides ─────────────────────────────────────────────────────────
-
-  async function generateSlide(
-    variant: number,
-    isOutro: boolean,
-  ): Promise<{ image?: string; error?: string }> {
-    try {
-      const res = await fetch("/api/quotes/slides", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          image: photo,
-          styleId,
-          variant,
-          isOutro,
-          ratio: ratioId,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) return { error: customerSafeError(data.error ?? "Generation failed.") };
-      return { image: data.image };
-    } catch {
-      return { error: "Network error." };
-    }
-  }
-
-  async function buildCarousel() {
-    if (!photo) {
-      setError("Upload a photo of the person first.");
-      return;
-    }
-    if (!chosen.length) {
-      setError("Choose at least one quote.");
-      return;
-    }
-
-    const deck: Slide[] = [
-      ...chosen.map((text, i) => ({
-        id: `q${i}-${Date.now()}`,
-        text,
-        image: "",
-        status: "pending" as const,
-        kind: "quote" as const,
-      })),
-      {
-        id: `outro-${Date.now()}`,
-        text: rtl ? "تابعني للمزيد" : "Follow for more",
-        image: "",
-        status: "pending" as const,
-        kind: "outro" as const,
-      },
-    ];
-
-    setSlides(deck);
-    setStep("deck");
-    setBusy(true);
-    setError(null);
-    setProgress({ done: 0, total: deck.length });
-
-    // Sequential on purpose. The edit model is rate-limited per key, and a
-    // burst of eight returns 429s that read to the user as "it failed"
-    // rather than "slow down".
-    for (let i = 0; i < deck.length; i++) {
-      setSlides((prev) =>
-        prev.map((s, j) => (j === i ? { ...s, status: "generating" } : s)),
-      );
-      const result = await generateSlide(i, deck[i].kind === "outro");
-      setSlides((prev) =>
-        prev.map((s, j) =>
-          j === i
-            ? result.image
-              ? { ...s, image: result.image, status: "ready" }
-              : { ...s, status: "failed", error: result.error }
-            : s,
-        ),
-      );
-      setProgress({ done: i + 1, total: deck.length });
-    }
-    setBusy(false);
-  }
-
-  async function regenerateSlide(index: number) {
-    const slide = slides[index];
-    if (!slide || busy) return;
-    setSlides((prev) =>
-      prev.map((s, j) => (j === index ? { ...s, status: "generating" } : s)),
-    );
-    // A different variant seed, so "regenerate" visibly changes something.
-    const result = await generateSlide(index + slides.length, slide.kind === "outro");
-    setSlides((prev) =>
-      prev.map((s, j) =>
-        j === index
-          ? result.image
-            ? { ...s, image: result.image, status: "ready", error: undefined }
-            : { ...s, status: "failed", error: result.error }
-          : s,
-      ),
-    );
-  }
-
-  function editSlideText(index: number, text: string) {
-    setSlides((prev) => prev.map((s, j) => (j === index ? { ...s, text } : s)));
+  function editChosen(index: number, text: string) {
+    setChosen((prev) => prev.map((q, i) => (i === index ? text : q)));
   }
 
   function move(from: number, to: number) {
-    setSlides((prev) => {
+    setChosen((prev) => {
       if (to < 0 || to >= prev.length) return prev;
       const next = [...prev];
       const [item] = next.splice(from, 1);
@@ -261,41 +200,71 @@ export function QuoteStudio() {
     });
   }
 
+  // ── saving ─────────────────────────────────────────────────────────
+
+  async function saveProject() {
+    if (chosen.length < MIN_QUOTES) {
+      setError(`Choose at least ${MIN_QUOTES} quotes before saving.`);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const payload = {
+        topic,
+        language,
+        fontId,
+        ratio: ratioId,
+        backgroundId,
+        profile: { photo, displayName: name, username, preferredLanguage: language },
+        quotes: chosen.map((text, position) => ({
+          id: `q${position}`,
+          text,
+          selected: true,
+          position,
+        })),
+      };
+      const res = await fetch(
+        initialProject ? `/api/quotes/projects/${initialProject.id}` : "/api/quotes/projects",
+        {
+          method: initialProject ? "PATCH" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Could not save.");
+      setNotice("Saved.");
+    } catch (err) {
+      setError(customerSafeError((err as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // ── export ─────────────────────────────────────────────────────────
 
-  const exportSlide = useCallback(
-    async (slide: Slide, index: number) => {
+  const exportCard = useCallback(
+    async (card: Card, index: number) => {
       const canvas = document.createElement("canvas");
       canvas.width = ratio.w;
       canvas.height = ratio.h;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 
-      if (slide.image) {
-        const img = new Image();
-        img.src = slide.image;
-        await new Promise((res, rej) => {
-          img.onload = res;
-          img.onerror = rej;
-        });
-        drawCover(ctx, img, canvas.width, canvas.height);
-      } else {
-        ctx.fillStyle = "#0a0c10";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-      }
-
-      drawScrim(ctx, canvas.width, canvas.height, style.id);
-      drawSlideText(ctx, {
-        text: slide.text,
-        kind: slide.kind,
+      paintBackground(ctx, backgroundId, canvas.width, canvas.height);
+      await drawCard(ctx, {
+        text: card.text,
+        kind: card.kind,
         width: canvas.width,
         height: canvas.height,
         rtl,
         font,
-        ink: style.ink,
-        accent: style.accent,
+        ink,
         name,
         handle,
+        photo,
       });
 
       const blob: Blob | null = await new Promise((res) =>
@@ -305,23 +274,24 @@ export function QuoteStudio() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `slide-${String(index + 1).padStart(2, "0")}.png`;
+      a.download = `quote-${String(index + 1).padStart(2, "0")}.png`;
       a.click();
       URL.revokeObjectURL(url);
     },
-    [ratio, style, rtl, font, name, handle],
+    [ratio, backgroundId, rtl, font, ink, name, handle, photo],
   );
 
   async function exportAll() {
-    for (let i = 0; i < slides.length; i++) {
-      await exportSlide(slides[i], i);
+    setExporting({ done: 0, total: cards.length });
+    for (let i = 0; i < cards.length; i++) {
+      await exportCard(cards[i], i);
+      setExporting({ done: i + 1, total: cards.length });
       // Browsers drop rapid successive downloads; a beat between them is the
       // difference between eight files and two.
-      await new Promise((r) => setTimeout(r, 350));
+      await new Promise((r) => setTimeout(r, 320));
     }
+    setExporting({ done: 0, total: 0 });
   }
-
-  const ready = slides.filter((s) => s.status === "ready").length;
 
   // ── render ─────────────────────────────────────────────────────────
 
@@ -332,20 +302,11 @@ export function QuoteStudio() {
           {error}
         </p>
       )}
+      {notice && <p className="notice qs-ok">{notice}</p>}
 
-      <ol className="qs-steps" aria-label="Progress">
-        {(["brief", "quotes", "design", "deck"] as Step[]).map((s, i) => (
-          <li key={s} className={step === s ? "is-current" : ""}>
-            <span className="qs-step-n">{i + 1}</span>
-            {["Brief", "Quotes", "Design", "Deck"][i]}
-          </li>
-        ))}
-      </ol>
-
-      {/* ── 1. brief ─────────────────────────────────────────────── */}
+      {/* ── the person ───────────────────────────────────────────── */}
       <section className="qs-panel">
         <h2 className="qs-h">The person</h2>
-
         <div className="qs-brief">
           <div>
             <button
@@ -364,11 +325,10 @@ export function QuoteStudio() {
               ) : (
                 <span className="qs-drop-empty">
                   <strong>Upload a photo</strong>
-                  <span>Their face, clearly lit. JPG or PNG, under 8MB.</span>
+                  <span>Square works best. Under 1MB.</span>
                 </span>
               )}
             </button>
-            {photoName && <p className="qs-filename">{photoName}</p>}
             <input
               ref={fileRef}
               type="file"
@@ -406,20 +366,13 @@ export function QuoteStudio() {
                     key={l.code}
                     type="button"
                     className={`seg${language === l.code ? " is-on" : ""}`}
-                    onClick={() => {
-                      setLanguage(l.code);
-                      setFontId(FONTS[l.code][0].id);
-                    }}
+                    onClick={() => setLanguage(l.code)}
                   >
                     {l.label}
                     <span className="seg-native">{l.native}</span>
                   </button>
                 ))}
               </div>
-              <p className="opt-hint">
-                Sets the quote language, the typography, and the text
-                direction together — they cannot move independently.
-              </p>
             </div>
 
             <label className="field">
@@ -429,12 +382,10 @@ export function QuoteStudio() {
                 onChange={(e) => setTopic(e.target.value)}
                 rows={2}
                 maxLength={300}
-                placeholder={
-                  rtl
-                    ? "مثال: الانضباط أهم من الحماس"
-                    : "e.g. discipline beats motivation"
-                }
                 dir={rtl ? "rtl" : "ltr"}
+                placeholder={
+                  rtl ? "مثال: الانضباط أهم من الحماس" : "e.g. discipline beats motivation"
+                }
               />
             </label>
 
@@ -444,36 +395,31 @@ export function QuoteStudio() {
               onClick={writeQuotes}
               disabled={busy || !topic.trim()}
             >
-              {busy && step === "brief" ? "Writing…" : "Write the quotes"}
+              {busy ? "Writing…" : "Write the quotes"}
             </button>
           </div>
         </div>
       </section>
 
-      {/* ── 2. quotes ────────────────────────────────────────────── */}
+      {/* ── quotes ───────────────────────────────────────────────── */}
       {candidates.length > 0 && (
         <section className="qs-panel">
           <h2 className="qs-h">
             The quotes
             <span className="qs-count">
-              {chosen.length} of {slideCount} chosen
+              {chosen.length} of {MAX_QUOTES} chosen
             </span>
           </h2>
-          <p className="opt-hint">
-            Edit any line. Anything too long to set large is flagged — a
-            paragraph shrunk to fit is the fastest way to lose a reader.
-          </p>
-
           <ul className="qs-quotes">
             {candidates.map((quote, i) => {
               const on = chosen.includes(quote);
-              const settable = isQuoteSettable(quote, language);
               return (
                 <li key={i} className={on ? "is-on" : ""}>
                   <button
                     type="button"
                     className="qs-check"
                     aria-pressed={on}
+                    aria-label={on ? "Remove from deck" : "Add to deck"}
                     onClick={() => toggleQuote(quote)}
                   >
                     {on ? "✓" : ""}
@@ -485,7 +431,7 @@ export function QuoteStudio() {
                     onChange={(e) => editCandidate(i, e.target.value)}
                     style={{ fontFamily: font.stack }}
                   />
-                  {!settable && (
+                  {!isQuoteSettable(quote, language) && (
                     <span className="qs-warn" title="Too long to set large">
                       long
                     </span>
@@ -497,167 +443,148 @@ export function QuoteStudio() {
         </section>
       )}
 
-      {/* ── 3. design ────────────────────────────────────────────── */}
-      {candidates.length > 0 && (
-        <section className="qs-panel">
-          <h2 className="qs-h">Design</h2>
+      {/* ── design ───────────────────────────────────────────────── */}
+      <section className="qs-panel">
+        <h2 className="qs-h">Design</h2>
 
-          <div className="opt-group">
-            <span className="opt-label">Typeface</span>
-            <div className="style-grid">
-              {FONTS[language].map((f) => (
+        <div className="opt-group">
+          <span className="opt-label">Background</span>
+          <div className="qs-bg-grid">
+            {BACKGROUNDS.map((b) => {
+              const bi = inkFor(b);
+              return (
                 <button
-                  key={f.id}
+                  key={b.id}
                   type="button"
-                  className={`qs-font${fontId === f.id ? " is-on" : ""}`}
-                  onClick={() => setFontId(f.id)}
+                  className={`qs-bg${backgroundId === b.id ? " is-on" : ""}`}
+                  onClick={() => setBackgroundId(b.id)}
+                  aria-pressed={backgroundId === b.id}
+                  title={b.hint}
                 >
-                  <span
-                    className="qs-font-sample"
-                    style={{ fontFamily: f.stack, fontWeight: f.weight }}
-                    dir={rtl ? "rtl" : "ltr"}
-                  >
-                    {rtl ? "الانضباط" : "Discipline"}
+                  <span className="qs-bg-chip" style={{ background: b.css }}>
+                    <span className="qs-bg-aa" style={{ color: bi.ink }}>
+                      {rtl ? "نص" : "Aa"}
+                    </span>
                   </span>
-                  <span className="style-name">{f.label}</span>
-                  <span className="style-hint">{f.hint}</span>
+                  <span className="qs-bg-label">{b.label}</span>
                 </button>
-              ))}
-            </div>
+              );
+            })}
           </div>
+          <p className="opt-hint">
+            Local and instant — changing a background costs nothing and
+            re-typesets the deck immediately. Text and photo contrast are set
+            from the surface, so every option stays readable.
+          </p>
+        </div>
 
-          <div className="opt-group">
-            <span className="opt-label">Visual style</span>
-            <div className="style-grid">
-              {STYLES.map((s) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  className={`qs-style${styleId === s.id ? " is-on" : ""}`}
-                  onClick={() => setStyleId(s.id)}
+        <div className="opt-group">
+          <span className="opt-label">Typeface</span>
+          <div className="style-grid">
+            {FONTS[language].map((f) => (
+              <button
+                key={f.id}
+                type="button"
+                className={`qs-font${fontId === f.id ? " is-on" : ""}`}
+                onClick={() => setFontId(f.id)}
+              >
+                <span
+                  className="qs-font-sample"
+                  style={{ fontFamily: f.stack, fontWeight: f.weight }}
+                  dir={rtl ? "rtl" : "ltr"}
                 >
-                  <span
-                    className="qs-style-chip"
-                    style={{ background: s.scrim, borderColor: s.accent }}
-                  />
-                  <span className="style-name">{s.label}</span>
-                  <span className="style-hint">{s.hint}</span>
-                </button>
-              ))}
-            </div>
+                  {rtl ? "الانضباط" : "Discipline"}
+                </span>
+                <span className="style-name">{f.label}</span>
+              </button>
+            ))}
           </div>
+        </div>
 
-          <div className="qs-two">
-            <div className="opt-group">
-              <span className="opt-label">Format</span>
-              <div className="lang-row">
-                {RATIOS.map((r) => (
-                  <button
-                    key={r.id}
-                    type="button"
-                    className={`seg${ratioId === r.id ? " is-on" : ""}`}
-                    onClick={() => setRatioId(r.id)}
-                  >
-                    {r.label}
-                    <span className="seg-sub">{r.hint}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="opt-group">
-              <span className="opt-label">Slides</span>
-              <input
-                type="range"
-                min={MIN_SLIDES}
-                max={MAX_SLIDES}
-                value={slideCount}
-                onChange={(e) => setSlideCount(Number(e.target.value))}
-              />
-              <p className="opt-hint">
-                {slideCount} quote slides, plus a closing card.
-              </p>
-            </div>
+        <div className="opt-group">
+          <span className="opt-label">Format</span>
+          <div className="lang-row">
+            {RATIOS.map((r) => (
+              <button
+                key={r.id}
+                type="button"
+                className={`seg${ratioId === r.id ? " is-on" : ""}`}
+                onClick={() => setRatioId(r.id)}
+              >
+                {r.label}
+                <span className="seg-sub">{r.hint}</span>
+              </button>
+            ))}
           </div>
+        </div>
 
-          <div className="cost-panel">
-            <div className="cost-row">
-              <span>
-                {slideCount + 1} generated slides × ${COST_PER_SLIDE_USD}
-              </span>
-              <strong>${(( slideCount + 1) * COST_PER_SLIDE_USD).toFixed(3)}</strong>
-            </div>
-            <div className="cost-row">
-              <span>Quote writing</span>
-              <strong>$0.002</strong>
-            </div>
-            <div className="cost-row">
-              <span>Typography &amp; export</span>
-              <strong>$0.000</strong>
-            </div>
-            <div className="cost-row cost-total">
-              <span>Estimated total</span>
-              <strong>${estimate.toFixed(3)}</strong>
-            </div>
+        {/* Stated rather than omitted: the deck really is free to render, and
+            that is the point of a local background library. The only spend in
+            this studio is the one call that writes the words. */}
+        <div className="cost-panel">
+          <div className="cost-row">
+            <span>Backgrounds, typography &amp; export</span>
+            <strong>$0.000</strong>
           </div>
+          <div className="cost-row">
+            <span>Writing the quotes (once per topic)</span>
+            <strong>$0.002</strong>
+          </div>
+          <div className="cost-row cost-total">
+            <span>Per carousel</span>
+            <strong>$0.002</strong>
+          </div>
+        </div>
+      </section>
 
-          <button
-            type="button"
-            className="btn-generate"
-            onClick={buildCarousel}
-            disabled={busy || !photo || !chosen.length}
-          >
-            {busy ? "Generating…" : `Generate ${chosen.length + 1} slides`}
-          </button>
-        </section>
-      )}
-
-      {/* ── 4. deck ──────────────────────────────────────────────── */}
-      {slides.length > 0 && (
+      {/* ── deck ─────────────────────────────────────────────────── */}
+      {chosen.length > 0 && (
         <section className="qs-panel">
           <h2 className="qs-h">
             The carousel
-            <span className="qs-count">
-              {ready} of {slides.length} ready
-            </span>
+            <span className="qs-count">{cards.length} slides</span>
           </h2>
 
-          {busy && (
+          {exporting.total > 0 && (
             <div className="qs-progress">
               <div
                 className="qs-progress-bar"
                 style={{
-                  width: `${(progress.done / Math.max(progress.total, 1)) * 100}%`,
+                  width: `${(exporting.done / Math.max(exporting.total, 1)) * 100}%`,
                 }}
               />
               <span>
-                Generating slide {progress.done} of {progress.total}…
+                Exporting {exporting.done} of {exporting.total}…
               </span>
             </div>
           )}
 
           <div className="qs-deck">
-            {slides.map((slide, i) => (
+            {cards.map((card, i) => (
               <article
-                key={slide.id}
+                key={card.id}
                 className={`qs-slide-card${dragIndex === i ? " is-dragging" : ""}`}
-                draggable={!busy}
+                draggable={card.kind === "quote"}
                 onDragStart={() => setDragIndex(i)}
                 onDragEnd={() => setDragIndex(null)}
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={() => {
-                  if (dragIndex !== null) move(dragIndex, i);
+                  if (dragIndex !== null && card.kind === "quote") {
+                    move(dragIndex, i);
+                  }
                   setDragIndex(null);
                 }}
               >
-                <SlidePreview
-                  slide={slide}
+                <CardPreview
+                  card={card}
                   ratio={ratio}
                   rtl={rtl}
                   font={font}
-                  style={style}
+                  background={background}
+                  ink={ink}
                   name={name}
                   handle={handle}
+                  photo={photo}
                 />
 
                 <div className="qs-slide-tools">
@@ -665,7 +592,7 @@ export function QuoteStudio() {
                   <button
                     type="button"
                     onClick={() => move(i, i - 1)}
-                    disabled={i === 0 || busy}
+                    disabled={i === 0 || card.kind !== "quote"}
                     title="Move earlier"
                   >
                     ↑
@@ -673,50 +600,52 @@ export function QuoteStudio() {
                   <button
                     type="button"
                     onClick={() => move(i, i + 1)}
-                    disabled={i === slides.length - 1 || busy}
+                    disabled={i >= chosen.length - 1 || card.kind !== "quote"}
                     title="Move later"
                   >
                     ↓
                   </button>
                   <button
                     type="button"
-                    onClick={() => regenerateSlide(i)}
-                    disabled={busy || slide.status === "generating"}
-                    title="Regenerate this slide only"
-                  >
-                    ↻
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => exportSlide(slide, i)}
-                    disabled={slide.status !== "ready"}
+                    onClick={() => exportCard(card, i)}
                     title="Download this slide"
                   >
-                    ↓PNG
+                    PNG
                   </button>
                 </div>
 
-                <textarea
-                  className="qs-slide-text"
-                  value={slide.text}
-                  dir={rtl ? "rtl" : "ltr"}
-                  rows={2}
-                  onChange={(e) => editSlideText(i, e.target.value)}
-                  style={{ fontFamily: font.stack }}
-                />
-                {slide.error && <p className="qs-slide-err">{slide.error}</p>}
+                {card.kind === "quote" && (
+                  <textarea
+                    className="qs-slide-text"
+                    value={card.text}
+                    dir={rtl ? "rtl" : "ltr"}
+                    rows={2}
+                    onChange={(e) => editChosen(i, e.target.value)}
+                    style={{ fontFamily: font.stack }}
+                  />
+                )}
               </article>
             ))}
           </div>
 
-          <button
-            type="button"
-            className="btn-generate"
-            onClick={exportAll}
-            disabled={busy || ready === 0}
-          >
-            Download all {ready} slides
-          </button>
+          <div className="qs-actions">
+            <button
+              type="button"
+              className="btn-generate"
+              onClick={exportAll}
+              disabled={exporting.total > 0}
+            >
+              Download all {cards.length}
+            </button>
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={saveProject}
+              disabled={busy}
+            >
+              {busy ? "Saving…" : "Save project"}
+            </button>
+          </div>
         </section>
       )}
     </div>
@@ -725,44 +654,40 @@ export function QuoteStudio() {
 
 // ── preview ──────────────────────────────────────────────────────────
 
-function SlidePreview({
-  slide,
+function CardPreview({
+  card,
   ratio,
   rtl,
   font,
-  style,
+  background,
+  ink,
   name,
   handle,
+  photo,
 }: {
-  slide: Slide;
-  ratio: { id: string; w: number; h: number };
+  card: Card;
+  ratio: { w: number; h: number };
   rtl: boolean;
   font: ReturnType<typeof fontById>;
-  style: ReturnType<typeof styleById>;
+  background: ReturnType<typeof backgroundById>;
+  ink: ReturnType<typeof inkFor>;
   name: string;
   handle: string;
+  photo: string;
 }) {
-  const isOutro = slide.kind === "outro";
+  const isOutro = card.kind === "outro";
   return (
     <div
       className="qs-slide"
-      style={{ aspectRatio: `${ratio.w} / ${ratio.h}` }}
       dir={rtl ? "rtl" : "ltr"}
+      style={{
+        aspectRatio: `${ratio.w} / ${ratio.h}`,
+        background: background.css,
+      }}
     >
-      {slide.image ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={slide.image} alt="" className="qs-slide-img" />
-      ) : (
-        <div className="qs-slide-skeleton">
-          {slide.status === "generating" ? "Generating…" : ""}
-        </div>
-      )}
-
-      <div className="qs-slide-scrim" style={{ background: style.scrim }} />
-
       <div className={`qs-slide-body${isOutro ? " is-outro" : ""}`}>
         {!isOutro && (
-          <span className="qs-mark" style={{ color: style.accent }} aria-hidden>
+          <span className="qs-mark" style={{ color: ink.accent }} aria-hidden>
             {rtl ? "”" : "“"}
           </span>
         )}
@@ -773,22 +698,36 @@ function SlidePreview({
             fontWeight: font.weight,
             lineHeight: font.lineHeight,
             letterSpacing: font.letterSpacing,
-            color: style.ink,
+            color: ink.ink,
           }}
         >
-          {slide.text}
+          {card.text}
         </p>
+
+        <span className="qs-rule" style={{ background: ink.rule }} />
+
         <div className="qs-sig">
-          {name && (
-            <span className="qs-sig-name" style={{ color: style.ink }}>
-              {name}
-            </span>
+          {photo && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={photo}
+              alt=""
+              className="qs-avatar"
+              style={{ boxShadow: `0 0 0 2px ${ink.photoRing}` }}
+            />
           )}
-          {handle && (
-            <span className="qs-sig-handle" style={{ color: style.accent }}>
-              {handle}
-            </span>
-          )}
+          <span className="qs-sig-text">
+            {name && (
+              <span className="qs-sig-name" style={{ color: ink.ink }}>
+                {name}
+              </span>
+            )}
+            {handle && (
+              <span className="qs-sig-handle" style={{ color: ink.secondary }}>
+                {handle}
+              </span>
+            )}
+          </span>
         </div>
       </div>
     </div>
@@ -797,50 +736,14 @@ function SlidePreview({
 
 // ── canvas export ────────────────────────────────────────────────────
 
-function drawCover(
-  ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement,
-  w: number,
-  h: number,
-) {
-  const scale = Math.max(w / img.width, h / img.height);
-  const dw = img.width * scale;
-  const dh = img.height * scale;
-  ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
-}
-
-function drawScrim(
-  ctx: CanvasRenderingContext2D,
-  w: number,
-  h: number,
-  styleId: string,
-) {
-  // Mirrors the CSS scrims in `lib/quotes.ts`. Canvas cannot read a CSS
-  // gradient string, so the stops are restated here; keeping them in the same
-  // order and opacity is what makes the export match the preview.
-  const tints: Record<string, [number, number, number]> = {
-    noir: [0, 0, 0],
-    warm: [26, 12, 0],
-    studio: [8, 10, 14],
-    gradient: [20, 0, 30],
-  };
-  const [r, g, b] = tints[styleId] ?? tints.noir;
-  const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, `rgba(${r},${g},${b},0.20)`);
-  grad.addColorStop(0.45, `rgba(${r},${g},${b},0.55)`);
-  grad.addColorStop(1, `rgba(${r},${g},${b},0.88)`);
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, w, h);
-}
-
 /**
  * Wrap text to a width, in the language's own direction.
  *
  * Arabic is measured with the same `measureText` as English: the browser
- * shapes and joins the glyphs before measuring, so a naive character count
- * would be wrong but a measured width is right. Direction is handled by the
- * canvas `direction` property plus alignment, not by reversing the string --
- * reversing breaks the shaping.
+ * shapes and joins the glyphs before measuring, so a character count would be
+ * wrong but a measured width is right. Direction comes from the canvas
+ * `direction` property, never from reversing the string -- reversing breaks
+ * the shaping and produces disconnected letters.
  */
 function layoutLines(
   ctx: CanvasRenderingContext2D,
@@ -863,7 +766,7 @@ function layoutLines(
   return lines;
 }
 
-function drawSlideText(
+async function drawCard(
   ctx: CanvasRenderingContext2D,
   opts: {
     text: string;
@@ -872,27 +775,27 @@ function drawSlideText(
     height: number;
     rtl: boolean;
     font: ReturnType<typeof fontById>;
-    ink: string;
-    accent: string;
+    ink: ReturnType<typeof inkFor>;
     name: string;
     handle: string;
+    photo: string;
   },
 ) {
-  const { text, kind, width, height, rtl, font, ink, accent, name, handle } = opts;
+  const { text, kind, width, height, rtl, font, ink, name, handle, photo } = opts;
 
-  const pad = Math.round(width * 0.09);
+  const pad = Math.round(width * 0.11);
   const maxWidth = width - pad * 2;
   ctx.direction = rtl ? "rtl" : "ltr";
   ctx.textAlign = rtl ? "right" : "left";
   const x = rtl ? width - pad : pad;
 
-  // Fit the quote by stepping the size down until it fits the lower band.
-  // Starting large and shrinking is what keeps short quotes big, which is
-  // the entire visual point of a quote card.
-  const band = height * (kind === "outro" ? 0.30 : 0.46);
-  let size = Math.round(width * (kind === "outro" ? 0.085 : 0.098));
+  // Fit by stepping down until the quote fits its band. Starting large and
+  // shrinking is what keeps a short quote big, which is the whole visual
+  // point of a quote card.
+  const band = height * (kind === "outro" ? 0.26 : 0.44);
+  const min = Math.round(width * 0.04);
+  let size = Math.round(width * (kind === "outro" ? 0.082 : 0.094));
   let lines: string[] = [];
-  const min = Math.round(width * 0.038);
 
   for (; size > min; size -= 2) {
     ctx.font = `${font.weight} ${size}px ${font.stack}`;
@@ -902,36 +805,77 @@ function drawSlideText(
 
   ctx.font = `${font.weight} ${size}px ${font.stack}`;
   const lineHeight = size * font.lineHeight;
-  const sigHeight = Math.round(width * 0.10);
-  let y = height - pad - sigHeight - lines.length * lineHeight;
+  const sigBlock = Math.round(width * 0.16);
+  let y = height - pad - sigBlock - lines.length * lineHeight;
 
-  // Opening mark, set in the accent, above the first line.
   if (kind === "quote") {
-    ctx.fillStyle = accent;
-    ctx.font = `${font.weight} ${Math.round(size * 1.7)}px ${font.stack}`;
-    ctx.fillText(rtl ? "”" : "“", x, y - Math.round(size * 0.35));
+    ctx.fillStyle = ink.accent;
+    ctx.font = `${font.weight} ${Math.round(size * 1.8)}px ${font.stack}`;
+    ctx.fillText(rtl ? "”" : "“", x, y - Math.round(size * 0.3));
     ctx.font = `${font.weight} ${size}px ${font.stack}`;
   }
 
-  ctx.fillStyle = ink;
-  ctx.shadowColor = "rgba(0,0,0,.45)";
-  ctx.shadowBlur = Math.round(size * 0.35);
+  ctx.fillStyle = ink.ink;
   for (const line of lines) {
     y += lineHeight;
     ctx.fillText(line, x, y);
   }
-  ctx.shadowBlur = 0;
 
-  // Signature block.
-  const sigY = height - pad;
+  // Hairline above the signature.
+  const ruleY = height - pad - Math.round(width * 0.115);
+  ctx.fillStyle = ink.rule;
+  ctx.fillRect(rtl ? width - pad - maxWidth : pad, ruleY, maxWidth, 1);
+
+  // Signature: avatar, name, handle.
+  const avatar = Math.round(width * 0.075);
+  const baseY = height - pad - avatar / 2;
+  let textX = x;
+
+  if (photo) {
+    const img = new Image();
+    img.src = photo;
+    try {
+      await new Promise((res, rej) => {
+        img.onload = res;
+        img.onerror = rej;
+      });
+      const cx = rtl ? width - pad - avatar / 2 : pad + avatar / 2;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cx, baseY, avatar / 2, 0, Math.PI * 2);
+      ctx.closePath();
+      ctx.clip();
+      const scale = Math.max(avatar / img.width, avatar / img.height);
+      ctx.drawImage(
+        img,
+        cx - (img.width * scale) / 2,
+        baseY - (img.height * scale) / 2,
+        img.width * scale,
+        img.height * scale,
+      );
+      ctx.restore();
+      // The ring keeps a light photo from dissolving into a light surface.
+      ctx.strokeStyle = ink.photoRing;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(cx, baseY, avatar / 2, 0, Math.PI * 2);
+      ctx.stroke();
+      textX = rtl ? x - avatar - Math.round(width * 0.03)
+                  : x + avatar + Math.round(width * 0.03);
+    } catch {
+      // An unreadable photo must not lose the whole export; the name and
+      // handle still identify the card.
+    }
+  }
+
   if (name) {
-    ctx.fillStyle = ink;
-    ctx.font = `600 ${Math.round(width * 0.038)}px ${font.stack}`;
-    ctx.fillText(name, x, sigY - Math.round(width * 0.048));
+    ctx.fillStyle = ink.ink;
+    ctx.font = `700 ${Math.round(width * 0.033)}px ${font.stack}`;
+    ctx.fillText(name, textX, baseY - Math.round(width * 0.004));
   }
   if (handle) {
-    ctx.fillStyle = accent;
-    ctx.font = `500 ${Math.round(width * 0.032)}px ${font.stack}`;
-    ctx.fillText(handle, x, sigY);
+    ctx.fillStyle = ink.secondary;
+    ctx.font = `500 ${Math.round(width * 0.028)}px ${font.stack}`;
+    ctx.fillText(handle, textX, baseY + Math.round(width * 0.036));
   }
 }

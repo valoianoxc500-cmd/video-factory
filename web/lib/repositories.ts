@@ -13,6 +13,19 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { customerJobMessage, customerSafeError } from "./customer-errors";
+import {
+  defaultProfile,
+  MAX_QUOTES,
+  normaliseBackground,
+  MIN_QUOTES,
+  normaliseCards,
+  normaliseHandle,
+  validLanguage,
+  type QuoteCard,
+  type QuoteLanguage,
+  type QuoteProfile,
+  type QuoteProject,
+} from "./quotes";
 
 /** Channel slugs the pipeline can actually run. */
 export const CHANNELS = [
@@ -315,6 +328,153 @@ export class ChannelRepository {
       theme: c.theme,
       videoCount: counts[c.slug] ?? 0,
     }));
+  }
+}
+
+// ── Quote Studio ─────────────────────────────────────────────
+
+type QuoteProfileRow = {
+  photo: string | null;
+  display_name: string | null;
+  username: string | null;
+  preferred_language: string | null;
+};
+
+type QuoteProjectRow = {
+  id: string;
+  topic: string;
+  language: string;
+  font_id: string;
+  ratio: string;
+  background_id: string | null;
+  profile_snapshot: unknown;
+  quotes: unknown;
+  created_at: string;
+  updated_at: string;
+};
+
+function quoteProfile(row?: QuoteProfileRow | null): QuoteProfile {
+  const fallback = defaultProfile();
+  return {
+    photo: String(row?.photo ?? "").slice(0, 1_500_000),
+    displayName: String(row?.display_name ?? "").trim().slice(0, 60),
+    username: normaliseHandle(String(row?.username ?? "")).slice(0, 41),
+    preferredLanguage: validLanguage(row?.preferred_language) ? row.preferred_language : fallback.preferredLanguage,
+  };
+}
+
+function quoteProject(row: QuoteProjectRow): QuoteProject {
+  const language: QuoteLanguage = validLanguage(row.language) ? row.language : "en";
+  return {
+    id: row.id,
+    topic: String(row.topic ?? "").slice(0, 300),
+    language,
+    fontId: String(row.font_id ?? "").slice(0, 40),
+    ratio: row.ratio === "9:16" ? "9:16" : "4:5",
+    // A project saved before backgrounds existed has null here and
+    // reads back as white, the default it was designed against.
+    backgroundId: normaliseBackground(row.background_id),
+    profileSnapshot: quoteProfile(row.profile_snapshot as QuoteProfileRow),
+    quotes: normaliseCards(row.quotes, language),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export class QuoteStudioRepository {
+  constructor(private readonly db: SupabaseClient, private readonly userId: string) {}
+
+  async profile(): Promise<QuoteProfile> {
+    const { data, error } = await this.db
+      .from("quote_studio_profiles")
+      .select("photo, display_name, username, preferred_language")
+      .maybeSingle();
+    if (error) throw new RepositoryError(error.message);
+    return quoteProfile(data as QuoteProfileRow | null);
+  }
+
+  async saveProfile(profile: QuoteProfile): Promise<QuoteProfile> {
+    if (!validLanguage(profile.preferredLanguage)) throw new ValidationError("Choose Arabic or English.");
+    const photo = String(profile.photo ?? "");
+    if (photo && (!photo.startsWith("data:image/") || photo.length > 1_500_000)) {
+      throw new ValidationError("Use a smaller profile photo.");
+    }
+    const { data, error } = await this.db
+      .from("quote_studio_profiles")
+      .upsert({
+        user_id: this.userId,
+        photo,
+        display_name: String(profile.displayName ?? "").trim().slice(0, 60),
+        username: normaliseHandle(profile.username).slice(0, 41),
+        preferred_language: profile.preferredLanguage,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "user_id" })
+      .select("photo, display_name, username, preferred_language")
+      .single();
+    if (error) throw new RepositoryError(error.message);
+    return quoteProfile(data as QuoteProfileRow);
+  }
+
+  async listProjects(limit = 20): Promise<QuoteProject[]> {
+    const { data, error } = await this.db
+      .from("quote_studio_projects")
+      .select("id, topic, language, font_id, ratio, background_id, profile_snapshot, quotes, created_at, updated_at")
+      .order("updated_at", { ascending: false })
+      .limit(Math.min(Math.max(limit, 1), 50));
+    if (error) throw new RepositoryError(error.message);
+    return ((data ?? []) as QuoteProjectRow[]).map(quoteProject);
+  }
+
+  async getProject(id: string): Promise<QuoteProject> {
+    const { data, error } = await this.db
+      .from("quote_studio_projects")
+      .select("id, topic, language, font_id, ratio, background_id, profile_snapshot, quotes, created_at, updated_at")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) throw new RepositoryError(error.message);
+    if (!data) throw new NotFoundError("That quote project does not exist.");
+    return quoteProject(data as QuoteProjectRow);
+  }
+
+  async createProject(input: Omit<QuoteProject, "id" | "createdAt" | "updatedAt" | "profileSnapshot">): Promise<QuoteProject> {
+    const language = input.language;
+    if (!validLanguage(language)) throw new ValidationError("Choose Arabic or English.");
+    const topic = input.topic.trim();
+    const quotes = normaliseCards(input.quotes, language);
+    if (!topic || topic.length > 300) throw new ValidationError("Enter a topic or idea.");
+    if (quotes.length < MIN_QUOTES || quotes.length > MAX_QUOTES) throw new ValidationError("Create five to eight quotes.");
+    const snapshot = await this.profile();
+    const { data, error } = await this.db
+      .from("quote_studio_projects")
+      .insert({
+        user_id: this.userId,
+        topic,
+        language,
+        font_id: String(input.fontId ?? "").slice(0, 40),
+        ratio: input.ratio === "9:16" ? "9:16" : "4:5",
+        background_id: normaliseBackground(input.backgroundId),
+        profile_snapshot: snapshot,
+        quotes,
+      })
+      .select("id, topic, language, font_id, ratio, background_id, profile_snapshot, quotes, created_at, updated_at")
+      .single();
+    if (error) throw new RepositoryError(error.message);
+    return quoteProject(data as QuoteProjectRow);
+  }
+
+  async updateProject(id: string, input: Pick<QuoteProject, "quotes" | "fontId" | "ratio" | "backgroundId">): Promise<QuoteProject> {
+    const existing = await this.getProject(id);
+    const quotes = normaliseCards(input.quotes, existing.language);
+    if (quotes.length < MIN_QUOTES || quotes.length > MAX_QUOTES) throw new ValidationError("Keep five to eight quotes.");
+    const { data, error } = await this.db
+      .from("quote_studio_projects")
+      .update({ quotes, font_id: String(input.fontId ?? "").slice(0, 40), ratio: input.ratio === "9:16" ? "9:16" : "4:5", background_id: normaliseBackground(input.backgroundId), updated_at: new Date().toISOString() })
+      .eq("id", id)
+      .select("id, topic, language, font_id, ratio, background_id, profile_snapshot, quotes, created_at, updated_at")
+      .maybeSingle();
+    if (error) throw new RepositoryError(error.message);
+    if (!data) throw new NotFoundError("That quote project does not exist.");
+    return quoteProject(data as QuoteProjectRow);
   }
 }
 

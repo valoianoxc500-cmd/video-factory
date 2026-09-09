@@ -1218,9 +1218,9 @@ body {
 /* =====================================================================
    Quote Studio
    ---------------------------------------------------------------------
-   A fourth identity, and the only one that is not a video. Magenta so it
-   reads as a different product at a glance in the rail, clearly apart
-   from the analyzer's violet and Horror's red.
+   The only section that is not a video, and the only one whose canvas is
+   light. Cards are typography on a chosen surface, so the chrome around
+   them stays quiet: the deck should be the brightest thing on screen.
    ===================================================================== */
 
 [data-engine="quote_studio"], [data-surface="quotes"] {
@@ -1231,35 +1231,8 @@ body {
 .qs-head::before { opacity: .16; filter: saturate(.4) brightness(.4); }
 .qs-head::after {
   background:
-    radial-gradient(720px 360px at 20% 12%, rgba(224, 86, 193, .22), transparent 64%),
-    radial-gradient(600px 320px at 82% 88%, rgba(255, 180, 90, .14), transparent 62%),
+    radial-gradient(720px 360px at 20% 12%, rgba(224, 86, 193, .20), transparent 64%),
     linear-gradient(180deg, rgba(6, 8, 11, .62) 0%, rgba(6, 8, 11, .9) 62%, var(--sa-bg) 100%);
-}
-
-/* -- step rail ------------------------------------------------------ */
-
-.qs-steps {
-  display: flex; flex-wrap: wrap; gap: 8px;
-  list-style: none; margin: 22px 0 6px; padding: 0;
-}
-.qs-steps li {
-  display: flex; align-items: center; gap: 8px;
-  padding: 7px 14px 7px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--sa-line);
-  background: var(--bg-deep);
-  font-size: 12.5px; color: var(--sa-dim);
-}
-.qs-steps li.is-current {
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  color: var(--sa-text);
-}
-.qs-step-n {
-  display: grid; place-items: center;
-  width: 20px; height: 20px; border-radius: 50%;
-  background: color-mix(in srgb, var(--accent) 18%, var(--bg-deep));
-  color: var(--accent);
-  font-size: 11px; font-weight: 700;
 }
 
 /* -- panels --------------------------------------------------------- */
@@ -1272,23 +1245,28 @@ body {
 }
 .qs-h {
   display: flex; align-items: baseline; justify-content: space-between;
-  gap: 14px; margin: 0 0 6px;
+  gap: 14px; margin: 0 0 12px;
   font-family: var(--sa-display); font-size: 17px; font-weight: 720;
   color: var(--sa-text);
 }
 .qs-count { font-size: 12.5px; font-weight: 500; color: var(--sa-dim); }
+.qs-ok {
+  border-color: color-mix(in srgb, #17E38E 40%, transparent);
+  color: #17E38E;
+}
+.qs-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.qs-actions .btn-generate { flex: 1 1 220px; }
 
-/* -- brief ---------------------------------------------------------- */
+/* -- the person ----------------------------------------------------- */
 
-.qs-brief { display: grid; grid-template-columns: 220px 1fr; gap: 22px; margin-top: 14px; }
+.qs-brief { display: grid; grid-template-columns: 200px 1fr; gap: 22px; }
 .qs-fields { display: flex; flex-direction: column; gap: 14px; }
 
 .qs-drop {
-  width: 100%; aspect-ratio: 4 / 5;
+  width: 100%; aspect-ratio: 1 / 1;
   border-radius: var(--r-sm);
   border: 1.5px dashed color-mix(in srgb, var(--accent) 38%, var(--sa-line));
-  background: var(--bg-deep);
-  color: var(--sa-dim);
+  background: var(--bg-deep); color: var(--sa-dim);
   cursor: pointer; overflow: hidden; padding: 0;
   display: grid; place-items: center;
 }
@@ -1298,14 +1276,10 @@ body {
 .qs-drop-empty { display: grid; gap: 6px; padding: 18px; text-align: center; }
 .qs-drop-empty strong { color: var(--sa-text); font-size: 14px; }
 .qs-drop-empty span { font-size: 12px; line-height: 1.5; }
-.qs-filename {
-  margin: 8px 0 0; font-size: 11.5px; color: var(--sa-dim);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
 
 /* -- quotes --------------------------------------------------------- */
 
-.qs-quotes { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 8px; }
+.qs-quotes { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .qs-quotes li {
   display: grid; grid-template-columns: 30px 1fr auto;
   align-items: start; gap: 10px;
@@ -1331,31 +1305,56 @@ body {
   font-size: 10.5px; font-weight: 700; text-transform: uppercase;
 }
 
-/* -- design pickers ------------------------------------------------- */
+/* -- background picker ---------------------------------------------- */
 
-.qs-two { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-.qs-font, .qs-style {
+.qs-bg-grid {
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+}
+.qs-bg {
+  display: grid; gap: 7px; padding: 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--sa-line); background: var(--bg-deep);
+  cursor: pointer; text-align: center;
+}
+.qs-bg:hover { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.qs-bg.is-on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.qs-bg-chip {
+  display: grid; place-items: center;
+  height: 58px; border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, .18);
+}
+/* The specimen is the point of the swatch: it shows the actual ink the
+   card will use on that surface, so an unreadable pairing is visible
+   before it is chosen rather than after. */
+.qs-bg-aa { font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
+.qs-bg-label { font-size: 11px; color: var(--sa-dim); line-height: 1.3; }
+.qs-bg.is-on .qs-bg-label { color: var(--sa-text); }
+
+/* -- typeface ------------------------------------------------------- */
+
+.qs-font {
   display: grid; gap: 5px; text-align: left;
   padding: 13px; border-radius: var(--r-sm);
   border: 1px solid var(--sa-line); background: var(--bg-deep);
   cursor: pointer; color: var(--sa-dim);
 }
-.qs-font.is-on, .qs-style.is-on {
+.qs-font.is-on {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, var(--bg-deep));
 }
 .qs-font-sample {
-  font-size: 25px; line-height: 1.3; color: var(--sa-text);
+  font-size: 25px; line-height: 1.35; color: var(--sa-text);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.qs-style-chip {
-  height: 34px; border-radius: 7px; border: 1px solid;
 }
 
 /* -- progress ------------------------------------------------------- */
 
 .qs-progress {
-  position: relative; margin: 14px 0 4px; padding: 10px 14px;
+  position: relative; margin: 0 0 14px; padding: 10px 14px;
   border-radius: var(--r-sm); overflow: hidden;
   background: var(--bg-deep); border: 1px solid var(--sa-line);
   font-size: 12.5px; color: var(--sa-dim);
@@ -1367,11 +1366,11 @@ body {
 }
 .qs-progress span { position: relative; }
 
-/* -- deck ----------------------------------------------------------- */
+/* -- the deck ------------------------------------------------------- */
 
 .qs-deck {
-  display: grid; gap: 16px; margin-top: 14px;
-  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  display: grid; gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(216px, 1fr));
 }
 .qs-slide-card {
   display: grid; gap: 8px; padding: 10px;
@@ -1380,26 +1379,40 @@ body {
 }
 .qs-slide-card.is-dragging { opacity: .45; }
 
+/* The card itself. Everything inside is driven by inline colour from
+   `inkFor`, so no rule here may set a text colour -- doing so would
+   silently override the contrast the surface computed. */
 .qs-slide {
   position: relative; width: 100%; overflow: hidden;
-  border-radius: 10px; background: #0a0c10;
-}
-.qs-slide-img, .qs-slide-scrim { position: absolute; inset: 0; }
-.qs-slide-img { width: 100%; height: 100%; object-fit: cover; }
-.qs-slide-skeleton {
-  position: absolute; inset: 0; display: grid; place-items: center;
-  color: var(--sa-dim); font-size: 11.5px;
-  background: repeating-linear-gradient(115deg, #0d1016 0 14px, #11151d 14px 28px);
+  border-radius: 10px;
+  border: 1px solid rgba(0, 0, 0, .10);
 }
 .qs-slide-body {
-  position: absolute; inset: auto 0 0 0;
-  display: grid; gap: 6px; padding: 14px;
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; justify-content: flex-end;
+  gap: 8px; padding: 11%;
 }
-.qs-mark { font-size: 34px; line-height: .6; opacity: .9; }
-.qs-quote { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
-.qs-slide-body.is-outro .qs-quote { font-size: 17px; }
-.qs-sig { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; font-size: 10.5px; }
-.qs-sig-name { font-weight: 700; opacity: .92; }
+.qs-mark {
+  font-size: 40px; line-height: .55; opacity: .85;
+  font-family: Georgia, serif;
+}
+.qs-quote {
+  margin: 0; font-size: 15.5px; overflow-wrap: anywhere;
+  flex: 0 1 auto;
+}
+.qs-slide-body.is-outro { justify-content: center; text-align: center; }
+.qs-slide-body.is-outro .qs-quote { font-size: 18px; }
+.qs-rule { display: block; height: 1px; width: 100%; margin: 4px 0; }
+
+.qs-sig { display: flex; align-items: center; gap: 9px; }
+.qs-slide-body.is-outro .qs-sig { justify-content: center; }
+.qs-avatar {
+  width: 30px; height: 30px; border-radius: 50%;
+  object-fit: cover; flex: none;
+}
+.qs-sig-text { display: grid; gap: 1px; min-width: 0; }
+.qs-sig-name { font-size: 11px; font-weight: 700; line-height: 1.25; }
+.qs-sig-handle { font-size: 10.5px; line-height: 1.25; }
 
 .qs-slide-tools { display: flex; align-items: center; gap: 4px; }
 .qs-slide-tools button {
@@ -1407,7 +1420,9 @@ body {
   border: 1px solid var(--sa-line); background: transparent;
   color: var(--sa-dim); font-size: 11px; cursor: pointer;
 }
-.qs-slide-tools button:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.qs-slide-tools button:hover:not(:disabled) {
+  color: var(--accent); border-color: var(--accent);
+}
 .qs-slide-tools button:disabled { opacity: .35; cursor: default; }
 .qs-slide-n {
   min-width: 20px; font-size: 11px; font-weight: 700;
@@ -1419,129 +1434,8 @@ body {
   background: transparent; color: var(--sa-text);
   font-size: 12px; line-height: 1.45;
 }
-.qs-slide-err { margin: 0; font-size: 11px; color: #FF6B6B; }
 
 @media (max-width: 860px) {
   .qs-brief { grid-template-columns: 1fr; }
-  .qs-two { grid-template-columns: 1fr; }
-  .qs-deck { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
-}
-
-/* ── Platform-wide finish: product accents, editorial rhythm, responsive rail ── */
-:root {
-  --platform-canvas: #090b10;
-  --platform-surface: rgba(19, 24, 34, .82);
-  --platform-border: rgba(255, 255, 255, .09);
-  --platform-focus: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
-}
-
-.dash { background: var(--platform-canvas); }
-.content { min-width: 0; }
-.content > * { animation: platform-enter .42s cubic-bezier(.2, .8, .2, 1) both; }
-@keyframes platform-enter { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
-
-[data-surface="football"] { --accent: #4ce487; --accent-ink: #092214; }
-[data-surface="true"] { --accent: #6fc5ff; --accent-ink: #081925; }
-[data-surface="horror"] { --accent: #fb5365; --accent-ink: #29080e; }
-[data-surface="animated"] { --accent: #ffb45e; --accent-ink: #281606; }
-[data-surface="quotes"] { --accent: #ffffff; --accent-ink: #08090b; }
-[data-surface="clipping"] { --accent: #ffb545; --accent-ink: #291904; }
-[data-surface="analyzer"] { --accent: #a88bff; --accent-ink: #160d35; }
-
-.nav-label {
-  display: block;
-  margin: 20px 10px 7px;
-  color: var(--sa-dim);
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: .15em;
-  text-transform: uppercase;
-}
-.nav-label:first-child { margin-top: 6px; }
-.nav > a, .nav-children > a { border-radius: 11px; }
-.nav > a:focus-visible, .nav-children > a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
-  outline: none;
-  box-shadow: var(--platform-focus);
-}
-.nav-parent { margin-top: 8px; }
-.nav-children { margin-bottom: 4px; }
-
-.hero, .page-head, .studio, .progress-card, .empty, .qs-panel, .surface, .tile, .chan-card {
-  border-color: var(--platform-border);
-}
-.studio, .progress-card, .qs-panel, .empty { box-shadow: 0 18px 50px rgba(0, 0, 0, .14); }
-.field input, .field textarea, .field select, .qs-slide-text, .qs-quotes li, .cost-panel {
-  border-color: var(--platform-border);
-}
-.field input, .field textarea, .field select, .qs-slide-text { transition: border-color .18s ease, box-shadow .18s ease, background .18s ease; }
-.field input:focus, .field textarea:focus, .field select:focus, .qs-slide-text:focus {
-  border-color: color-mix(in srgb, var(--accent) 65%, #fff);
-  box-shadow: var(--platform-focus);
-}
-.btn-primary, .btn-generate { box-shadow: 0 10px 22px color-mix(in srgb, var(--accent) 18%, transparent); }
-.btn-primary:hover, .btn-generate:hover:not(:disabled) { transform: translateY(-1px); }
-.notice-error { border-color: color-mix(in srgb, #ff6b78 55%, var(--platform-border)); }
-
-/* Quote Studio intentionally steps outside the product palette: it is an editorial desk. */
-[data-surface="quotes"] .quote-studio { --accent: #fff; --accent-ink: #090a0d; }
-[data-surface="quotes"] .quote-studio .qs-panel {
-  background: #f7f7f4;
-  border-color: rgba(255,255,255,.3);
-  color: #111216;
-  box-shadow: 0 20px 45px rgba(0,0,0,.2);
-}
-[data-surface="quotes"] .quote-studio .qs-h,
-[data-surface="quotes"] .quote-studio .field,
-[data-surface="quotes"] .quote-studio .opt-label,
-[data-surface="quotes"] .quote-studio .style-name,
-[data-surface="quotes"] .quote-studio .qs-drop-empty strong { color: #111216; }
-[data-surface="quotes"] .quote-studio .qs-h { font-family: var(--font-playfair), Georgia, serif; font-size: 22px; letter-spacing: -.025em; }
-[data-surface="quotes"] .quote-studio .opt-hint,
-[data-surface="quotes"] .quote-studio .style-hint,
-[data-surface="quotes"] .quote-studio .qs-count,
-[data-surface="quotes"] .quote-studio .qs-drop-empty span { color: #62656c; }
-[data-surface="quotes"] .quote-studio .field input,
-[data-surface="quotes"] .quote-studio .field textarea,
-[data-surface="quotes"] .quote-studio .qs-slide-text,
-[data-surface="quotes"] .quote-studio .qs-quotes li,
-[data-surface="quotes"] .quote-studio .qs-font,
-[data-surface="quotes"] .quote-studio .qs-style,
-[data-surface="quotes"] .quote-studio .cost-panel,
-[data-surface="quotes"] .quote-studio .qs-progress { background: #fff; border-color: #d6d6d0; color: #16171b; }
-[data-surface="quotes"] .quote-studio .field input,
-[data-surface="quotes"] .quote-studio .field textarea,
-[data-surface="quotes"] .quote-studio .qs-slide-text { color: #101115; }
-[data-surface="quotes"] .quote-studio .qs-drop { background: #ecece7; border-color: #a5a5a0; color: #52535a; }
-[data-surface="quotes"] .quote-studio .qs-font.is-on,
-[data-surface="quotes"] .quote-studio .qs-style.is-on { background: #111216; border-color: #111216; }
-[data-surface="quotes"] .quote-studio .qs-font.is-on .style-name,
-[data-surface="quotes"] .quote-studio .qs-font.is-on .style-hint,
-[data-surface="quotes"] .quote-studio .qs-style.is-on .style-name,
-[data-surface="quotes"] .quote-studio .qs-style.is-on .style-hint,
-[data-surface="quotes"] .quote-studio .qs-font.is-on .qs-font-sample { color: #fff; }
-[data-surface="quotes"] .quote-studio .btn-generate { background: #111216; color: #fff; box-shadow: none; }
-[data-surface="quotes"] .quote-studio .btn-generate:hover:not(:disabled) { background: #303136; }
-
-@media (max-width: 860px) {
-  .nav-label { display: none; }
-  .side { backdrop-filter: blur(18px); }
-  .nav { gap: 5px; }
-  .nav > a, .nav-children > a { min-width: max-content; }
-  .nav-parent { min-width: max-content; margin: 0 2px; }
-  .content { padding-inline: clamp(16px, 4vw, 28px); }
-}
-
-@media (max-width: 560px) {
-  .content { padding-top: 24px; padding-bottom: 42px; }
-  .hero h1 { font-size: clamp(30px, 10vw, 43px); }
-  .hero-actions, .hero-actions > * { width: 100%; }
-  .hero-actions { display: grid; }
-  .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .chan-cards { grid-template-columns: 1fr; }
-  .tile-grid { grid-template-columns: 1fr; }
-  .progress-top { align-items: flex-start; }
-  .progress-ring { flex: 0 0 auto; }
-  .steps { grid-template-columns: 1fr 1fr; }
-  .qs-steps { overflow-x: auto; padding-bottom: 4px; }
-  .qs-steps li { min-width: max-content; }
+  .qs-deck { grid-template-columns: repeat(auto-fill, minmax(154px, 1fr)); }
 }

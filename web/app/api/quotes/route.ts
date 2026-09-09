@@ -1,9 +1,9 @@
 import { requireUser } from "@/lib/supabase/server";
 import { rateLimit } from "@/lib/rate-limit";
-import { complete, FalError } from "@/lib/fal-quotes";
+import { QuoteTextError, writeQuoteText } from "@/lib/quote-text";
 import {
-  MAX_SLIDES,
-  MIN_SLIDES,
+  MAX_QUOTES,
+  MIN_QUOTES,
   QUOTE_LANGUAGES,
   type QuoteLanguage,
 } from "@/lib/quotes";
@@ -105,8 +105,8 @@ export async function POST(request: Request) {
     const name = String(body.name ?? "").trim();
     const language = String(body.language ?? "en") as QuoteLanguage;
     const count = Math.min(
-      MAX_SLIDES,
-      Math.max(MIN_SLIDES, Number(body.count ?? 6) || 6),
+      MAX_QUOTES,
+      Math.max(MIN_QUOTES, Number(body.count ?? 6) || 6),
     );
 
     if (!topic) {
@@ -120,7 +120,7 @@ export async function POST(request: Request) {
     }
 
     // One extra, so the user has something to swap in without regenerating.
-    const raw = await complete(
+    const raw = await writeQuoteText(
       buildPrompt(topic, name || "the speaker", language, count + 2),
     );
     const quotes = parseQuotes(raw, count + 2);
@@ -134,11 +134,13 @@ export async function POST(request: Request) {
 
     return Response.json({ quotes });
   } catch (err) {
-    if (err instanceof FalError) {
+    if (err instanceof QuoteTextError) {
       return Response.json({ error: err.message }, { status: err.status });
     }
-    const message = (err as Error)?.message ?? "Something went wrong.";
-    const status = /auth|session|user/i.test(message) ? 401 : 500;
-    return Response.json({ error: message }, { status });
+    const message = (err as Error)?.message ?? "";
+    return Response.json(
+      { error: /auth|session|user/i.test(message) ? "You must be signed in to do that." : "Could not write quotes right now." },
+      { status: /auth|session|user/i.test(message) ? 401 : 500 },
+    );
   }
 }

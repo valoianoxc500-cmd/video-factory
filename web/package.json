@@ -7,8 +7,8 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "pretest": "tsc lib/media.ts lib/repositories.ts lib/vrf-crypto.ts lib/vrf-publish.ts lib/vrf-ingest.ts --outDir .test-build --module commonjs --target es2022 --moduleResolution node --skipLibCheck",
-    "test": "node --test tests/media.test.cjs tests/repositories.test.cjs tests/signing.test.cjs tests/vrf-crypto.test.cjs tests/vrf-publish.test.cjs tests/vrf-ingest.test.cjs"
+    "pretest": "tsc lib/media.ts lib/quote-backgrounds.ts lib/repositories.ts lib/vrf-crypto.ts lib/vrf-publish.ts lib/vrf-ingest.ts --outDir .test-build --module commonjs --target es2022 --moduleResolution node --skipLibCheck",
+    "test": "node --test tests/media.test.cjs tests/quote-backgrounds.test.cjs tests/repositories.test.cjs tests/signing.test.cjs tests/vrf-crypto.test.cjs tests/vrf-publish.test.cjs tests/vrf-ingest.test.cjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.6",
