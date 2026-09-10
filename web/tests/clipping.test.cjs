@@ -43,7 +43,7 @@ test("every default is a real option id", () => {
 
 test("task statuses map to customer states", () => {
   assert.equal(clipping.customerState("queued"), "Preparing");
-  assert.equal(clipping.customerState("running"), "Creating clips");
+  assert.equal(clipping.customerState("running"), "Creating clip");
   assert.equal(clipping.customerState("done"), "Ready");
 });
 

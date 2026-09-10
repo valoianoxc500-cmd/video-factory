@@ -58,11 +58,18 @@ export function defaultClipOptions(): ClipOptions {
   };
 }
 
-/** The only states a customer is shown. */
+/**
+ * The only states a customer is shown.
+ *
+ * Singular: this screen produces one clip per run. The worker-side batch in
+ * `viral/clipping.py` says "Creating clips" because it genuinely makes
+ * several; the two are separate strings for separate surfaces rather than one
+ * string bent to cover both.
+ */
 export const CUSTOMER_STATES = [
   "Preparing",
   "Analyzing",
-  "Creating clips",
+  "Creating clip",
   "Rendering",
   "Ready",
 ] as const;
@@ -83,7 +90,7 @@ export function customerState(
     case "queued":
       return "Preparing";
     case "running":
-      return "Creating clips";
+      return "Creating clip";
     case "done":
       return "Ready";
     default:

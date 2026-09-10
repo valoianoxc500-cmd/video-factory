@@ -1,17 +1,18 @@
-﻿import { createClient } from "@/lib/supabase/server";
+import { createClient } from "@/lib/supabase/server";
 import { AssetRepository, TaskRepository } from "@/lib/vrf";
 import { Clipping } from "@/components/reels/Clipping";
 
 export const dynamic = "force-dynamic";
 
 /**
- * Clipping: a long video you own, cut down and reframed to 9:16.
+ * Clipping: upload a video you own, cut it, and download the result.
  *
- * The list is filtered to assets that actually have an imported file, because
- * those are the only ones the worker can cut. Everything else would be a
- * control that fails when pressed.
+ * The list passed down is filtered to assets that actually have a file. A
+ * link-added video whose platform offers no downloadable media has nothing to
+ * cut, and offering it here would be a control that fails when pressed — that
+ * filter is why this screen used to be empty, and why uploading now lives on
+ * the page rather than behind a trip to My Videos.
  */
-
 export default async function ClippingPage() {
   const supabase = await createClient();
 
@@ -21,7 +22,7 @@ export default async function ClippingPage() {
     assets = await new AssetRepository(supabase).listForUser();
     latest = await new TaskRepository(supabase).latest("process");
   } catch {
-    // The panel renders empty and reports its own failures.
+    // The workspace still opens on its upload box and reports its own errors.
   }
 
   const clippable = assets.filter((asset) =>
@@ -36,14 +37,14 @@ export default async function ClippingPage() {
         data-surface="clipping"
         style={{ ["--head-art" as string]: "url('/channels/reels.jpg')" }}
       >
+        <span className="engine-kicker">Clipping</span>
         <h1>
           Cut a <span className="hl">clip</span>
         </h1>
         <p>
-          Take a video you own, trim it to the part worth watching, and let it
-          be reframed to 9:16 around the subject. Nothing is invented and
-          nothing is added — this is the same trim, crop and re-encode the
-          worker already runs, with the section to keep chosen by you.
+          Upload a video you own, choose the part worth watching, and get it
+          back reframed, captioned and ready to post — without leaving this
+          page.
         </p>
       </div>
 
@@ -55,8 +56,6 @@ export default async function ClippingPage() {
           width: a.width,
           height: a.height,
           thumbnail_url: a.thumbnail_url,
-          source_platform: a.source_platform,
-          source_author: a.source_author,
           storage_path: a.storage_path,
           processed_path: a.processed_path,
           ingest_status: a.ingest_status,
