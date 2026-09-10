@@ -169,6 +169,163 @@ def test_metadata_only_videos_cannot_be_selected():
 
 # ── the advertised limits are the enforced limits ────────────────────
 
+# ── keyless upload credentials ───────────────────────────────────────
+
+GCS_AUTH = ROOT / "web" / "lib" / "gcs-auth.ts"
+UPLOADS_LIB = ROOT / "web" / "lib" / "uploads.ts"
+
+
+def test_signing_does_not_require_a_service_account_key():
+    """The org enforces iam.disableServiceAccountKeyCreation permanently."""
+    uploads = UPLOADS_LIB.read_text(encoding="utf-8")
+    # A key may still be read for local development, but it must not be the
+    # only way to obtain a signer.
+    assert "signerIdentity" in uploads
+    assert '"federated"' in uploads
+    assert "signBlobHex" in uploads, (
+        "the V4 signature must be obtainable without a private key"
+    )
+
+
+def test_federation_is_preferred_over_a_local_key():
+    """A stray dev key must never become the production signer."""
+    uploads = UPLOADS_LIB.read_text(encoding="utf-8")
+    resolver = re.search(
+        r"export function signerIdentity\(\)[^{]*\{(.*?)\n\}", uploads, re.S
+    )
+    assert resolver, "signerIdentity not found"
+    body = resolver.group(1)
+    assert body.index("federationAvailable") < body.index("localKey"), (
+        "the local key is checked before federation"
+    )
+
+
+def test_the_federation_exchange_uses_googles_supported_endpoints():
+    auth = GCS_AUTH.read_text(encoding="utf-8")
+    assert "https://sts.googleapis.com/v1/token" in auth
+    assert "https://iamcredentials.googleapis.com/v1" in auth
+    assert ":generateAccessToken" in auth
+    assert ":signBlob" in auth
+    assert "urn:ietf:params:oauth:grant-type:token-exchange" in auth
+
+
+def test_the_oidc_assertion_comes_from_vercel():
+    auth = GCS_AUTH.read_text(encoding="utf-8")
+    assert "VERCEL_OIDC_TOKEN" in auth
+
+
+def test_the_signature_is_converted_from_base64_to_hex():
+    """signBlob answers base64; a V4 query string requires hex."""
+    auth = GCS_AUTH.read_text(encoding="utf-8")
+    assert 'Buffer.from(signed, "base64").toString("hex")' in auth
+
+
+def test_uploads_still_go_straight_to_storage():
+    """A 2GB file must never be proxied through a serverless function."""
+    ui = TS_UI.read_text(encoding="utf-8")
+    assert 'xhr.open("PUT", url, true)' in ui
+    upload_route = UPLOAD_ROUTE.read_text(encoding="utf-8")
+    assert "signedUploadUrl" in upload_route
+    assert "await request.formData" not in upload_route, (
+        "the route must not accept the file body itself"
+    )
+
+
+def test_federation_misconfiguration_is_diagnosable_but_not_customer_facing():
+    auth = GCS_AUTH.read_text(encoding="utf-8")
+    route = UPLOAD_ROUTE.read_text(encoding="utf-8")
+    # Named variables in the server log...
+    assert "GCP_WORKLOAD_IDENTITY_PROVIDER" in auth
+    assert "GCP_SERVICE_ACCOUNT_EMAIL" in auth
+    assert "console.error" in auth
+    # ...and one safe sentence on the screen.
+    assert "reportFederationFailure" in route
+    assert "Uploads are not available right now." in route
+    for leak in ("GCP_WORKLOAD_IDENTITY_PROVIDER", "sts.googleapis"):
+        # The customer-facing string must not name infrastructure.
+        assert f'{{ error: "{leak}' not in route
+
+
+MEDIA_ROUTE = ROOT / "web" / "app" / "api" / "reels" / "clips" / "media" / "route.ts"
+
+
+def test_reads_are_signed_by_the_same_keyless_path():
+    uploads = UPLOADS_LIB.read_text(encoding="utf-8")
+    assert "signedReadUrl" in uploads
+    # One signer for both methods; a second copy is a second canonical
+    # request to get subtly wrong.
+    assert uploads.count("async function signV4") == 1
+    assert 'signV4("GET"' in uploads
+    assert 'signV4("PUT"' in uploads
+
+
+def test_the_media_route_checks_ownership_before_signing():
+    route = MEDIA_ROUTE.read_text(encoding="utf-8")
+    assert "requireUser" in route
+    assert "AssetRepository" in route
+    assert ".get(assetId)" in route, (
+        "the asset must be read through the caller's session, so RLS applies"
+    )
+
+
+def test_the_player_and_download_never_use_the_stored_object_url():
+    """Using the stored URL directly requires a world-readable bucket."""
+    ui = TS_UI.read_text(encoding="utf-8")
+    assert "src={previewSrc}" in ui
+    assert "const previewSrc = localUrl || sourceUrl;" in ui
+    assert "/api/reels/clips/media?asset=" in ui
+    for leak in ("src={selected?.storage_path", "href={selected.processed_path"):
+        assert leak not in ui, f"a raw object URL reached the DOM: {leak}"
+
+
+def test_clipping_has_no_production_dependency_on_a_json_key():
+    """The org enforces iam.disableServiceAccountKeyCreation permanently."""
+    # Every file in Clipping's end-to-end flow.
+    flow = [
+        UPLOADS_LIB,
+        GCS_AUTH,
+        UPLOAD_ROUTE,
+        MEDIA_ROUTE,
+        API_ROUTE,
+        TS_UI,
+        ROOT / "web" / "app" / "dashboard" / "clipping" / "page.tsx",
+    ]
+    for path in flow:
+        source = path.read_text(encoding="utf-8")
+        # media.ts is the library's read-signer and still uses a key; Clipping
+        # must not reach it.
+        assert "lib/media" not in source, f"{path.name} imports the key-based signer"
+
+    uploads = UPLOADS_LIB.read_text(encoding="utf-8")
+    # A key may still be *read* for local development, but from exactly one
+    # place -- the development fallback. A second read site would be a second
+    # way for production to end up depending on a key that cannot exist.
+    assert uploads.count("process.env.GCS_SERVICE_ACCOUNT_JSON") == 1
+    assert "function localKey()" in uploads
+    assert "federationAvailable" in uploads
+
+    # And the signer itself never reads the variable directly.
+    signer = re.search(r"async function signV4\((.*?)\n\}", uploads, re.S)
+    assert signer, "signV4 not found"
+    assert "GCS_SERVICE_ACCOUNT_JSON" not in signer.group(1)
+
+
+def test_a_read_path_cannot_escape_the_clipping_prefix():
+    uploads = UPLOADS_LIB.read_text(encoding="utf-8")
+    assert "assertClipReadPath" in uploads
+    # Confined to vrf/, so the library's videos/ objects are unreachable.
+    assert "vrf\\\\/uploads" in uploads or "vrf\\/uploads" in uploads
+    assert "objectPathFromStored" in uploads
+    assert 'parsed.hostname !== "storage.googleapis.com"' in uploads, (
+        "a tampered row must not aim a signed URL at another host"
+    )
+
+
+def test_the_bucket_config_is_unchanged():
+    uploads = UPLOADS_LIB.read_text(encoding="utf-8")
+    assert "process.env.GCS_BUCKET" in uploads
+
+
 def test_the_screen_states_the_limit_the_server_enforces():
     ui = TS_UI.read_text(encoding="utf-8")
     uploads = (ROOT / "web" / "lib" / "uploads.ts").read_text(encoding="utf-8")

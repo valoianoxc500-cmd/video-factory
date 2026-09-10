@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createClient, requireUser } from "@/lib/supabase/server";
 import { AssetRepository, toReelsHttpError } from "@/lib/vrf";
 import {
+  FederationError,
   MAX_UPLOAD_BYTES,
   UploadConfigError,
   isAcceptedType,
@@ -11,6 +12,7 @@ import {
   uploadObjectPath,
   uploadsAvailable,
 } from "@/lib/uploads";
+import { reportFederationFailure } from "@/lib/gcs-auth";
 
 /**
  * Upload a video straight into Clipping.
@@ -32,8 +34,18 @@ export const dynamic = "force-dynamic";
 const RIGHTS_SOURCE = "owned_or_permitted";
 
 function fail(err: unknown) {
+  // Both of these are ours, not the customer's. The specific complaint --
+  // which variable is unset, which IAM binding Google rejected -- goes to the
+  // server log; the customer gets one sentence either way, because there is
+  // nothing they can do about a federation binding.
+  if (err instanceof FederationError) {
+    reportFederationFailure(err);
+    return Response.json(
+      { error: "Uploads are not available right now." },
+      { status: err.isConfig ? 503 : 502 },
+    );
+  }
   if (err instanceof UploadConfigError) {
-    // A misconfiguration, not something the customer did.
     console.error(`[clip-upload] ${err.message}`);
     return Response.json(
       { error: "Uploads are not available right now." },
@@ -90,7 +102,9 @@ export async function POST(request: Request) {
       // The path is derived from the verified session, never from the body, so
       // one user cannot mint a URL that writes into another's prefix.
       const objectPath = uploadObjectPath(user.id, randomUUID(), filename);
-      const signed = signedUploadUrl(objectPath, contentType || "video/mp4");
+      // Awaited now: with no private key available, the V4 signature is
+      // produced by Google rather than locally.
+      const signed = await signedUploadUrl(objectPath, contentType || "video/mp4");
 
       return Response.json({
         objectPath,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ASPECTS,
   CAPTION_STYLES,
@@ -84,6 +84,10 @@ export function Clipping({
   const [trimEnd, setTrimEnd] = useState(0);
   const [options, setOptions] = useState<ClipOptions>(defaultClipOptions);
 
+  // Signed, expiring URLs for the chosen source and the finished clip.
+  // Never the stored object URL: that would require a public bucket.
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [resultUrl, setResultUrl] = useState("");
   const [task, setTask] = useState<TaskState | null>(initialTask);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -105,7 +109,9 @@ export function Clipping({
   // A clip needs a video that actually has a file behind it.
   const ready = Boolean(selected && isProcessable(selected)) && !uploading;
   const clipLength = Math.max(0, duration - trimStart - trimEnd);
-  const previewSrc = localUrl || selected?.storage_path || "";
+  // The local object URL wins while a file is still in the browser: it
+  // needs no network and no signature.
+  const previewSrc = localUrl || sourceUrl;
 
   function setOption<K extends keyof ClipOptions>(key: K, value: ClipOptions[K]) {
     setOptions((prev) => ({ ...prev, [key]: value }));
@@ -116,6 +122,38 @@ export function Clipping({
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
     };
   }, []);
+
+  const signMedia = useCallback(
+    async (assetId: string, kind: "source" | "processed") => {
+      try {
+        const response = await fetch(
+          `/api/reels/clips/media?asset=${encodeURIComponent(assetId)}&kind=${kind}`,
+          { cache: "no-store" },
+        );
+        const body = await response.json();
+        return response.ok ? String(body.url ?? "") : "";
+      } catch {
+        return "";
+      }
+    },
+    [],
+  );
+
+  // A stored asset needs a signed URL before it can be played. A file that
+  // is still local does not, so this does nothing until one is committed.
+  useEffect(() => {
+    if (!selectedId || localUrl) {
+      setSourceUrl("");
+      return;
+    }
+    let live = true;
+    signMedia(selectedId, "source").then((url) => {
+      if (live) setSourceUrl(url);
+    });
+    return () => {
+      live = false;
+    };
+  }, [selectedId, localUrl, signMedia]);
 
   // ── polling ────────────────────────────────────────────────────────
 
@@ -253,11 +291,27 @@ export function Clipping({
 
   // ── result ─────────────────────────────────────────────────────────
 
-  const result = useMemo(() => {
-    if (task?.status !== "done" || !selected) return null;
-    const path = String(selected.processed_path ?? "").trim();
-    return path ? { url: path } : null;
-  }, [task?.status, selected]);
+  // The finished clip is signed the same way. `processed_path` only tells
+  // us the clip exists; it is never used as a src.
+  const hasResult =
+    task?.status === "done" &&
+    Boolean(String(selected?.processed_path ?? "").trim());
+
+  useEffect(() => {
+    if (!hasResult || !selected) {
+      setResultUrl("");
+      return;
+    }
+    let live = true;
+    signMedia(selected.id, "processed").then((url) => {
+      if (live) setResultUrl(url);
+    });
+    return () => {
+      live = false;
+    };
+  }, [hasResult, selected, signMedia]);
+
+  const result = hasResult && resultUrl ? { url: resultUrl } : null;
 
   const outputAspect = ASPECTS.find((a) => a.id === options.aspect)?.label ?? "Vertical";
 
