@@ -59,6 +59,15 @@ export interface PlatformCapability {
   note: string;
 }
 
+/**
+ * Video publishing destinations.
+ *
+ * This list is the Reels queue's world: `viral/publishing.py` mirrors it,
+ * the adapters are keyed by it, and anything listed here is a platform the
+ * pipeline will eventually try to send an mp4 to. It is therefore the wrong
+ * place for an account that exists only to receive images -- see
+ * `CONNECT_ONLY_PLATFORMS` below.
+ */
 export const PLATFORMS: PlatformCapability[] = [
   {
     platform: "youtube",
@@ -116,6 +125,50 @@ export const PLATFORMS: PlatformCapability[] = [
       "Snapchat has no server-side publishing API. Creative Kit is an " +
       "app-to-app share from a mobile client and cannot be driven by a backend.",
   },
+];
+
+/**
+ * Accounts a user may connect that are NOT video publishing destinations.
+ *
+ * Threads and X are connected so Quote Studio can publish image carousels to
+ * them. They are deliberately not in `PLATFORMS`: that list is what the Reels
+ * queue iterates, and an image-only account enrolled there would eventually
+ * be handed an mp4 by a video adapter that has no idea it cannot accept one.
+ *
+ * Keeping them in a second list is what lets the Accounts page offer a
+ * Connect button without that button meaning "publish my videos here".
+ * `canPublish` is false throughout for the same reason -- it is read as
+ * "can publish *video*".
+ */
+export const CONNECT_ONLY_PLATFORMS: PlatformCapability[] = [
+  {
+    platform: "threads",
+    label: "Threads",
+    canPublish: false,
+    nativeScheduling: false,
+    draftOnly: false,
+    supported: true,
+    requires: "A Meta Threads app (separate from the Instagram/Facebook app)",
+    note: "Connected for Quote Studio image carousels. Not a video destination.",
+  },
+  {
+    platform: "x",
+    label: "X",
+    canPublish: false,
+    nativeScheduling: false,
+    draftOnly: false,
+    supported: true,
+    requires: "An X developer app with OAuth 2.0 and media upload",
+    note:
+      "Connected for Quote Studio image posts, up to four images. Not a " +
+      "video destination.",
+  },
+];
+
+/** Everything the Accounts page may offer a Connect button for. */
+export const CONNECTABLE_PLATFORMS: PlatformCapability[] = [
+  ...PLATFORMS,
+  ...CONNECT_ONLY_PLATFORMS,
 ];
 
 export const PUBLISHABLE_PLATFORMS = PLATFORMS.filter((p) => p.supported).map(

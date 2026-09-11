@@ -1,6 +1,6 @@
 import { createClient, requireUser } from "@/lib/supabase/server";
 import { toHttpError } from "@/lib/repositories";
-import { AccountRepository, PLATFORMS } from "@/lib/vrf";
+import { AccountRepository, CONNECTABLE_PLATFORMS } from "@/lib/vrf";
 import { OAUTH_PROVIDERS } from "@/lib/vrf-oauth";
 import { tokenKeyConfigured } from "@/lib/vrf-crypto";
 
@@ -21,7 +21,10 @@ export async function GET() {
     const connected = await new AccountRepository(supabase).listForUser();
     const byPlatform = new Map(connected.map((a) => [a.platform, a]));
 
-    const platforms = PLATFORMS.map((platform) => {
+    // CONNECTABLE_PLATFORMS, not PLATFORMS: Threads and X are offered here so
+    // they can be connected for Quote Studio, while staying out of the video
+    // publishing list the Reels queue iterates.
+    const platforms = CONNECTABLE_PLATFORMS.map((platform) => {
       const provider = OAUTH_PROVIDERS[platform.platform];
       const account = byPlatform.get(platform.platform) ?? null;
       return {

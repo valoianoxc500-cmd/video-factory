@@ -256,6 +256,36 @@ OAUTH_PROVIDERS: dict[str, OAuthProvider] = {
         client_secret_env="TIKTOK_CLIENT_SECRET",
         note="video.publish requires an audited app; unaudited apps post to drafts.",
     ),
+    # Threads and X are connected for Quote Studio's carousel publishing.
+    # They are deliberately absent from the publishing PLATFORMS table, which
+    # is what the Reels video queue iterates -- an image-only account enrolled
+    # there would be handed an mp4.
+    "threads": OAuthProvider(
+        "threads", ConnectFlow.OAUTH_CODE,
+        # Threads authenticates on its own hosts, separate from the Facebook
+        # dialog Instagram and Facebook share.
+        authorize_url="https://threads.com/oauth/authorize",
+        token_url="https://graph.threads.com/oauth/access_token",
+        scopes=("threads_basic", "threads_content_publish"),
+        client_id_env="THREADS_CLIENT_ID",
+        client_secret_env="THREADS_CLIENT_SECRET",
+        note=(
+            "Needs its own Meta Threads app -- the Instagram/Facebook app ID "
+            "does not work here."
+        ),
+    ),
+    "x": OAuthProvider(
+        "x", ConnectFlow.OAUTH_PKCE,
+        authorize_url="https://x.com/i/oauth2/authorize",
+        token_url="https://api.x.com/2/oauth2/token",
+        # media.write uploads the images; without offline.access no refresh
+        # token is issued and the connection dies after two hours.
+        scopes=("tweet.read", "tweet.write", "media.write",
+                "users.read", "offline.access"),
+        client_id_env="X_CLIENT_ID",
+        client_secret_env="X_CLIENT_SECRET",
+        note="X carries at most 4 images per post, so it has no true carousel.",
+    ),
     "snapchat": OAuthProvider(
         "snapchat", ConnectFlow.UNSUPPORTED,
         note=(

@@ -1728,3 +1728,176 @@ body {
 .viral-finding{max-width:680px;min-height:300px;margin:auto;display:grid;place-items:center;align-content:center;text-align:center;padding:35px;border:1px solid rgba(255,255,255,.08);border-radius:24px;background:rgba(10,13,18,.75)}.viral-finding h2{margin:20px 0 7px;font-size:clamp(23px,4vw,34px)}.viral-finding p{margin:0 0 18px;color:var(--sa-dim)}.viral-orbit{width:64px;height:64px;padding:6px;border-radius:50%;background:conic-gradient(transparent,#52e895);animation:viral-spin 1.2s linear infinite}.viral-orbit span{display:block;width:100%;height:100%;border-radius:50%;background:#0b0e13}@keyframes viral-spin{to{transform:rotate(360deg)}}
 .viral-results{margin-top:28px}.viral-results-head{display:flex;align-items:end;justify-content:space-between;gap:18px;margin-bottom:18px}.viral-results-head span,.viral-reason{color:#52e895;font-size:10px;font-weight:750;letter-spacing:.12em;text-transform:uppercase}.viral-results-head h2{margin:5px 0 0;font-size:clamp(25px,4vw,38px)}.viral-results-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.viral-result-card{overflow:hidden;border:1px solid rgba(255,255,255,.1);border-radius:18px;background:rgba(12,15,20,.9)}.viral-result-video{position:relative;aspect-ratio:9/16;max-height:430px;background:#020304}.viral-result-video video{width:100%;height:100%;object-fit:contain}.viral-media-loading{height:100%;display:grid;place-items:center;color:var(--sa-dim);font-size:12px}.viral-score{position:absolute;top:12px;right:12px;display:grid;place-items:center;width:52px;height:52px;border-radius:50%;color:#06150d;background:#63e99c;font-size:17px;font-weight:850}.viral-score small{margin-top:-6px;font-size:6px}.viral-result-body{padding:16px}.viral-result-body h3{min-height:42px;margin:7px 0;font-size:16px}.viral-result-body p{color:var(--sa-dim);font-size:12px}.viral-result-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.viral-result-actions>*{width:100%;padding:9px!important;text-align:center;font-size:12px!important}
 @media(prefers-reduced-motion:reduce){.viral-orbit{animation:none}}@media(max-width:800px){.viral-results-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:600px){.viral-clip-composer{padding:18px}.viral-options{grid-template-columns:1fr}.viral-upload-preview{grid-template-columns:100px 1fr}.viral-upload-preview video{width:100px}.viral-results-head{align-items:flex-start;flex-direction:column}.viral-results-grid{grid-template-columns:1fr}}
+
+
+/* =====================================================================
+   AI Carousel Studio
+   ---------------------------------------------------------------------
+   One idea in at the top, a grid of slides to review underneath, and
+   publishing last. The order on screen is the order of the work.
+   ===================================================================== */
+
+.cs-create { text-align: center; }
+.cs-h1 {
+  margin: 4px 0 6px;
+  font-family: var(--sa-display); font-size: 27px; font-weight: 760;
+  color: var(--sa-text); letter-spacing: -.02em;
+}
+.cs-sub { margin: 0 0 20px; font-size: 14px; color: var(--sa-dim); }
+
+.cs-idea { max-width: 640px; margin: 0 auto; text-align: left; }
+.cs-idea textarea { font-size: 15px; }
+
+.cs-examples {
+  display: flex; flex-wrap: wrap; justify-content: center;
+  gap: 7px; margin: 12px auto 20px; max-width: 680px;
+}
+.cs-example {
+  padding: 6px 13px; border-radius: 999px;
+  border: 1px solid var(--sa-line); background: var(--bg-deep);
+  color: var(--sa-dim); font-size: 12px; cursor: pointer;
+}
+.cs-example:hover { color: var(--accent); border-color: var(--accent); }
+
+.cs-options {
+  display: grid; gap: 16px; max-width: 680px; margin: 0 auto 20px;
+  text-align: left;
+}
+.cs-generate { max-width: 340px; margin: 0 auto; }
+.cs-two { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+
+/* -- the review grid ------------------------------------------------ */
+
+.cs-grid {
+  display: grid; gap: 14px; margin-top: 4px;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+}
+.cs-card {
+  display: grid; gap: 8px; padding: 11px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--sa-line); background: var(--bg-deep);
+}
+.cs-card.is-dragging { opacity: .45; }
+.cs-card-head { display: flex; align-items: center; justify-content: space-between; }
+.cs-slide-n { font-size: 11.5px; font-weight: 700; color: var(--sa-text); }
+.cs-role {
+  padding: 2px 8px; border-radius: 999px;
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .04em;
+}
+/* The hook and the close are the two slides that carry the carousel, so
+   they are labelled distinctly rather than all three reading alike. */
+.cs-role-hook { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+.cs-role-cta  { background: rgba(23, 227, 142, .16); color: #17E38E; }
+.cs-role-body { background: var(--panel-3, #18202B); color: var(--sa-dim); }
+
+.cs-slide {
+  position: relative; width: 100%; overflow: hidden;
+  border-radius: 9px; border: 1px solid rgba(0, 0, 0, .10);
+}
+.cs-slide-body {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; justify-content: flex-end;
+  gap: 8px; padding: 10%;
+}
+.cs-slide-body.is-hook { justify-content: center; }
+.cs-slide-text { margin: 0; overflow-wrap: anywhere; }
+.cs-slide-sig { display: flex; align-items: center; gap: 8px; margin-top: auto; }
+.cs-slide-body.is-hook .cs-slide-sig { margin-top: 14px; }
+
+.cs-text {
+  width: 100%; resize: vertical; padding: 7px 9px;
+  border-radius: 6px; border: 1px solid var(--sa-line);
+  background: transparent; color: var(--sa-text);
+  font-size: 12px; line-height: 1.45;
+}
+.cs-warn { margin: 0; font-size: 11px; color: #FF9F45; }
+
+.cs-card-tools { display: flex; gap: 4px; }
+.cs-card-tools button {
+  flex: 1; padding: 5px 0; border-radius: 6px;
+  border: 1px solid var(--sa-line); background: transparent;
+  color: var(--sa-dim); font-size: 11px; cursor: pointer;
+}
+.cs-card-tools button:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.cs-card-tools button:disabled { opacity: .3; cursor: default; }
+
+.cs-card-bg { display: flex; gap: 5px; }
+.cs-bg-dot {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, .25); cursor: pointer; padding: 0;
+}
+.cs-bg-dot.is-on { box-shadow: 0 0 0 2px var(--accent); }
+
+/* -- publishing ----------------------------------------------------- */
+
+.cs-platforms {
+  display: grid; gap: 12px; margin-bottom: 18px;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+}
+.cs-platform {
+  display: grid; gap: 6px; align-content: start;
+  padding: 14px; border-radius: var(--r-sm);
+  border: 1px solid var(--sa-line); background: var(--bg-deep);
+}
+.cs-platform.is-on { border-color: var(--accent); }
+.cs-platform-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cs-platform-head b { font-size: 13.5px; color: var(--sa-text); }
+.cs-ok { font-size: 11.5px; color: #17E38E; font-weight: 650; }
+.cs-connect { font-size: 11.5px; color: var(--accent); }
+.cs-handle { margin: 0; font-size: 11.5px; color: var(--sa-dim); }
+.cs-platform-note { margin: 0; font-size: 11px; color: var(--sa-dim); line-height: 1.4; }
+.cs-platform .btn-ghost { padding: 7px 0 !important; font-size: 12px !important; margin-top: 4px; }
+.cs-platform .btn-ghost.is-on { border-color: var(--accent); color: var(--accent); }
+
+.cs-caption-previews {
+  list-style: none; margin: 10px 0 16px; padding: 0; display: grid; gap: 6px;
+}
+.cs-caption-previews li {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 8px 12px; border-radius: 7px;
+  background: var(--bg-deep); border: 1px solid var(--sa-line);
+  font-size: 12px; color: var(--sa-dim);
+}
+.cs-caption-previews b { color: var(--sa-text); text-transform: capitalize; }
+
+.cs-confirm {
+  margin-top: 14px; padding: 18px;
+  border-radius: var(--r-sm);
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--sa-line));
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-deep));
+}
+.cs-confirm h3 {
+  margin: 0 0 6px;
+  font-family: var(--sa-display); font-size: 15px; color: var(--sa-text);
+}
+.cs-confirm p { margin: 0 0 8px; font-size: 13px; color: var(--sa-dim); }
+.cs-confirm ul { margin: 0 0 12px; padding-left: 18px; font-size: 13px; color: var(--sa-text); }
+
+@media (max-width: 860px) {
+  .cs-two { grid-template-columns: 1fr; }
+  .cs-grid { grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); }
+  .cs-h1 { font-size: 23px; }
+}
+
+
+/* -- publish captions and per-platform results --------------------- */
+
+.cs-captions { display: grid; gap: 12px; margin: 4px 0 16px; }
+.cs-captions .field > span { text-transform: capitalize; }
+
+.cs-results { list-style: none; margin: 0 0 16px; padding: 0; display: grid; gap: 7px; }
+.cs-results li {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 10px 13px; border-radius: 8px;
+  border: 1px solid var(--sa-line); background: var(--bg-deep);
+  font-size: 13px;
+}
+.cs-results b { text-transform: capitalize; color: var(--sa-text); }
+/* A published platform reads as settled; a failed one carries its own safe
+   sentence rather than a shared banner, because the two outcomes are
+   independent and a single banner would misreport one of them. */
+.cs-results li.is-ok { border-color: color-mix(in srgb, #17E38E 40%, transparent); }
+.cs-results li.is-ok span { color: #17E38E; }
+.cs-results li.is-bad { border-color: color-mix(in srgb, #FF6B6B 40%, transparent); }
+.cs-results li.is-bad span { color: #FF6B6B; }

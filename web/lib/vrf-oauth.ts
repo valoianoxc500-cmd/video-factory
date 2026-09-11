@@ -76,6 +76,45 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProvider> = {
     clientSecretEnv: "TIKTOK_CLIENT_SECRET",
     note: "video.publish requires an audited app; unaudited apps post to drafts.",
   },
+  // Threads and X below are connected for Quote Studio's carousel publishing
+  // only. They are deliberately absent from `PLATFORMS` in `lib/vrf.ts`,
+  // which is what drives the Reels video queue and its adapters -- adding
+  // them there would enrol two image-only accounts in a video pipeline that
+  // has no idea what to do with them.
+  threads: {
+    platform: "threads",
+    flow: "oauth_code",
+    // Threads authenticates on its own hosts, separate from the Facebook
+    // dialog Instagram and Facebook use, and separate again from the
+    // graph.threads.net host its publishing API lives on.
+    authorizeUrl: "https://threads.com/oauth/authorize",
+    tokenUrl: "https://graph.threads.com/oauth/access_token",
+    scopes: ["threads_basic", "threads_content_publish"],
+    clientIdEnv: "THREADS_CLIENT_ID",
+    clientSecretEnv: "THREADS_CLIENT_SECRET",
+    note:
+      "Needs its own Meta Threads app -- the Instagram/Facebook app ID does " +
+      "not work here.",
+  },
+  x: {
+    platform: "x",
+    flow: "oauth_pkce",
+    authorizeUrl: "https://x.com/i/oauth2/authorize",
+    tokenUrl: "https://api.x.com/2/oauth2/token",
+    // media.write is the v2 scope for uploading images; offline.access is
+    // what makes a refresh token be issued at all, and without it the
+    // connection dies two hours after it is made.
+    scopes: [
+      "tweet.read",
+      "tweet.write",
+      "media.write",
+      "users.read",
+      "offline.access",
+    ],
+    clientIdEnv: "X_CLIENT_ID",
+    clientSecretEnv: "X_CLIENT_SECRET",
+    note: "X carries at most 4 images per post, so it has no true carousel.",
+  },
   snapchat: {
     platform: "snapchat",
     flow: "unsupported",
@@ -363,6 +402,33 @@ export async function fetchAccountIdentity(
     }
     const ig = withInstagram.instagram_business_account as Record<string, string>;
     return { ref: String(ig.id ?? ""), handle: String(ig.username ?? "") };
+  }
+
+  if (platform === "threads") {
+    // Threads publishes and identifies on graph.threads.net, even though its
+    // OAuth lives on graph.threads.com. The id returned here is what every
+    // later publish call addresses as {threads-user-id}.
+    const body = await json(
+      "https://graph.threads.net/v1.0/me?fields=id,username" +
+        `&access_token=${accessToken}`,
+    );
+    const ref = String(body.id ?? "");
+    if (!ref) {
+      throw new ConnectError("That Threads account could not be read.", 502);
+    }
+    return { ref, handle: String(body.username ?? "") };
+  }
+
+  if (platform === "x") {
+    const body = await json("https://api.x.com/2/users/me?user.fields=username", {
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+    const data = (body.data ?? {}) as Record<string, string>;
+    const ref = String(data.id ?? "");
+    if (!ref) {
+      throw new ConnectError("That X account could not be read.", 502);
+    }
+    return { ref, handle: String(data.username ?? "") };
   }
 
   if (platform === "tiktok") {
