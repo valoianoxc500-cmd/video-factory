@@ -21,7 +21,7 @@ from viral import clipping as clip
 
 ROOT = Path(__file__).resolve().parents[1]
 TS_LIB = ROOT / "web" / "lib" / "clipping.ts"
-TS_UI = ROOT / "web" / "components" / "reels" / "Clipping.tsx"
+TS_UI = ROOT / "web" / "components" / "reels" / "ViralClipping.tsx"
 API_ROUTE = ROOT / "web" / "app" / "api" / "reels" / "clips" / "route.ts"
 UPLOAD_ROUTE = ROOT / "web" / "app" / "api" / "reels" / "clips" / "upload" / "route.ts"
 RUNNER = ROOT / "viral" / "runner.py"
@@ -72,11 +72,11 @@ def test_the_defaults_match_on_both_sides(ts_lib):
 # ── the wire carries them ────────────────────────────────────────────
 
 def test_the_screen_sends_every_option_it_shows():
-    """A control that moves but is never transmitted is worse than no control."""
+    """The three viral controls travel as one auto-analysis contract."""
     ui = TS_UI.read_text(encoding="utf-8")
     assert "clipOptions: options" in ui, "the screen must send its options"
-    for key in ("aspect", "focus", "captions", "caption_style", "quality", "speaker"):
-        assert f'setOption("{key}"' in ui, f"{key} is never set by the screen"
+    for key in ("language", "length", "count"):
+        assert f'updateOption("{key}"' in ui, f"{key} is never set by the screen"
 
 
 def test_the_option_shape_is_complete(ts_lib):
@@ -89,16 +89,16 @@ def test_the_option_shape_is_complete(ts_lib):
 
 def test_the_api_route_forwards_every_option():
     route = API_ROUTE.read_text(encoding="utf-8")
-    assert "clip_options" in route, "the task payload must carry clip_options"
-    for key in ("aspect", "quality", "focus", "captions", "caption_style", "speaker"):
+    assert "auto_clip" in route, "the task payload must carry auto_clip"
+    for key in ("language", "length", "count"):
         assert key in route, f"{key} is dropped by the API route"
 
 
 def test_the_worker_reads_every_option():
     runner = RUNNER.read_text(encoding="utf-8")
-    assert 'payload.get("clip_options")' in runner
-    for key in ("aspect", "quality", "focus", "captions", "caption_style", "speaker"):
-        assert f'options.get("{key}")' in runner, f"{key} never reaches the ClipSpec"
+    assert 'payload.get("auto_clip")' in runner
+    for key in ("language", "length", "count"):
+        assert f'options.get("{key}")' in runner, f"{key} never reaches analysis"
 
 
 def test_an_absent_options_block_keeps_the_original_encode():
@@ -139,10 +139,10 @@ def test_the_uploaded_path_shape_matches_the_worker_download():
 # ── customer states ──────────────────────────────────────────────────
 
 def test_the_screen_shows_five_states_and_no_others(ts_lib):
-    block = re.search(r"export const CUSTOMER_STATES = \[(.*?)\] as const;", ts_lib, re.S)
-    assert block
-    states = re.findall(r'"([^"]+)"', block.group(1))
-    assert states == ["Preparing", "Analyzing", "Creating clip", "Rendering", "Ready"]
+    ui = TS_UI.read_text(encoding="utf-8")
+    assert "Finding your best clips..." in ui
+    for internal in ("Preparing", "Creating clip", "Rendering"):
+        assert f">{internal}<" not in ui
 
 
 def test_the_screen_never_renders_a_raw_task_error():
@@ -156,8 +156,7 @@ def test_the_screen_never_renders_a_raw_task_error():
 def test_metadata_only_videos_cannot_be_selected():
     """A YouTube entry has no file and must never appear as an editable video."""
     ui = TS_UI.read_text(encoding="utf-8")
-    assert "isProcessable" in ui
-    assert "assets.filter(isProcessable)" in ui
+    assert "initialAssets" in ui
 
     page = (ROOT / "web" / "app" / "dashboard" / "clipping" / "page.tsx").read_text(
         encoding="utf-8"
@@ -223,7 +222,7 @@ def test_the_signature_is_converted_from_base64_to_hex():
 def test_uploads_still_go_straight_to_storage():
     """A 2GB file must never be proxied through a serverless function."""
     ui = TS_UI.read_text(encoding="utf-8")
-    assert 'xhr.open("PUT", url, true)' in ui
+    assert '.open("PUT", url, true)' in ui
     upload_route = UPLOAD_ROUTE.read_text(encoding="utf-8")
     assert "signedUploadUrl" in upload_route
     assert "await request.formData" not in upload_route, (
@@ -271,9 +270,8 @@ def test_the_media_route_checks_ownership_before_signing():
 def test_the_player_and_download_never_use_the_stored_object_url():
     """Using the stored URL directly requires a world-readable bucket."""
     ui = TS_UI.read_text(encoding="utf-8")
-    assert "src={previewSrc}" in ui
-    assert "const previewSrc = localUrl || sourceUrl;" in ui
-    assert "/api/reels/clips/media?asset=" in ui
+    assert "src={localUrl}" in ui
+    assert "/api/reels/clips/media?task=" in ui
     for leak in ("src={selected?.storage_path", "href={selected.processed_path"):
         assert leak not in ui, f"a raw object URL reached the DOM: {leak}"
 

@@ -364,6 +364,229 @@ def _coerce_word(row: object) -> dict | None:
     return {"word": text, "start": _time(row.get("start")), "end": _time(row.get("end"))}
 
 
+# ── automatic viral-moment selection ────────────────────────────────
+
+_HOOK_PHRASES = (
+    "here's why", "this is why", "the truth", "you won't believe",
+    "nobody tells you", "what if", "did you know", "stop doing",
+    "the biggest mistake", "listen", "imagine", "لا أحد", "هل تعلم",
+    "الحقيقة", "تخيل", "nadie te dice", "la verdad", "imagina",
+)
+_EMOTION_WORDS = {
+    "amazing", "angry", "afraid", "fear", "love", "hate", "shocked",
+    "terrifying", "incredible", "pain", "dream", "worst", "best",
+    "خوف", "مرعب", "مذهل", "غاضب", "حب", "أكره", "صدمة", "حلم",
+    "miedo", "increíble", "amor", "odio", "dolor", "sueño", "peor", "mejor",
+}
+_PAYOFF_PHRASES = (
+    "that's why", "the result", "it worked", "finally", "turns out",
+    "the answer", "so now", "لهذا", "النتيجة", "أخيراً", "الإجابة",
+    "por eso", "el resultado", "finalmente", "la respuesta",
+)
+_WEAK_OPENERS = {
+    "he", "she", "they", "it", "this", "that", "and", "but", "so",
+    "هو", "هي", "هم", "هذا", "هذه", "لكن", "ثم", "y", "pero", "entonces",
+}
+
+_LENGTH_WINDOWS = {
+    "auto": (12.0, 90.0, 42.0),
+    "short": (8.0, 29.9, 23.0),
+    "medium": (30.0, 60.0, 44.0),
+    "long": (60.0, 90.0, 74.0),
+}
+
+
+@dataclass(frozen=True)
+class ViralMoment:
+    id: str
+    title: str
+    start: float
+    end: float
+    score: int
+    reason: str
+    signals: dict[str, int]
+
+    @property
+    def duration(self) -> float:
+        return round(self.end - self.start, 3)
+
+    def to_record(self) -> dict:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "start": self.start,
+            "end": self.end,
+            "duration": self.duration,
+            "viral_score": self.score,
+            "reason": self.reason,
+            "signals": dict(self.signals),
+        }
+
+
+def _transcript_segments(words: list) -> list[dict]:
+    """Build sentence-like beats from a timestamped recognizer transcript."""
+    usable = [w for w in (_coerce_word(row) for row in words or []) if w]
+    timed = [w for w in usable if w["start"] is not None and w["end"] is not None]
+    timed.sort(key=lambda row: (float(row["start"]), float(row["end"])))
+    if not timed:
+        return []
+
+    segments: list[dict] = []
+    current: list[dict] = []
+    for word in timed:
+        if current:
+            gap = float(word["start"]) - float(current[-1]["end"])
+            elapsed = float(current[-1]["end"]) - float(current[0]["start"])
+            previous_ends_sentence = bool(re.search(r"[.!?؟…]$", current[-1]["word"]))
+            if gap >= 1.15 or (previous_ends_sentence and elapsed >= 2.5) or elapsed >= 12.0:
+                segments.append({
+                    "start": float(current[0]["start"]),
+                    "end": float(current[-1]["end"]),
+                    "words": current,
+                })
+                current = []
+        current.append(word)
+    if current:
+        segments.append({
+            "start": float(current[0]["start"]),
+            "end": float(current[-1]["end"]),
+            "words": current,
+        })
+    return segments
+
+
+def _moment_score(text: str, duration: float, target: float) -> tuple[int, str, dict[str, int]]:
+    lower = text.casefold()
+    tokens = re.findall(r"[\w'’]+", lower, flags=re.UNICODE)
+    opening = " ".join(tokens[:14])
+    hook = 18 if any(phrase in opening for phrase in _HOOK_PHRASES) else 0
+    emotion_hits = len(set(tokens) & _EMOTION_WORDS)
+    emotion = min(14, emotion_hits * 5)
+    payoff = 15 if any(phrase in lower for phrase in _PAYOFF_PHRASES) else 0
+    curiosity = 10 if ("?" in text or "؟" in text) else 4 if "!" in text else 0
+    density_value = len(tokens) / max(duration, 1.0)
+    pacing = max(0, min(12, round((density_value - 1.2) * 8)))
+    complete = 8 if re.search(r"[.!?؟…]\s*$", text) else 3
+    duration_fit = max(0, round(10 - abs(duration - target) / max(target, 1) * 10))
+    weak_open = 5 if tokens and tokens[0] in _WEAK_OPENERS else 0
+    signals = {
+        "hook": hook,
+        "emotion": emotion,
+        "payoff": payoff,
+        "curiosity": curiosity,
+        "pacing": pacing,
+        "complete_thought": complete,
+        "duration_fit": duration_fit,
+        "weak_open_penalty": -weak_open,
+    }
+    score = max(1, min(100, 28 + sum(signals.values())))
+    strengths = [
+        (hook, "Strong hook"),
+        (emotion, "High emotion"),
+        (payoff, "Clear payoff"),
+        (curiosity, "Curiosity gap"),
+        (pacing, "Fast pacing"),
+        (complete, "Complete thought"),
+    ]
+    reason = max(strengths, key=lambda item: (item[0], item[1]))[1]
+    return score, reason, signals
+
+
+def _moment_title(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", text).strip(" -–—.,!?؟")
+    words = cleaned.split()
+    title = " ".join(words[:9])
+    return title + ("…" if len(words) > 9 else "") if title else "Standout moment"
+
+
+def select_viral_moments(
+    words: list,
+    *,
+    source_duration: float,
+    length: str = "auto",
+    count: str | int = "auto",
+) -> list[ViralMoment]:
+    """Rank real transcript windows by explainable hook and pacing signals.
+
+    No score is invented by the UI. Every score is calculated here from the
+    words and timestamps in the source, and its component signals travel with
+    the result. A transcript without usable timestamps returns no moments.
+    """
+    segments = _transcript_segments(words)
+    if not segments:
+        return []
+
+    mode = str(length or "auto").strip().lower()
+    minimum, maximum, target = _LENGTH_WINDOWS.get(mode, _LENGTH_WINDOWS["auto"])
+    duration = max(0.0, float(source_duration or 0.0))
+    if 0 < duration < minimum:
+        minimum = max(3.0, duration * 0.6)
+        maximum = duration
+        target = duration
+
+    candidates: list[ViralMoment] = []
+    for start_index, first in enumerate(segments):
+        eligible: list[tuple[float, int]] = []
+        for end_index in range(start_index, len(segments)):
+            span = float(segments[end_index]["end"]) - float(first["start"])
+            if span > maximum:
+                break
+            if span >= minimum:
+                eligible.append((abs(span - target), end_index))
+        if not eligible:
+            continue
+        _, end_index = min(eligible, key=lambda item: (item[0], item[1]))
+        chosen = segments[start_index : end_index + 1]
+        text = " ".join(
+            word["word"] for segment in chosen for word in segment["words"]
+        ).strip()
+        start = round(float(chosen[0]["start"]), 3)
+        end = round(float(chosen[-1]["end"]), 3)
+        score, reason, signals = _moment_score(text, end - start, target)
+        candidates.append(ViralMoment(
+            id="",
+            title=_moment_title(text),
+            start=start,
+            end=end,
+            score=score,
+            reason=reason,
+            signals=signals,
+        ))
+
+    requested = (
+        max(1, min(10, int(count)))
+        if str(count).isdigit()
+        else max(1, min(10, round(max(duration, 30.0) / 90.0)))
+    )
+    ranked = sorted(candidates, key=lambda item: (-item.score, item.start, item.end))
+    selected: list[ViralMoment] = []
+    for candidate in ranked:
+        overlap = False
+        for existing in selected:
+            intersection = max(0.0, min(candidate.end, existing.end) - max(candidate.start, existing.start))
+            shorter = max(0.001, min(candidate.duration, existing.duration))
+            if intersection / shorter > 0.35:
+                overlap = True
+                break
+        if not overlap:
+            selected.append(candidate)
+        if len(selected) >= requested:
+            break
+
+    return [
+        ViralMoment(
+            id=f"clip_{index}",
+            title=moment.title,
+            start=moment.start,
+            end=moment.end,
+            score=moment.score,
+            reason=moment.reason,
+            signals=moment.signals,
+        )
+        for index, moment in enumerate(selected, start=1)
+    ]
+
+
 def caption_cues(
     words: list,
     *,

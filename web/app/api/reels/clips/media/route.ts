@@ -1,5 +1,5 @@
 import { createClient, requireUser } from "@/lib/supabase/server";
-import { AssetRepository, toReelsHttpError } from "@/lib/vrf";
+import { AssetRepository, TaskRepository, toReelsHttpError } from "@/lib/vrf";
 import { FederationError, UploadConfigError, signedReadUrl } from "@/lib/uploads";
 import { reportFederationFailure } from "@/lib/gcs-auth";
 
@@ -45,7 +45,27 @@ export async function GET(request: Request) {
     const oidcToken = request.headers.get("x-vercel-oidc-token") ?? undefined;
     const url = new URL(request.url);
     const assetId = String(url.searchParams.get("asset") ?? "").trim();
+    const taskId = String(url.searchParams.get("task") ?? "").trim();
+    const clipId = String(url.searchParams.get("clip") ?? "").trim();
     const kind = String(url.searchParams.get("kind") ?? "source").trim();
+    const supabase = await createClient();
+
+    if (taskId || clipId) {
+      if (!taskId || !clipId) {
+        return Response.json({ error: "Choose a finished clip." }, { status: 400 });
+      }
+      const task = await new TaskRepository(supabase).get(taskId);
+      const clips = Array.isArray(task.result?.clips) ? task.result.clips : [];
+      const clip = clips.find((item) =>
+        String((item as Record<string, unknown>)?.id ?? "") === clipId,
+      ) as Record<string, unknown> | undefined;
+      const stored = String(clip?.path ?? "").trim();
+      if (!stored || !["done", "skipped"].includes(String(clip?.status ?? ""))) {
+        return Response.json({ error: "That clip is not ready yet." }, { status: 409 });
+      }
+      const signed = await signedReadUrl(stored, undefined, oidcToken);
+      return Response.json(signed);
+    }
 
     if (!assetId) {
       return Response.json({ error: "Choose a video." }, { status: 400 });
@@ -54,7 +74,6 @@ export async function GET(request: Request) {
       return Response.json({ error: "Unknown media type." }, { status: 400 });
     }
 
-    const supabase = await createClient();
     const asset = await new AssetRepository(supabase).get(assetId);
 
     const stored =

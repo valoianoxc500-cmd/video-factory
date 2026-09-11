@@ -1,5 +1,6 @@
 import { createClient, requireUser } from "@/lib/supabase/server";
 import { AssetRepository, TaskRepository, toReelsHttpError } from "@/lib/vrf";
+import { mediaImportPlan, parseVideoUrl } from "@/lib/vrf-ingest";
 
 /**
  * Clipping: cut a section out of a video the user owns and reframe it to 9:16.
@@ -16,10 +17,26 @@ import { AssetRepository, TaskRepository, toReelsHttpError } from "@/lib/vrf";
 
 export const dynamic = "force-dynamic";
 
-/** Long enough to be worth cutting down; short enough to be a clip. */
-const MIN_CLIP_SECONDS = 1;
+const LANGUAGES = new Set(["auto", "en", "ar", "es"]);
+const LENGTHS = new Set(["auto", "short", "medium", "long"]);
+const COUNTS = new Set(["auto", "3", "5", "10"]);
 
-export async function GET() {
+function option(value: unknown, allowed: Set<string>, fallback: string): string {
+  const clean = String(value ?? "").trim().toLowerCase();
+  return allowed.has(clean) ? clean : fallback;
+}
+
+function publicTask(task: Awaited<ReturnType<TaskRepository["get"]>> | null) {
+  if (!task) return null;
+  const clips = (Array.isArray(task.result?.clips) ? task.result.clips : []).map((item) => {
+    const row = (item ?? {}) as Record<string, unknown>;
+    const { path: _path, error: _error, ...safe } = row;
+    return safe;
+  });
+  return { ...task, result: { ...task.result, clips } };
+}
+
+export async function GET(request: Request) {
   try {
     await requireUser();
     const supabase = await createClient();
@@ -32,12 +49,23 @@ export async function GET() {
 
     let running = null;
     try {
-      running = await new TaskRepository(supabase).latest("process");
+      const tasks = new TaskRepository(supabase);
+      const requested = new URL(request.url).searchParams.get("task");
+      if (requested) {
+        running = await tasks.get(requested);
+      } else {
+        const [processTask, ingestTask] = await Promise.all([
+          tasks.latest("process"), tasks.latest("ingest"),
+        ]);
+        running = [processTask, ingestTask]
+          .filter((item): item is NonNullable<typeof item> => Boolean(item?.payload?.auto_clip))
+          .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] ?? null;
+      }
     } catch {
       // The list is still useful without the task's state.
     }
 
-    return Response.json({ assets: clippable, latest: running });
+    return Response.json({ assets: clippable, latest: publicTask(running) });
   } catch (err) {
     const { status, message } = toReelsHttpError(err);
     return Response.json({ error: message, assets: [], latest: null }, { status });
@@ -55,73 +83,69 @@ export async function POST(request: Request) {
     }
     const payload = (body ?? {}) as Record<string, unknown>;
 
-    const assetId = String(payload.assetId ?? "").trim();
-    if (!assetId) {
-      return Response.json({ error: "Choose a video to clip." }, { status: 400 });
-    }
-
-    const supabase = await createClient();
-
-    // Read the asset back rather than trusting the request: whether it has a
-    // file, and how long it runs, decide whether the trim is even possible.
-    const assets = await new AssetRepository(supabase).listForUser();
-    const asset = assets.find((row) => row.id === assetId);
-    if (!asset) {
-      return Response.json({ error: "That video no longer exists." }, { status: 404 });
-    }
-    if (!String(asset.storage_path ?? "").trim()) {
+    if (payload.ownsOrPermitted !== true) {
       return Response.json(
-        {
-          error:
-            asset.ingest_detail ||
-            "That video has no imported file yet, so there is nothing to clip.",
-        },
-        { status: 409 },
-      );
-    }
-
-    const trimStart = Math.max(0, Number(payload.trimStart) || 0);
-    const trimEnd = Math.max(0, Number(payload.trimEnd) || 0);
-
-    // A trim that removes everything is a mistake worth catching before it
-    // reaches ffmpeg, which would fail with something far less helpful.
-    const duration = Number(asset.duration_seconds ?? 0);
-    if (duration > 0 && duration - trimStart - trimEnd < MIN_CLIP_SECONDS) {
-      return Response.json(
-        {
-          error: `Those trims leave nothing behind. The video is ${Math.round(
-            duration,
-          )}s long.`,
-        },
+        { error: "Confirm you own this video or have permission to use it." },
         { status: 400 },
       );
     }
 
-    // Options travel as an opaque block. They are validated on the worker,
-    // which owns the vocabulary and falls back to its own defaults, so an
-    // unknown value here degrades one setting rather than failing the clip.
-    // Absent options mean the worker takes its original path unchanged.
-    const raw = (payload.clipOptions ?? null) as Record<string, unknown> | null;
-    const clipOptions = raw
-      ? {
-          aspect: String(raw.aspect ?? ""),
-          quality: String(raw.quality ?? ""),
-          focus: String(raw.focus ?? ""),
-          captions: Boolean(raw.captions),
-          caption_style: String(raw.caption_style ?? ""),
-          speaker: String(raw.speaker ?? "").slice(0, 80),
-        }
-      : null;
+    const raw = (payload.clipOptions ?? {}) as Record<string, unknown>;
+    const autoClip = {
+      language: option(raw.language, LANGUAGES, "auto"),
+      length: option(raw.length, LENGTHS, "auto"),
+      count: option(raw.count, COUNTS, "auto"),
+    };
+    const supabase = await createClient();
+    const assets = new AssetRepository(supabase);
+    const tasks = new TaskRepository(supabase);
+    const sourceUrl = String(payload.sourceUrl ?? "").trim();
 
-    const task = await new TaskRepository(supabase).create(user.id, "process", {
+    if (sourceUrl) {
+      const parsed = parseVideoUrl(sourceUrl);
+      const { data, error } = await supabase
+        .from("vrf_accounts")
+        .select("platform, revoked_at")
+        .is("revoked_at", null);
+      if (error) throw new Error(error.message);
+      const connected = (data ?? []).map((row) => String(row.platform));
+      const plan = mediaImportPlan(parsed, connected);
+      if (!plan.canFetchMedia) {
+        return Response.json({ error: plan.reason }, { status: 409 });
+      }
+      const asset = await assets.createFromUrl(user.id, {
+        url: sourceUrl,
+        ownsOrPermitted: true,
+        connectedPlatforms: connected,
+      });
+      const task = await tasks.create(user.id, "ingest", {
+        asset_id: asset.id,
+        platform: "tiktok",
+        auto_clip: autoClip,
+      });
+      return Response.json({ task: publicTask(task) }, { status: 201 });
+    }
+
+    const assetId = String(payload.assetId ?? "").trim();
+    if (!assetId) {
+      return Response.json(
+        { error: "Paste a supported link or upload a video." },
+        { status: 400 },
+      );
+    }
+    const asset = await assets.get(assetId);
+    if (!String(asset.storage_path ?? "").trim()) {
+      return Response.json(
+        { error: "This video does not include a processable source file. Upload the original video to create clips." },
+        { status: 409 },
+      );
+    }
+    const task = await tasks.create(user.id, "process", {
       asset_id: asset.id,
-      platform: String(payload.platform ?? "tiktok"),
-      trim_start: trimStart,
-      trim_end: trimEnd,
-      ...(clipOptions ? { clip_options: clipOptions } : {}),
+      platform: "tiktok",
+      auto_clip: autoClip,
     });
-
-    return Response.json({ task }, { status: 201 });
+    return Response.json({ task: publicTask(task) }, { status: 201 });
   } catch (err) {
     const { status, message } = toReelsHttpError(err);
     return Response.json({ error: message }, { status });

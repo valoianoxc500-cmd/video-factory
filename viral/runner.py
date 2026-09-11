@@ -523,7 +523,12 @@ def run_ingest(client: WorkerClient, cipher: TokenCipher | None, payload: dict) 
     # here rather than in a task queued behind this one.
     processed = run_process(
         client,
-        {"asset_id": asset_id, "platform": payload.get("platform") or "tiktok"},
+        {
+            "asset_id": asset_id,
+            "platform": payload.get("platform") or "tiktok",
+            **({"auto_clip": payload["auto_clip"]}
+               if isinstance(payload.get("auto_clip"), dict) else {}),
+        },
     )
     return {"imported": True, **processed}
 
@@ -607,6 +612,183 @@ def _build_subtitles(
         return None
 
 
+def _transcribe_for_viral_clips(
+    source_path: Path,
+    workdir: Path,
+    language: str,
+) -> list[dict]:
+    """Transcribe the full source once for ranking and every output caption."""
+    audio = workdir / "source_audio.wav"
+    extract = subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(source_path),
+         "-vn", "-ac", "1", "-ar", "16000", str(audio)],
+        capture_output=True,
+        text=True,
+    )
+    if extract.returncode != 0 or not audio.exists():
+        raise RuntimeError("We could not hear enough speech to find standalone clips.")
+
+    from core.audio_sourcer import _transcribe_with_timestamps
+
+    # Auto means no translation. The existing recognizer needs a locale; use
+    # the source-language hint when one exists and English as the safe default.
+    requested = str(language or "auto").strip().lower()
+    locale = str(requested if requested in {"en", "ar", "es"} else "en")
+    words = _transcribe_with_timestamps(audio, locale)
+    if not words:
+        raise RuntimeError("We could not hear enough speech to find standalone clips.")
+    return words
+
+
+def _subtitles_from_transcript(
+    words: list[dict],
+    spec: "vrf_clipping.ClipSpec",
+    workdir: Path,
+) -> Path | None:
+    """Reuse the analysis transcript; caption failure never destroys a clip."""
+    try:
+        cues = vrf_clipping.caption_cues(
+            words,
+            clip_start=spec.start,
+            clip_end=spec.end,
+        )
+        if not cues:
+            return None
+        target = workdir / f"{spec.id}.srt"
+        target.write_text(vrf_clipping.cues_to_srt(cues), encoding="utf-8")
+        return target
+    except Exception as exc:  # noqa: BLE001 - captions remain optional
+        logger.warning(f"[clipping] {spec.id}: captions unavailable: {str(exc)[:160]}")
+        return None
+
+
+def _run_viral_clip_batch(
+    client: WorkerClient,
+    payload: dict,
+    asset: dict,
+    source_path: Path,
+    source,
+    workdir: Path,
+    attestation,
+) -> dict:
+    """Find, rank, render and upload several standalone vertical moments."""
+    options = payload.get("auto_clip") or {}
+    language = str(options.get("language") or "auto")
+    words = _transcribe_for_viral_clips(source_path, workdir, language)
+    moments = vrf_clipping.select_viral_moments(
+        words,
+        source_duration=float(source.duration or 0.0),
+        length=str(options.get("length") or "auto"),
+        count=options.get("count") or "auto",
+    )
+    if not moments:
+        raise RuntimeError("We could not find a complete standalone moment in this video.")
+
+    requests = [
+        {
+            "id": moment.id,
+            "start": moment.start,
+            "end": moment.end,
+            "aspect": "9:16",
+            "captions": True,
+            "caption_style": "bold",
+            "focus": "auto",
+            "quality": "balanced",
+        }
+        for moment in moments
+    ]
+    plan = vrf_clipping.plan_clips(
+        source,
+        requests,
+        attestation=attestation,
+        platform="tiktok",
+    )
+    if not plan.specs:
+        raise RuntimeError("We could not turn the selected moments into valid clips.")
+
+    rendered: dict[str, dict] = {}
+
+    def render(spec: "vrf_clipping.ClipSpec") -> str:
+        output = workdir / f"{spec.id}.mp4"
+        output.unlink(missing_ok=True)
+        centre = vrf_clipping.focus_centre(source_path, spec)
+        subtitles = _subtitles_from_transcript(words, spec, workdir)
+        command = vrf_clipping.build_clip_command(
+            source_path,
+            output,
+            spec,
+            centre=centre,
+            subtitle_path=subtitles,
+            has_audio=source.has_audio,
+        )
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0 or not output.exists():
+            logger.error(
+                f"[clipping] {spec.id} encode failed: {(result.stderr or '')[-500:]}"
+            )
+            raise RuntimeError(vrf_clipping.safe_clip_error(result.stderr or ""))
+        measured = probe(output)
+        remote = _upload_media(
+            output,
+            f"vrf/{asset.get('user_id')}/{asset.get('id')}/{spec.id}.mp4",
+        )
+        rendered[spec.id] = {
+            "captions": subtitles is not None,
+            "width": measured.width,
+            "height": measured.height,
+            "duration": measured.duration or spec.duration,
+        }
+        return str(remote)
+
+    results = vrf_clipping.run_clip_batch(plan.specs, render)
+    summary = vrf_clipping.batch_summary(results)
+    if not summary["ok"]:
+        raise RuntimeError(str(summary["message"]))
+
+    moment_by_id = {moment.id: moment for moment in moments}
+    clips: list[dict] = []
+    for result in results:
+        moment = moment_by_id[result.id]
+        record = {
+            **moment.to_record(),
+            "status": result.status,
+            "path": result.path,
+            "error": result.error,
+            "attempts": result.attempts,
+            "captions": bool(rendered.get(result.id, {}).get("captions")),
+        }
+        clips.append(record)
+
+    available = [clip for clip in clips if clip["status"] in {"done", "skipped"}]
+    first = available[0]
+    first_meta = rendered.get(str(first["id"]), {})
+    client.call(
+        "save_processing",
+        id=str(asset.get("id") or ""),
+        processed_path=str(first["path"]),
+        duration_seconds=first_meta.get("duration") or first["duration"],
+        width=first_meta.get("width") or 1080,
+        height=first_meta.get("height") or 1920,
+        processing_plan={
+            "mode": "viral_clips",
+            "language": language,
+            "length": str(options.get("length") or "auto"),
+            "requested_count": options.get("count") or "auto",
+            "moments": [moment.to_record() for moment in moments],
+            "warnings": plan.warnings,
+        },
+    )
+    return {
+        "processed": True,
+        "mode": "viral_clips",
+        "clips": clips,
+        "ready": len(available),
+        "failed": int(summary["failed"]),
+        "message": str(summary["message"]),
+        "warnings": plan.warnings,
+    }
+
+
 def run_process(client: WorkerClient, payload: dict) -> dict:
     """Format and quality work on a video the user holds rights to."""
     asset_id = str(payload.get("asset_id") or "")
@@ -644,6 +826,18 @@ def run_process(client: WorkerClient, payload: dict) -> dict:
         _download(str(asset.get("storage_path") or ""), source_path)
 
         source = probe(source_path)
+        auto_clip = payload.get("auto_clip")
+        if isinstance(auto_clip, dict):
+            return _run_viral_clip_batch(
+                client,
+                payload,
+                asset,
+                source_path,
+                source,
+                Path(workdir),
+                attestation,
+            )
+
         # Trims come from the caller. build_plan has always accepted them and
         # build_ffmpeg_command has always emitted them; this hands them across
         # so the clipping screen can ask for a section of a long video rather

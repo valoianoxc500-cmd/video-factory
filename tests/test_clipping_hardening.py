@@ -645,3 +645,38 @@ def test_batch_messages_are_plain_language():
     ])
     assert "1 clip ready" in mixed["message"]
     assert not clip._INTERNAL.search(mixed["message"])
+
+
+def _viral_words():
+    rows = []
+    starts = [0, 25, 50, 75, 100, 125]
+    sentences = [
+        "Here is why this tiny habit changes everything!",
+        "Nobody tells you the truth until the result finally appears.",
+        "What if the biggest mistake is the one everyone recommends?",
+        "Imagine the worst fear becoming the best decision you made.",
+        "The answer shocked everyone and that is why it worked.",
+        "Did you know the result finally changed the whole story?",
+    ]
+    for start, sentence in zip(starts, sentences):
+        for index, word in enumerate(sentence.split()):
+            rows.append({"word": word + ("." if index == len(sentence.split()) - 1 else ""),
+                         "start": start + index * 0.45,
+                         "end": start + index * 0.45 + 0.4})
+    return rows
+
+
+def test_viral_moments_are_ranked_from_real_transcript_signals():
+    moments = clip.select_viral_moments(
+        _viral_words(), source_duration=180, length="short", count=3
+    )
+    assert len(moments) == 3
+    assert all(1 <= moment.score <= 100 for moment in moments)
+    assert all(moment.signals and sum(abs(v) for v in moment.signals.values()) for moment in moments)
+    assert all(moment.end > moment.start for moment in moments)
+
+
+def test_viral_selection_requires_timestamped_evidence():
+    assert clip.select_viral_moments(
+        [{"word": "Amazing"}], source_duration=60, count=3
+    ) == []

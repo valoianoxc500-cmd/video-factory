@@ -14,6 +14,13 @@ const assert = require("node:assert/strict");
 
 const clipping = require("../.test-build/clipping.js");
 
+test("viral maker exposes only the three compact option groups", () => {
+  assert.deepEqual(clipping.CLIP_LANGUAGES.map((x) => x.id), ["auto", "en", "ar", "es"]);
+  assert.deepEqual(clipping.CLIP_LENGTHS.map((x) => x.id), ["auto", "short", "medium", "long"]);
+  assert.deepEqual(clipping.CLIP_COUNTS.map((x) => x.id), ["auto", "3", "5", "10"]);
+  assert.deepEqual(clipping.defaultAutoClipOptions(), { language: "auto", length: "auto", count: "auto" });
+});
+
 // ── options ──────────────────────────────────────────────────────────
 
 test("the option ids match the worker's vocabulary", () => {

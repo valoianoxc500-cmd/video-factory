@@ -1,6 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { AssetRepository, TaskRepository } from "@/lib/vrf";
-import { Clipping } from "@/components/reels/Clipping";
+import { ViralClipping } from "@/components/reels/ViralClipping";
 
 export const dynamic = "force-dynamic";
 
@@ -20,7 +20,13 @@ export default async function ClippingPage() {
   let latest = null;
   try {
     assets = await new AssetRepository(supabase).listForUser();
-    latest = await new TaskRepository(supabase).latest("process");
+    const tasks = new TaskRepository(supabase);
+    const [processTask, ingestTask] = await Promise.all([
+      tasks.latest("process"), tasks.latest("ingest"),
+    ]);
+    latest = [processTask, ingestTask]
+      .filter((item): item is NonNullable<typeof item> => Boolean(item?.payload?.auto_clip))
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] ?? null;
   } catch {
     // The workspace still opens on its upload box and reports its own errors.
   }
@@ -39,16 +45,14 @@ export default async function ClippingPage() {
       >
         <span className="engine-kicker">Clipping</span>
         <h1>
-          Cut a <span className="hl">clip</span>
+          AI <span className="hl">Clipping</span>
         </h1>
         <p>
-          Upload a video you own, choose the part worth watching, and get it
-          back reframed, captioned and ready to post — without leaving this
-          page.
+          Turn any video into viral clips for TikTok, Shorts, and Reels.
         </p>
       </div>
 
-      <Clipping
+      <ViralClipping
         initialAssets={clippable.map((a) => ({
           id: a.id,
           title: a.title,
@@ -68,6 +72,7 @@ export default async function ClippingPage() {
                 status: latest.status,
                 error: latest.error,
                 payload: latest.payload,
+                result: latest.result,
               }
             : null
         }

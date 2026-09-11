@@ -8,55 +8,76 @@
  * "balanced" means.
  */
 
+export const CLIP_LANGUAGES = [
+  { id: "auto", label: "Auto / No translation" },
+  { id: "en", label: "English" },
+  { id: "ar", label: "Arabic" },
+  { id: "es", label: "Spanish" },
+] as const;
+
+export const CLIP_LENGTHS = [
+  { id: "auto", label: "Auto (<90s)" },
+  { id: "short", label: "<30s" },
+  { id: "medium", label: "30–60s" },
+  { id: "long", label: "60–90s" },
+] as const;
+
+export const CLIP_COUNTS = [
+  { id: "auto", label: "Auto" },
+  { id: "3", label: "3" },
+  { id: "5", label: "5" },
+  { id: "10", label: "10" },
+] as const;
+
+export type AutoClipOptions = {
+  language: string;
+  length: string;
+  count: string;
+};
+
+export function defaultAutoClipOptions(): AutoClipOptions {
+  return { language: "auto", length: "auto", count: "auto" };
+}
+
+// Kept for the post-result advanced editor. The viral maker never exposes
+// these controls before analysis, but existing edit code still typechecks.
 export const ASPECTS = [
   { id: "9:16", label: "Vertical", hint: "Reels, Shorts, TikTok" },
   { id: "1:1", label: "Square", hint: "Feed" },
   { id: "4:5", label: "Portrait", hint: "Feed, taller" },
   { id: "16:9", label: "Landscape", hint: "YouTube, X" },
 ] as const;
-export const DEFAULT_ASPECT = "9:16";
-
 export const QUALITIES = [
   { id: "high", label: "High", hint: "Slowest, sharpest" },
   { id: "balanced", label: "Balanced", hint: "Recommended" },
   { id: "fast", label: "Fast", hint: "Quickest to produce" },
 ] as const;
-export const DEFAULT_QUALITY = "balanced";
-
 export const FOCUS_MODES = [
   { id: "auto", label: "Follow subject", hint: "Keeps the person in frame" },
   { id: "center", label: "Centre", hint: "Always the middle" },
   { id: "left", label: "Left", hint: "Fixed left" },
   { id: "right", label: "Right", hint: "Fixed right" },
 ] as const;
-export const DEFAULT_FOCUS = "auto";
-
 export const CAPTION_STYLES = [
-  { id: "clean", label: "Clean" },
-  { id: "bold", label: "Bold" },
+  { id: "clean", label: "Clean" }, { id: "bold", label: "Bold" },
   { id: "minimal", label: "Minimal" },
 ] as const;
-export const DEFAULT_CAPTION_STYLE = "clean";
-
-export type ClipOptions = {
-  aspect: string;
-  quality: string;
-  focus: string;
-  captions: boolean;
-  caption_style: string;
-  speaker: string;
-};
-
+export type ClipOptions = { aspect:string;quality:string;focus:string;captions:boolean;caption_style:string;speaker:string };
 export function defaultClipOptions(): ClipOptions {
-  return {
-    aspect: DEFAULT_ASPECT,
-    quality: DEFAULT_QUALITY,
-    focus: DEFAULT_FOCUS,
-    captions: false,
-    caption_style: DEFAULT_CAPTION_STYLE,
-    speaker: "",
-  };
+  return { aspect:"9:16",quality:"balanced",focus:"auto",captions:false,caption_style:"clean",speaker:"" };
 }
+
+export type ViralClipResult = {
+  id: string;
+  title: string;
+  start: number;
+  end: number;
+  duration: number;
+  viral_score: number;
+  reason: string;
+  status: "done" | "skipped" | "failed";
+  captions: boolean;
+};
 
 /**
  * The only states a customer is shown.
@@ -66,13 +87,7 @@ export function defaultClipOptions(): ClipOptions {
  * several; the two are separate strings for separate surfaces rather than one
  * string bent to cover both.
  */
-export const CUSTOMER_STATES = [
-  "Preparing",
-  "Analyzing",
-  "Creating clip",
-  "Rendering",
-  "Ready",
-] as const;
+export const CUSTOMER_STATES = ["Preparing", "Analyzing", "Creating clip", "Rendering", "Ready"] as const;
 
 export type CustomerState = (typeof CUSTOMER_STATES)[number];
 
