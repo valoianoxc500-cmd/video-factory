@@ -277,6 +277,7 @@ async function signV4(
   objectPath: string,
   ttlSeconds: number,
   contentType?: string,
+  oidcToken?: string,
 ): Promise<{ url: string; expiresInSeconds: number; type: string }> {
   const signer = signerIdentity();
   const bucketName = bucket();
@@ -331,7 +332,7 @@ async function signV4(
     if (!config) {
       throw new UploadConfigError("Workload identity federation is not configured.");
     }
-    signature = await signBlobHex(config, stringToSign);
+    signature = await signBlobHex(config, stringToSign, oidcToken);
   } else {
     const key = localKey();
     if (!key) {
@@ -358,9 +359,10 @@ export async function signedUploadUrl(
   objectPath: string,
   contentType: string,
   ttlSeconds: number = UPLOAD_TTL_SECONDS,
+  oidcToken?: string,
 ): Promise<{ url: string; headers: Record<string, string>; expiresInSeconds: number }> {
   const safePath = assertUploadPath(objectPath);
-  const signed = await signV4("PUT", safePath, ttlSeconds, contentType);
+  const signed = await signV4("PUT", safePath, ttlSeconds, contentType, oidcToken);
   return {
     url: signed.url,
     headers: { "Content-Type": signed.type },
@@ -378,9 +380,10 @@ export async function signedUploadUrl(
 export async function signedReadUrl(
   storedPathOrUrl: string,
   ttlSeconds: number = READ_TTL_SECONDS,
+  oidcToken?: string,
 ): Promise<{ url: string; expiresInSeconds: number }> {
   const objectPath = objectPathFromStored(storedPathOrUrl);
-  const signed = await signV4("GET", objectPath, ttlSeconds);
+  const signed = await signV4("GET", objectPath, ttlSeconds, undefined, oidcToken);
   return { url: signed.url, expiresInSeconds: signed.expiresInSeconds };
 }
 

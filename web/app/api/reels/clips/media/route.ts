@@ -42,6 +42,7 @@ function fail(err: unknown) {
 export async function GET(request: Request) {
   try {
     await requireUser();
+    const oidcToken = request.headers.get("x-vercel-oidc-token") ?? undefined;
     const url = new URL(request.url);
     const assetId = String(url.searchParams.get("asset") ?? "").trim();
     const kind = String(url.searchParams.get("kind") ?? "source").trim();
@@ -67,7 +68,7 @@ export async function GET(request: Request) {
       );
     }
 
-    const signed = await signedReadUrl(stored);
+    const signed = await signedReadUrl(stored, undefined, oidcToken);
     return Response.json(signed);
   } catch (err) {
     return fail(err);

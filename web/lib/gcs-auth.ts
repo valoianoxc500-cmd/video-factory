@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * Keyless Google credentials for Clipping uploads.
  *
@@ -134,8 +136,8 @@ export function federationAvailable(): boolean {
  * project. Its absence is the single most likely cause of a failure here and
  * is reported as its own case for that reason.
  */
-function vercelOidcToken(): string {
-  const token = (process.env.VERCEL_OIDC_TOKEN ?? "").trim();
+function vercelOidcToken(explicitToken?: string): string {
+  const token = String(explicitToken ?? process.env.VERCEL_OIDC_TOKEN ?? "").trim();
   if (!token) {
     throw new FederationError(
       "VERCEL_OIDC_TOKEN is not present. Enable OIDC federation for this " +
@@ -152,6 +154,7 @@ async function post(
   url: string,
   body: unknown,
   headers: Record<string, string> = {},
+  sensitiveValues: string[] = [],
 ): Promise<Record<string, unknown>> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AUTH_TIMEOUT_MS);
@@ -166,8 +169,12 @@ async function post(
     if (!response.ok) {
       // Google's federation errors name the exact mapping or binding that is
       // wrong, which is the whole value of logging them.
+      const safeText = sensitiveValues.reduce(
+        (value, secret) => secret ? value.split(secret).join("[redacted]") : value,
+        text,
+      ).slice(0, 300);
       throw new FederationError(
-        `${new URL(url).hostname} returned ${response.status}: ${text.slice(0, 300)}`,
+        `${new URL(url).hostname} returned ${response.status}: ${safeText}`,
         response.status === 400 || response.status === 403,
       );
     }
@@ -186,6 +193,7 @@ async function post(
 interface CachedToken {
   token: string;
   expiresAt: number;
+  assertionFingerprint: string;
 }
 
 /**
@@ -200,12 +208,17 @@ let cached: CachedToken | null = null;
 /** An access token for the configured service account. Cached until near expiry. */
 export async function serviceAccountAccessToken(
   config: FederationConfig,
+  explicitOidcToken?: string,
 ): Promise<string> {
-  if (cached && cached.expiresAt - EXPIRY_SKEW_MS > Date.now()) {
+  const assertion = vercelOidcToken(explicitOidcToken);
+  const assertionFingerprint = createHash("sha256").update(assertion).digest("hex");
+  if (
+    cached &&
+    cached.assertionFingerprint === assertionFingerprint &&
+    cached.expiresAt - EXPIRY_SKEW_MS > Date.now()
+  ) {
     return cached.token;
   }
-
-  const assertion = vercelOidcToken();
 
   // 1. OIDC assertion -> federated token
   const sts = await post(STS_URL, {
@@ -215,7 +228,7 @@ export async function serviceAccountAccessToken(
     scope: SCOPE,
     subjectTokenType: "urn:ietf:params:oauth:token-type:jwt",
     subjectToken: assertion,
-  });
+  }, {}, [assertion]);
   const federated = String(sts.access_token ?? "");
   if (!federated) {
     throw new FederationError("Google returned no federated token.");
@@ -228,6 +241,7 @@ export async function serviceAccountAccessToken(
     )}:generateAccessToken`,
     { scope: [SCOPE], lifetime: "3600s" },
     { Authorization: `Bearer ${federated}` },
+    [federated],
   );
   const token = String(impersonated.accessToken ?? "");
   if (!token) {
@@ -238,6 +252,7 @@ export async function serviceAccountAccessToken(
   cached = {
     token,
     expiresAt: Number.isFinite(expiry) ? expiry : Date.now() + 55 * 60 * 1000,
+    assertionFingerprint,
   };
   return token;
 }
@@ -253,14 +268,16 @@ export async function serviceAccountAccessToken(
 export async function signBlobHex(
   config: FederationConfig,
   stringToSign: string,
+  explicitOidcToken?: string,
 ): Promise<string> {
-  const accessToken = await serviceAccountAccessToken(config);
+  const accessToken = await serviceAccountAccessToken(config, explicitOidcToken);
   const response = await post(
     `${IAM_CREDENTIALS}/projects/-/serviceAccounts/${encodeURIComponent(
       config.serviceAccount,
     )}:signBlob`,
     { payload: Buffer.from(stringToSign, "utf8").toString("base64") },
     { Authorization: `Bearer ${accessToken}` },
+    [accessToken],
   );
 
   const signed = String(response.signedBlob ?? "");

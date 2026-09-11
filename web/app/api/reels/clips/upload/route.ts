@@ -59,6 +59,7 @@ function fail(err: unknown) {
 export async function POST(request: Request) {
   try {
     const user = await requireUser();
+    const oidcToken = request.headers.get("x-vercel-oidc-token") ?? undefined;
 
     let body: Record<string, unknown>;
     try {
@@ -104,7 +105,12 @@ export async function POST(request: Request) {
       const objectPath = uploadObjectPath(user.id, randomUUID(), filename);
       // Awaited now: with no private key available, the V4 signature is
       // produced by Google rather than locally.
-      const signed = await signedUploadUrl(objectPath, contentType || "video/mp4");
+      const signed = await signedUploadUrl(
+        objectPath,
+        contentType || "video/mp4",
+        undefined,
+        oidcToken,
+      );
 
       return Response.json({
         objectPath,

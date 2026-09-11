@@ -283,6 +283,16 @@ test("the exchange follows STS then impersonation then signing", async () => {
   assert.equal(stub.calls[0].body.audience, `//iam.googleapis.com/${PROVIDER}`);
 });
 
+test("an explicit request token wins over the environment fallback", async () => {
+  const stub = googleStub();
+  await withEnv(FED_ENV, async () => {
+    await uploads.signedUploadUrl(GOOD, "video/mp4", undefined, "request.oidc.token");
+  }, stub);
+
+  assert.equal(stub.calls[0].body.subjectToken, "request.oidc.token");
+  assert.notEqual(stub.calls[0].body.subjectToken, FED_ENV.VERCEL_OIDC_TOKEN);
+});
+
 test("the access token is reused rather than re-exchanged per upload", async () => {
   const stub = googleStub();
   await withEnv(FED_ENV, async () => {
@@ -359,6 +369,27 @@ test("a missing OIDC token names the setting to enable", async () => {
       () => uploads.signedUploadUrl(GOOD, "video/mp4"),
       /VERCEL_OIDC_TOKEN/,
     );
+  }, stub);
+});
+
+test("an OIDC token echoed by Google is redacted from errors and logs", async () => {
+  const requestToken = "request.secret.oidc";
+  const stub = async () => jsonResponse(
+    { error: "invalid_grant", error_description: `rejected ${requestToken}` },
+    400,
+  );
+  await withEnv(FED_ENV, async (logs) => {
+    let failure;
+    try {
+      await uploads.signedUploadUrl(GOOD, "video/mp4", undefined, requestToken);
+      assert.fail("should have thrown");
+    } catch (err) {
+      failure = err;
+    }
+    assert.ok(!failure.message.includes(requestToken));
+    auth.reportFederationFailure(failure);
+    assert.ok(logs.every((line) => !line.includes(requestToken)));
+    assert.ok(logs.some((line) => line.includes("[redacted]")));
   }, stub);
 });
 
