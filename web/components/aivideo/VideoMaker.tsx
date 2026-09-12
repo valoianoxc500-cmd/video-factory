@@ -8,6 +8,8 @@ import {
   DURATIONS,
   FONTS,
   applyLanguage,
+  fontScaleFor,
+  fontWeightFor,
   progressLabel,
   voicesFor,
   type Language,
@@ -85,7 +87,7 @@ function CaptionSample({
   const c = settings.captions;
   const body = text ?? CAPTION_SAMPLE[settings.language];
   const shown = c.uppercase ? body.toUpperCase() : body;
-  const size = Math.max(9, c.size * scale);
+  const size = Math.max(9, c.size * scale * fontScaleFor(c.font));
   const outline = Math.max(0, c.outline_width * scale);
   // Four offset shadows approximate libass's outline well enough to judge it.
   const stroke = outline
@@ -104,6 +106,10 @@ function CaptionSample({
       style={{
         color: c.text_color,
         fontFamily: fontStack(c.font),
+        // The Arabic faces ship real static weights; matching them here is
+        // what keeps the preview from showing Regular where the render burns
+        // Bold.
+        fontWeight: fontWeightFor(c.font) ?? (c.weight === "black" ? 900 : 800),
         fontSize: `${size}px`,
         textShadow: stroke,
         background: c.background !== "none" ? c.background : undefined,
@@ -328,7 +334,12 @@ export function VideoMaker() {
 
           <div className="avm-grid">
             <div style={{ gridColumn: "1 / -1" }}>
-              <span className="avm-label">Voice</span>
+              <span className="avm-label">
+                Voice
+                <span style={{ color: "var(--sa-faint)", fontWeight: 500, textTransform: "none", letterSpacing: 0 }}>
+                  {"  "}· {voices.length} available
+                </span>
+              </span>
               <div className="avm-voices">
                 {voices.map((v) => (
                   <div
@@ -358,7 +369,10 @@ export function VideoMaker() {
                     </span>
                     <span className="avm-voice-body">
                       <span className="avm-voice-name">{v.label}</span>
-                      <span className="avm-voice-note">{v.note}</span>
+                      <span className="avm-voice-note">
+                        {v.accent}
+                        {v.note && v.note !== v.accent ? ` · ${v.note}` : ""}
+                      </span>
                     </span>
                     <button
                       type="button"
@@ -380,7 +394,16 @@ export function VideoMaker() {
           <div style={{ marginTop: 22 }}>
             <span className="avm-label">Caption style</span>
             <div className="avm-presets">
-              {Object.entries(CAPTION_PRESETS).map(([id, p]) => {
+              {Object.entries(CAPTION_PRESETS)
+                // Arabic gets its own presets, sized and weighted for joined
+                // script; showing the Latin ones under Arabic offers a look
+                // the renderer would immediately swap away from.
+                .filter(([id]) =>
+                  settings.language === "ar"
+                    ? id.startsWith("arabic_")
+                    : !id.startsWith("arabic_"),
+                )
+                .map(([id, p]) => {
                 const asSettings: VideoSettings = {
                   ...settings,
                   captions: { ...p, preset: id },

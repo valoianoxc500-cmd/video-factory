@@ -111,17 +111,28 @@ def _fit_filter(spec: VideoSpec) -> str:
     )
 
 
-def normalise_clip(source: Path, target: Path, spec: VideoSpec, seconds: float) -> Path:
+def normalise_clip(
+    source: Path,
+    target: Path,
+    spec: VideoSpec,
+    seconds: float,
+    start: float = 0.0,
+) -> Path:
     """One clip, cut to length and conformed to the output canvas.
 
     Re-encoded rather than stream-copied because the sources arrive in mixed
     resolutions, frame rates and pixel formats, and concat demands they match.
+
+    `start` is the shot-aligned offset chosen upstream. Cutting from zero was
+    what made beats open mid-edit: stock clips frequently begin on a fade or
+    a different shot from the one the search matched.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     _run(
         [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-ss", "0", "-t", f"{max(0.8, seconds):.2f}", "-i", str(source),
+            "-ss", f"{max(0.0, start):.2f}",
+            "-t", f"{max(0.8, seconds):.2f}", "-i", str(source),
             "-an",
             "-vf", f"{_fit_filter(spec)},fps=30,format=yuv420p",
             "-c:v", "libx264", "-preset", "veryfast",
@@ -192,8 +203,16 @@ def render(
     # Captions are burned last so nothing is drawn over them.
     if captions is not None:
         # libass needs an escaped path; on Windows the drive colon must go too.
-        escaped = captions.as_posix().replace(":", "\\:").replace("'", r"\'")
-        filters.append(f"[0:v]subtitles='{escaped}'[v]")
+        def _esc(p: Path) -> str:
+            return p.as_posix().replace(":", "\\:").replace("'", r"\'")
+
+        # Point libass at the bundled OFL Arabic faces. Without fontsdir it
+        # searches only system fonts, silently substitutes something that
+        # cannot join Arabic, and the captions render as disconnected letters
+        # in the finished file with nothing logged.
+        fonts_dir = Path(__file__).resolve().parent.parent / "medialab" / "fonts"
+        fonts_arg = f":fontsdir='{_esc(fonts_dir)}'" if fonts_dir.exists() else ""
+        filters.append(f"[0:v]subtitles='{_esc(captions)}'{fonts_arg}[v]")
         video_out = "[v]"
     else:
         video_out = "0:v"

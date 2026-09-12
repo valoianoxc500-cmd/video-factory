@@ -62,9 +62,21 @@ _FONT_DIRS = (
 def resolve_font(family: str) -> tuple[str, Path | None]:
     """(ASS font name, file on disk). The file is what FFmpeg actually needs.
 
-    Returns the first candidate that exists. `None` means nothing matched and
-    the caller should let libass pick, which is a worse look but still renders.
+    Arabic families resolve through `medialab.arabic`, which prefers the OFL
+    faces bundled with the repository over whatever the host machine happens
+    to have installed -- a caption should look the same on every deployment,
+    and system Arabic fallbacks differ wildly.
     """
+    from medialab import arabic as ar
+
+    if family in ar.ARABIC_FONTS:
+        path = ar.font_file(family)
+        if path is not None:
+            # The family name from the file's name table, not the filename:
+            # "Tajawal-Bold.ttf" is the family "Tajawal", and a style asking
+            # for "Tajawal-Bold" matches nothing and gets substituted.
+            return ar.font_name(family), path
+
     for candidate in _FONT_FILES.get(family, _FONT_FILES["arial"]):
         for directory in _FONT_DIRS:
             path = directory / candidate
@@ -74,28 +86,25 @@ def resolve_font(family: str) -> tuple[str, Path | None]:
 
 
 def _has_arabic(text: str) -> bool:
-    return any("\u0600" <= ch <= "\u06FF" or "\u0750" <= ch <= "\u077F" for ch in text)
+    from medialab import arabic as ar
+
+    return ar.has_arabic(text)
 
 
 def shape_arabic(text: str) -> str:
-    """Join and visually order Arabic so libass draws it correctly.
+    """Join Arabic so libass draws it correctly.
+
+    One implementation, in `medialab.arabic`, shared with Police Chase Studio.
+    Two copies of this is how the two products ended up with captions that
+    were broken in different ways; the rule about who runs bidi is subtle
+    enough that it must exist in exactly one place.
 
     A no-op for text with no Arabic in it, so this is safe to call on every
     line regardless of the run's language.
     """
-    if not _has_arabic(text):
-        return text
-    try:
-        import arabic_reshaper
-        from bidi.algorithm import get_display
+    from medialab import arabic as ar
 
-        return get_display(arabic_reshaper.reshape(text))
-    except Exception as exc:      # pragma: no cover - depends on optional deps
-        logger.warning(
-            f"[aivideo] Arabic shaping unavailable ({type(exc).__name__}); "
-            f"captions may render disconnected"
-        )
-        return text
+    return ar.shape(text)
 
 
 @dataclass
@@ -106,16 +115,38 @@ class Line:
     words: list[Word]
 
 
-def group_lines(words: list[Word], per_line: int) -> list[Line]:
-    """Chunk word timings into caption lines.
+def group_lines(
+    words: list[Word], per_line: int, *, language: str = "en"
+) -> list[Line]:
+    """Chunk word timings into caption phrases.
 
-    Splits on sentence punctuation as well as the word count, because a line
-    that runs across a full stop reads as one thought when it is two.
+    Two strategies, because the languages break differently.
+
+    Arabic goes through `medialab.arabic.segment_phrases`, which breaks on
+    clause boundaries and never after a conjunction or preposition. Counting
+    words instead produced captions that split mid-phrase -- the single
+    ugliest thing about the old Arabic output -- because Arabic binds those
+    particles to what follows.
+
+    Latin keeps the word-count rule, with sentence punctuation as an early
+    break, which reads correctly and is what the English presets are tuned
+    against.
+
+    Either way the timing comes from the word boundaries: phrases are matched
+    back onto the word stream in order, so a phrase shows exactly while its
+    words are spoken.
     """
+    from medialab import arabic as ar
+
+    per_line = max(1, per_line)
+    if not words:
+        return []
+
+    if language == "ar" or ar.has_arabic(" ".join(w.text for w in words[:40])):
+        return _phrase_lines(words, per_line)
+
     lines: list[Line] = []
     bucket: list[Word] = []
-    per_line = max(1, per_line)
-
     for word in words:
         bucket.append(word)
         ends_sentence = bool(re.search(r"[.!?،؟…]$", word.text.strip()))
@@ -130,6 +161,43 @@ def group_lines(words: list[Word], per_line: int) -> list[Line]:
         lines.append(Line(
             " ".join(w.text for w in bucket).strip(),
             bucket[0].start, bucket[-1].end, list(bucket),
+        ))
+    return [line for line in lines if line.text]
+
+
+def _phrase_lines(words: list[Word], per_line: int) -> list[Line]:
+    """Arabic phrases, timed from the word stream they came from.
+
+    `per_line` becomes a ceiling on phrase length rather than an exact word
+    count: a phrase that ends naturally at three words stays three words.
+    """
+    from medialab import arabic as ar
+
+    # Roughly the characters that fit on two readable lines at preset sizes.
+    max_chars = max(18, per_line * 9)
+    phrases = ar.segment_phrases(
+        " ".join(w.text for w in words), max_chars=max_chars
+    )
+    if not phrases:
+        return []
+
+    lines: list[Line] = []
+    cursor = 0
+    for phrase in phrases:
+        needed = len(phrase.split())
+        bucket = words[cursor:cursor + needed]
+        if not bucket:
+            break
+        cursor += needed
+        lines.append(Line(phrase, bucket[0].start, bucket[-1].end, list(bucket)))
+
+    # Any words the segmentation dropped (punctuation collapsing can shorten
+    # the token count) still have to be shown, or the caption track ends early.
+    if cursor < len(words):
+        tail = words[cursor:]
+        lines.append(Line(
+            " ".join(w.text for w in tail).strip(),
+            tail[0].start, tail[-1].end, list(tail),
         ))
     return [line for line in lines if line.text]
 
@@ -167,12 +235,18 @@ def build_ass(
     if not style.enabled or not words:
         return None
 
-    lines = group_lines(words, style.words_per_line)
+    lines = group_lines(words, style.words_per_line, language=language)
     if not lines:
         return None
 
+    from medialab import arabic as ar
+
     width, height = size
     font_name, font_file = resolve_font(style.font)
+    # A preset's size is what the viewer should see, not what the font is
+    # asked for: the Arabic faces draw about a third smaller than the Latin
+    # ones at the same nominal size.
+    font_size = ar.size_for(style.font, style.size)
     if font_file is None:
         logger.warning(
             f"[aivideo] no file found for caption font {style.font!r}; "
@@ -203,21 +277,33 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Caption,{font_name},{style.size},{primary},{secondary},{outline},{back},{bold},0,0,0,100,100,0,0,{border_style},{style.outline_width},0,{alignment},{int(width * 0.06)},{int(width * 0.06)},{margin_v},1
+Style: Caption,{font_name},{font_size},{primary},{secondary},{outline},{back},{bold},0,0,0,100,100,0,0,{border_style},{style.outline_width},0,{alignment},{int(width * 0.06)},{int(width * 0.06)},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
+    # Characters that fit on one line inside the safe margins, measured at
+    # the size the glyphs are actually drawn at rather than the nominal one.
+    usable_px = width * 0.88
+    per_line_chars = max(12, int(usable_px / max(1.0, ar.estimate_width("x", font_size))))
+
     events: list[str] = []
     for line in lines:
         text = line.text.upper() if style.uppercase else line.text
-        text = shape_arabic(text)
-        # Escape the few characters ASS treats as markup.
-        text = text.replace("\\", "").replace("{", "(").replace("}", ")")
+        # Two lines maximum: a third pushes into the middle of a vertical
+        # frame and starts covering the subject.
+        wrapped = ar.wrap_two_lines(text, max_chars=per_line_chars)
+        # Shape each line separately and only after wrapping. Shaping first
+        # would reorder the string, and a break chosen in visual order lands
+        # in the wrong place in the sentence.
+        shaped = [ar.shape(part) for part in wrapped]
+        body = r"\N".join(shaped)
+        # Escape the characters ASS treats as markup, leaving the line break.
+        body = body.replace("{", "(").replace("}", ")")
         events.append(
             f"Dialogue: 0,{_timestamp(line.start)},{_timestamp(line.end)},"
-            f"Caption,,0,0,0,,{text}"
+            f"Caption,,0,0,0,,{body}"
         )
 
     output.parent.mkdir(parents=True, exist_ok=True)

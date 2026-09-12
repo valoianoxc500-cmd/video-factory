@@ -83,3 +83,6 @@ assets/sfx/
 *.orig
 *.rej
 *.bak
+
+# Generated video output
+.aivideo-jobs/

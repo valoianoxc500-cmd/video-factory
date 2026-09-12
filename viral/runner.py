@@ -645,6 +645,7 @@ def _subtitles_from_transcript(
     words: list[dict],
     spec: "vrf_clipping.ClipSpec",
     workdir: Path,
+    language: str = "en",
 ) -> Path | None:
     """Reuse the analysis transcript; caption failure never destroys a clip."""
     try:
@@ -652,6 +653,7 @@ def _subtitles_from_transcript(
             words,
             clip_start=spec.start,
             clip_end=spec.end,
+            language=language,
         )
         if not cues:
             return None
@@ -853,7 +855,7 @@ def _run_police_chase_batch(client: WorkerClient, payload: dict, asset: dict, so
     if isinstance(retry, dict):
         moments = [vrf_clipping.ViralMoment("chase_retry", str(retry.get("title") or "Selected chase moment"), float(retry.get("start") or 0), float(retry.get("end") or target), int(retry.get("viral_score") or 50), str(retry.get("reason") or "Selected moment"), dict(retry.get("signals") or {}))]
     else:
-        moments = chase.select_chase_moments(words, list(analysis.get("events") or []), source_duration=float(source.duration or 0), target_seconds=target, count=requested)
+        moments = chase.select_chase_moments(words, list(analysis.get("events") or []), source_duration=float(source.duration or 0), target_seconds=target, count=requested, video=source_path)
     if not moments: raise RuntimeError("We could not verify a strong chase moment in this source.")
     burned = analysis.get("burned_english_captions") if float(analysis.get("caption_confidence") or 0) >= .65 else None
     decision = chase.caption_decision(str(options.get("caption_language") or "auto"), burned)
@@ -862,10 +864,11 @@ def _run_police_chase_batch(client: WorkerClient, payload: dict, asset: dict, so
     specs=[vrf_clipping.ClipSpec(id=m.id,start=m.start,end=m.end,aspect="9:16",captions=bool(caption_words),caption_style="bold",focus="auto",quality="balanced") for m in moments]
     plan=vrf_clipping.plan_clips(source,[s.to_record() for s in specs],attestation=attestation,platform="tiktok")
     rendered:dict[str,dict]={}; source_meta=chase.normalize_source_metadata(options.get("source_metadata")); moment_by={m.id:m for m in moments}
+    caption_language = "ar" if decision["action"] == "translate_ar" else "en"
     def render(spec):
-        output=workdir/f"{spec.id}.mp4"; subtitles=_subtitles_from_transcript(caption_words,spec,workdir) if caption_words else None
+        output=workdir/f"{spec.id}.mp4"; subtitles=_subtitles_from_transcript(caption_words,spec,workdir,caption_language) if caption_words else None
         cta=chase.choose_cta(str(options.get("cta_mode") or "auto"),str(options.get("cta_text") or ""),f"{asset.get('id')}:{spec.id}",str(options.get("cta_placement") or "end")); cta_path=_cta_srt(spec,cta["text"],cta["placement"],workdir)
-        command=vrf_clipping.build_clip_command(source_path,output,spec,centre=vrf_clipping.focus_centre(source_path,spec),subtitle_path=subtitles,cta_path=cta_path,has_audio=source.has_audio)
+        command=vrf_clipping.build_clip_command(source_path,output,spec,centre=vrf_clipping.focus_centre(source_path,spec),subtitle_path=subtitles,cta_path=cta_path,has_audio=source.has_audio,caption_language=caption_language)
         result=subprocess.run(command,capture_output=True,text=True)
         if result.returncode!=0 or not output.exists(): raise RuntimeError(vrf_clipping.safe_clip_error(result.stderr or ""))
         measured=probe(output); remote=_upload_media(output,f"vrf/{asset.get('user_id')}/{asset.get('id')}/{spec.id}.mp4"); rendered[spec.id]={"captions":subtitles is not None,"caption_status":decision["status"],"cta_text":cta["text"],"duration":measured.duration or spec.duration,"width":measured.width,"height":measured.height}; return str(remote)

@@ -594,20 +594,73 @@ def caption_cues(
     clip_end: float | None = None,
     max_chars: int = 42,
     max_seconds: float = 3.0,
+    language: str = "en",
 ) -> list[CaptionCue]:
     """Caption cues for one clip, from whatever the transcript turned out to be.
 
     Times are rebased to the clip, so cue zero starts at zero regardless of
     where the clip was cut from.
 
+    `language="ar"` routes through the shared Arabic engine: phrase
+    segmentation instead of a character count, at most two lines, and text
+    shaped and reordered before it reaches libass. The same treatment AI Video
+    Maker gets -- an Arabic caption bug fixed in one product and not the other
+    is a bug the customer still sees.
+
     Returns `[]` for a transcript that cannot be used at all. It never raises:
     a caption failure must cost the captions, not the clip.
     """
     try:
-        return _caption_cues(words, clip_start, clip_end, max_chars, max_seconds)
+        cues = _caption_cues(words, clip_start, clip_end, max_chars, max_seconds)
+        return _arabic_cues(cues) if _wants_arabic(cues, language) else cues
     except Exception as exc:  # noqa: BLE001 - captions must never be fatal
         logger.warning(f"[clipping] captions unavailable, continuing without: {exc}")
         return []
+
+
+#: Characters per line for a 9:16 burn-in. SRT is rendered against libass's
+#: 384-unit default script width, so this is in those units, not pixels.
+_ARABIC_LINE_CHARS = 26
+
+
+def _wants_arabic(cues: list[CaptionCue], language: str) -> bool:
+    from medialab import arabic as ar
+
+    return language == "ar" or any(ar.has_arabic(cue.text) for cue in cues[:6])
+
+
+def _arabic_cues(cues: list[CaptionCue]) -> list[CaptionCue]:
+    """Re-segment, wrap and shape cues for Arabic.
+
+    Segmentation is redone from the cue text rather than the word stream: the
+    Latin path already grouped by character count, which for Arabic breaks
+    after conjunctions and prepositions and reads as a stutter. Regrouping
+    within each cue keeps the timing the transcript gave us while fixing where
+    the line actually breaks.
+
+    Shaping happens last, after wrapping. Shaping first reorders the string,
+    and a break chosen in visual order lands in the wrong place in the
+    sentence.
+    """
+    from medialab import arabic as ar
+
+    out: list[CaptionCue] = []
+    for cue in cues:
+        phrases = ar.segment_phrases(cue.text, max_chars=_ARABIC_LINE_CHARS * 2) or [cue.text]
+        span = max(0.05, cue.end - cue.start)
+        weights = [len(p) + 2 for p in phrases]
+        total = sum(weights) or 1
+        cursor = cue.start
+        for phrase, weight in zip(phrases, weights):
+            width = span * (weight / total)
+            lines = ar.wrap_two_lines(phrase, max_chars=_ARABIC_LINE_CHARS)
+            out.append(CaptionCue(
+                start=round(cursor, 3),
+                end=round(min(cue.end, cursor + width), 3),
+                text="\n".join(ar.shape(line) for line in lines),
+            ))
+            cursor += width
+    return [cue for cue in out if cue.text.strip()]
 
 
 def _caption_cues(
@@ -735,18 +788,38 @@ _CAPTION_STYLE_ARGS = {
 }
 
 
-def caption_filter(subtitle_path: Path, style: str) -> str:
+def caption_filter(subtitle_path: Path, style: str, *, language: str = "en") -> str:
     """The libass filter fragment for burning captions in.
 
     `subtitles` (libass) rather than `drawtext`: drawtext needs an explicit
     font file on this machine and silently renders nothing without one, and it
     cannot wrap or time a cue list on its own.
+
+    Arabic additionally needs the font named and the bundled font directory
+    handed over. libass will not find a face it has not been pointed at, and
+    the default substitute has no Arabic coverage -- which renders as boxes,
+    or as nothing at all. The size is scaled with it, because the Arabic faces
+    draw about a third smaller than the Latin ones at the same nominal size.
     """
     args = _CAPTION_STYLE_ARGS.get(style, _CAPTION_STYLE_ARGS[DEFAULT_CAPTION_STYLE])
     # Windows paths contain backslashes and a drive colon; both are filtergraph
     # syntax and must be escaped or the whole graph fails to parse.
     escaped = str(subtitle_path).replace("\\", "/").replace(":", r"\:")
-    return f"subtitles='{escaped}':force_style='{args}'"
+    fonts = ""
+    if language == "ar":
+        from medialab import arabic as ar
+
+        family = "notosansarabic"
+        args = re.sub(
+            r"FontSize=(\d+)",
+            lambda m: f"FontSize={ar.size_for(family, int(m.group(1)))}",
+            args,
+        )
+        args = f"FontName={ar.font_name(family)},{args}"
+        directory = ar.fonts_dir()
+        if directory is not None:
+            fonts = ":fontsdir='" + str(directory).replace("\\", "/").replace(":", r"\:") + "'"
+    return f"subtitles='{escaped}'{fonts}:force_style='{args}'"
 
 
 # ── focus ────────────────────────────────────────────────────────────
@@ -803,6 +876,7 @@ def build_clip_command(
     subtitle_path: Path | None = None,
     cta_path: Path | None = None,
     has_audio: bool = True,
+    caption_language: str = "en",
 ) -> list[str]:
     """The exact invocation for one clip. Pure: builds, does not run."""
     aspect = ASPECTS.get(spec.aspect, ASPECTS[DEFAULT_ASPECT])
@@ -815,7 +889,7 @@ def build_clip_command(
         f"'min(max((in_w-out_w)*{centre:.4f},0),in_w-out_w)':'(in_h-out_h)/2'",
     ]
     if spec.captions and subtitle_path is not None:
-        filters.append(caption_filter(subtitle_path, spec.caption_style))
+        filters.append(caption_filter(subtitle_path, spec.caption_style, language=caption_language))
     if cta_path is not None:
         escaped = str(cta_path).replace("\\", "/").replace(":", r"\:")
         filters.append(

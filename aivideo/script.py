@@ -17,15 +17,24 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass, field
 
 import clients
 
 logger = logging.getLogger("aivideo")
 
-#: Speaking rate used to turn a duration into a word budget. Measured across
-#: Edge TTS neural voices: English lands near 150 wpm, Arabic nearer 130 for
-#: the same clarity, so Arabic gets fewer words for the same seconds.
-_WORDS_PER_MINUTE = {"en": 150, "ar": 130}
+#: Speaking rate used to turn a duration into a word budget.
+#:
+#: Measured, not estimated. Synthesising a fixed passage through Edge TTS and
+#: reading the word-boundary timings gives 154 wpm for en-US-Aria, 158 for
+#: en-GB-Sonia, 104 for ar-EG-Salma and 112 for ar-SA-Hamed; a full 139-word
+#: Arabic narration through the real pipeline came out at 99.5 wpm once
+#: sentence pauses are included.
+#:
+#: The Arabic figure used to be 130, which is why a 60-second Arabic request
+#: produced 84 seconds of narration. Arabic words are longer and Arabic voices
+#: speak them slower, and the gap is far bigger than it looks.
+_WORDS_PER_MINUTE = {"en": 150, "ar": 100}
 
 _LANGUAGE_NAME = {"en": "English", "ar": "Arabic"}
 
@@ -49,8 +58,25 @@ TOPIC: {topic}
 Return JSON only:
 {{
   "script": "the narration, {name}, one flowing paragraph",
-  "search_terms": ["english search term", "..."]
+  "beats": [
+    {{
+      "says": "the clause of the narration this beat covers, {name}",
+      "shows": "one English sentence describing what the viewer should SEE",
+      "search_terms": ["english query", "alternate english query"]
+    }}
+  ]
 }}
+
+BEAT RULES
+- One beat per distinct idea in the narration, {terms} of them, in order.
+- "shows" is the visual intent: a concrete, filmable scene. It is what a
+  human editor would write on a shot list, and it is what the footage is
+  judged against later, so be specific about subject, setting and action.
+- Give each beat 2 alternate search terms, different enough that if the first
+  returns nothing the second is a real second chance -- not a synonym.
+- Beats must be visually DIFFERENT from each other. Do not open three beats
+  on a city skyline or an aerial drone shot; that is the single most common
+  way these videos look generic.
 
 SCRIPT RULES
 - Write in {name}. Every word of "script" must be {name}.
@@ -126,14 +152,46 @@ def _clean_terms(raw, fallback_topic: str) -> list[str]:
 _CHARS_PER_TOKEN = 4
 
 
+@dataclass
+class Beat:
+    """One narration idea and the shot that should illustrate it."""
+
+    says: str = ""
+    shows: str = ""
+    terms: list[str] = field(default_factory=list)
+
+    @property
+    def intent(self) -> str:
+        """What the footage will be judged against."""
+        return self.shows or (self.terms[0] if self.terms else self.says)
+
+
+def _clean_beats(raw, fallback_terms: list[str]) -> list[Beat]:
+    beats: list[Beat] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        terms = _clean_terms(item.get("search_terms"), item.get("shows") or "")
+        beats.append(Beat(
+            says=" ".join(str(item.get("says") or "").split())[:400],
+            shows=" ".join(str(item.get("shows") or "").split())[:280],
+            terms=terms,
+        ))
+    if beats:
+        return beats[:_MAX_TERMS]
+    # An older-shaped reply, or none: one beat per search term still gives the
+    # pipeline something ordered to work with.
+    return [Beat(shows=t, terms=[t]) for t in fallback_terms]
+
+
 async def write_script(
     topic: str,
     *,
     duration_seconds: int,
     language: str,
     ledger=None,
-) -> tuple[str, list[str]]:
-    """Return (narration, search_terms).
+) -> tuple[str, list[Beat]]:
+    """Return (narration, beats).
 
     Raises only when the model gives us nothing usable at all -- an empty
     script is the one thing downstream cannot recover from, because there is
@@ -171,7 +229,8 @@ async def write_script(
     terms = _clean_terms(
         payload.get("search_terms") or payload.get("terms"), topic
     )
+    beats = _clean_beats(payload.get("beats"), terms)
     logger.info(
-        f"[aivideo] script: {len(script.split())} words, {len(terms)} search terms"
+        f"[aivideo] script: {len(script.split())} words, {len(beats)} beats"
     )
-    return script, terms
+    return script, beats

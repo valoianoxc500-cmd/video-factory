@@ -68,7 +68,12 @@ class JobState:
     stage: str = ""
     script_text: str = ""
     search_terms: list[str] = field(default_factory=list)
+    #: Narration beats with their visual intent. The footage stage judges
+    #: candidates against `shows`, which is why relevance improved over
+    #: searching the raw keyword line.
+    beats: list[dict] = field(default_factory=list)
     clips: list[str] = field(default_factory=list)
+    clip_windows: list[list] = field(default_factory=list)
     missing_terms: list[str] = field(default_factory=list)
     narration_seconds: float = 0.0
     providers_used: list[str] = field(default_factory=list)
@@ -190,7 +195,7 @@ async def run(
     if not state.done("script"):
         progress("script")
         try:
-            text, terms = await script_stage.write_script(
+            text, beats = await script_stage.write_script(
                 spec.topic,
                 duration_seconds=spec.duration_seconds,
                 language=spec.language,
@@ -199,7 +204,12 @@ async def run(
         except Exception as exc:
             raise RecoverableFailure(f"script stage: {exc}") from exc
         state.script_text = text
-        state.search_terms = terms
+        state.beats = [
+            {"says": b.says, "shows": b.shows, "terms": b.terms} for b in beats
+        ]
+        # Kept alongside the beats so an older resume path, and the reporting
+        # that reads it, still work.
+        state.search_terms = [b.terms[0] for b in beats if b.terms]
         # The only metered call in the pipeline. Added to whatever a previous
         # attempt already spent, so a resumed job reports its true total rather
         # than only the last attempt's.
@@ -207,23 +217,55 @@ async def run(
         state.cost_items = ledger.summary()["items"]
         state.finish("script")
         save_state(directory, state)
+    # Everything the script stage spent is now banked in `state`, so the
+    # ledger starts empty again for the stages that follow and a resumed job
+    # cannot bill the same call twice.
+    ledger = CostLedger()
 
     # ── footage ──────────────────────────────────────────────────────
     clips_dir = directory / "clips"
     if not state.done("footage"):
         progress("footage")
         try:
+            beats = [
+                script_stage.Beat(
+                    says=b.get("says", ""),
+                    shows=b.get("shows", ""),
+                    terms=list(b.get("terms") or []),
+                )
+                for b in state.beats
+            ] or [script_stage.Beat(shows=t, terms=[t]) for t in state.search_terms]
+
             clips, missing = await footage.gather(
-                state.search_terms,
+                beats,
                 clips_dir,
                 portrait=spec.aspect_ratio == "9:16",
+                ledger=ledger,
             )
         except footage.NoFootage as exc:
             raise TerminalFailure(str(exc)) from exc
         except Exception as exc:
             raise RecoverableFailure(f"footage stage: {exc}") from exc
 
+        # Ranking is a metered vision call per beat and is usually the largest
+        # line in a generation; reporting the script call alone understated a
+        # video's cost by roughly an order of magnitude. Collapsed to one line
+        # because ten identical rows is not an itemisation, it is noise.
+        ranked_calls = ledger.summary()["items"]
+        if ranked_calls:
+            state.cost_usd = round(state.cost_usd + ledger.total_usd, 6)
+            state.cost_items = [*state.cost_items, {
+                "label": "footage relevance",
+                "model": ranked_calls[0].get("model", ""),
+                "calls": len(ranked_calls),
+                "input_tokens": sum(i.get("input_tokens", 0) for i in ranked_calls),
+                "output_tokens": sum(i.get("output_tokens", 0) for i in ranked_calls),
+                "usd": ledger.total_usd,
+            }]
         state.clips = [str(c.path) for c in clips]
+        # The shot-aligned window each clip should be cut from, kept beside
+        # the path so a resumed render does not have to re-detect shots.
+        state.clip_windows = [list(c.window or (0.0, 4.0)) for c in clips]
         state.missing_terms = missing
         state.providers_used = sorted({c.provider for c in clips})
         if missing:
@@ -305,9 +347,15 @@ async def run(
                 continue
             if not source.exists():
                 continue
+            window = (
+                state.clip_windows[index]
+                if index < len(state.clip_windows) else (0.0, spec.clip_seconds)
+            )
+            start = float(window[0]) if window else 0.0
+            span = min(spec.clip_seconds, float(window[1]) if window else spec.clip_seconds)
             try:
                 normalised.append(
-                    compose.normalise_clip(source, target, spec, spec.clip_seconds)
+                    compose.normalise_clip(source, target, spec, span, start)
                 )
             except Exception as exc:
                 # Exactly the behaviour the product promises: drop this clip,

@@ -1144,8 +1144,13 @@ async def review_with_vision(
     model: str | None = None,
     operation_label: str | None = None,
     list_key: str | None = None,
+    on_usage=None,
 ) -> dict:
     """Send images + prompt to Gemini for vision-based review. Returns parsed JSON.
+
+    `on_usage(model, input_tokens, output_tokens)`, when given, is called with
+    the real reported usage so a caller keeping its own per-run ledger can
+    account for this call. Failures inside it are swallowed.
 
     A reviewer asked for `{"rejected": [...], "reason": "..."}` sometimes
     answers with the bare array instead. The annotation here has always said
@@ -1241,6 +1246,15 @@ async def review_with_vision(
         )
     prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
     output_tokens = getattr(usage, "candidates_token_count", 0) or 0
+    if on_usage is not None:
+        # Optional, because a caller with its own ledger cannot otherwise see
+        # what this call cost: the shared tracker above is per-process, and a
+        # product that deliberately does not import it (AI Video Maker) was
+        # left reporting a per-video cost with the vision calls missing.
+        try:
+            on_usage(model, int(prompt_tokens), int(output_tokens))
+        except Exception:
+            pass          # accounting must never fail the call it is measuring
     logger.info(
         f"[gemini] review_with_vision done — {elapsed:.1f}s, "
         f"{prompt_tokens} in + {output_tokens} out tokens"

@@ -76,6 +76,21 @@ VOICES: tuple[dict, ...] = (
 
 
 def voices_for(language: str) -> list[dict]:
+    """Voices offered for a language.
+
+    Reads the discovered catalogue (aivideo/voices.py) rather than the literal
+    above, which is now only the fallback for a checkout that has never run
+    discovery. That is how the offering went from 11 hardcoded entries to 60
+    across 21 locales without this module changing shape.
+    """
+    try:
+        from aivideo import voices as catalogue
+
+        discovered = [v.to_dict() for v in catalogue.voices_for(language)]
+        if discovered:
+            return discovered
+    except Exception:
+        pass
     return [v for v in VOICES if v["language"] == language]
 
 
@@ -142,14 +157,76 @@ CAPTION_PRESETS: dict[str, dict] = {
         "background": "none", "position": "bottom", "words_per_line": 5,
         "uppercase": False,
     },
+    # ── Arabic ───────────────────────────────────────────────────────
+    #
+    # Separate presets rather than the Latin ones with a font swapped, because
+    # Arabic needs different numbers to look right: joined script is denser,
+    # so it wants a slightly larger size and fewer words per line, and a heavy
+    # outline closes up the counters in Arabic letterforms in a way it does
+    # not in Latin. `words_per_line` is a ceiling here -- the real breaking is
+    # phrase-based, in medialab/arabic.py.
+    "arabic_clean": {
+        "label": "Arabic Clean", "font": "notosansarabic", "size": 68,
+        "weight": "bold",
+        "text_color": "#FFFFFF", "highlight_color": "#FFFFFF",
+        "outline_color": "#000000", "outline_width": 4,
+        "background": "none", "position": "bottom", "words_per_line": 5,
+        "uppercase": False,
+    },
+    "arabic_bold": {
+        "label": "Arabic Bold", "font": "notosansarabic", "size": 78,
+        "weight": "black",
+        "text_color": "#FFFFFF", "highlight_color": "#FFE500",
+        "outline_color": "#000000", "outline_width": 6,
+        "background": "none", "position": "center", "words_per_line": 4,
+        "uppercase": False,
+    },
+    "arabic_viral": {
+        "label": "Arabic Viral", "font": "notosansarabic", "size": 84,
+        "weight": "black",
+        "text_color": "#FFFFFF", "highlight_color": "#00E676",
+        "outline_color": "#000000", "outline_width": 7,
+        "background": "none", "position": "center", "words_per_line": 4,
+        "uppercase": False,
+    },
+    "arabic_boxed": {
+        "label": "Arabic Boxed", "font": "notokufiarabic", "size": 64,
+        "weight": "bold",
+        "text_color": "#FFFFFF", "highlight_color": "#FFD600",
+        "outline_color": "#000000", "outline_width": 0,
+        "background": "#000000CC", "position": "bottom", "words_per_line": 5,
+        "uppercase": False,
+    },
 }
+
+#: Presets designed for Arabic. An Arabic run defaults into this set rather
+#: than inheriting a Latin preset with the font swapped.
+ARABIC_PRESETS = ("arabic_clean", "arabic_bold", "arabic_viral", "arabic_boxed")
 
 #: Families that can shape Arabic. An Arabic run is moved onto one of these
 #: whatever preset was chosen, because a preset that cannot draw joined Arabic
 #: produces disconnected letters rather than an error -- silently, in the
 #: finished MP4, where nobody sees it until a customer does.
-ARABIC_CAPABLE_FONTS = ("cairo", "tajawal", "notoarabic", "arial", "tahoma")
-ARABIC_DEFAULT_FONT = "cairo"
+#: Mirrors medialab.arabic.ARABIC_FONTS -- the families with a real Arabic
+#: face behind them, which here means complete coverage of the Arabic
+#: presentation forms. Tajawal was removed from this list after it was found
+#: to be missing every isolated form, which cost words their first letter.
+ARABIC_CAPABLE_FONTS = (
+    "notosansarabic", "notokufiarabic", "arial", "tahoma",
+)
+ARABIC_DEFAULT_FONT = "notosansarabic"
+
+#: Latin preset -> the Arabic preset that matches its intent, so switching a
+#: video to Arabic keeps the look the customer picked instead of resetting it.
+ARABIC_EQUIVALENT = {
+    "clean": "arabic_clean",
+    "minimal": "arabic_clean",
+    "cinematic": "arabic_clean",
+    "bold": "arabic_bold",
+    "karaoke": "arabic_bold",
+    "viral": "arabic_viral",
+    "boxed": "arabic_boxed",
+}
 
 
 @dataclass
@@ -176,14 +253,25 @@ class CaptionStyle:
         return style.for_language(language)
 
     def for_language(self, language: str) -> "CaptionStyle":
-        """Force an Arabic-capable font, and never upper-case Arabic.
+        """Move a style onto its Arabic equivalent.
 
-        Arabic has no letter case, so `uppercase` is meaningless there; leaving
-        it on is harmless for the text but signals a style built for Latin,
-        and the font swap is the part that actually matters.
+        More than a font swap. A Latin preset carries a size and an outline
+        weight tuned for Latin letterforms; applied to joined Arabic they
+        produce cramped text with clogged counters. So the whole preset is
+        exchanged for the Arabic one matching its intent, which keeps the look
+        the customer chose. Arabic has no letter case, so `uppercase` is
+        meaningless and is cleared.
         """
         if language != "ar":
             return self
+
+        equivalent = ARABIC_EQUIVALENT.get(self.preset)
+        if equivalent and self.preset not in ARABIC_PRESETS:
+            swapped = dict(CAPTION_PRESETS[equivalent])
+            swapped.pop("label", None)
+            for key, value in swapped.items():
+                setattr(self, key, value)
+            self.preset = equivalent
         if self.font not in ARABIC_CAPABLE_FONTS:
             self.font = ARABIC_DEFAULT_FONT
         self.uppercase = False

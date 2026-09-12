@@ -67,8 +67,16 @@ async def _edge_synthesize(
 ) -> tuple[Path, list[Word]]:
     import edge_tts        # imported lazily so the web/test paths need no TTS
 
+    # `boundary` must be asked for explicitly: edge-tts 7 defaults it to
+    # SentenceBoundary, which streams one event for the whole sentence. The
+    # WordBoundary events are still there for the asking, and they are the
+    # entire reason this pipeline needs no Whisper pass -- without them every
+    # caption falls back to being spread evenly across the narration, which
+    # drifts further out of sync the longer the video runs.
     communicate = edge_tts.Communicate(
-        text, voice, rate=_rate_arg(rate), volume=_volume_arg(volume)
+        text, voice,
+        rate=_rate_arg(rate), volume=_volume_arg(volume),
+        boundary="WordBoundary",
     )
     words: list[Word] = []
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -21,7 +21,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from aivideo import footage, pipeline, script as script_stage, subtitles, voice
+from aivideo import footage, pipeline, rank as ranking, script as script_stage, subtitles, voice
 from aivideo.spec import (
     CAPTION_PRESETS,
     CaptionStyle,
@@ -99,11 +99,65 @@ def test_arabic_is_forced_onto_a_font_that_can_shape_it():
     assert spec.voice in {v["id"] for v in voices_for("ar")}
 
 
-def test_arabic_text_is_reshaped_and_reordered():
+def test_every_arabic_font_can_draw_every_letter():
+    """A font missing a presentation form loses that letter, silently.
+
+    Tajawal was the default here and carried only 116 of the Arabic
+    presentation forms -- every *isolated* form was absent, so a word starting
+    with alef, beh, noon or jeem rendered its first letter as a tofu box in
+    the finished MP4. Nothing raised, nothing logged; it was only visible by
+    looking at a frame.
+
+    This is that check, done from the font's own character map, for every
+    family a customer can pick for Arabic.
+    """
+    pytest.importorskip("fontTools")
+    import arabic_reshaper
+    from fontTools.ttLib import TTFont
+
+    from medialab import arabic as ar
+
+    reshaper = arabic_reshaper.ArabicReshaper(
+        configuration={"delete_harakat": False, "support_ligatures": False}
+    )
+    # Every Arabic letter, in each joining context, plus the lam-alef pairs.
+    letters = "".join(chr(cp) for cp in range(0x0621, 0x064B))
+    probe = " ".join(f"{a}{b}{a}" for a in letters for b in "لام")
+    needed = {ord(ch) for ch in reshaper.reshape(probe) if 0xFB50 <= ord(ch) <= 0xFEFF}
+    assert len(needed) > 80, "the probe did not exercise the presentation forms"
+
+    for family in ar.ARABIC_FONTS:
+        path = ar.font_file(family)
+        if path is None:
+            continue          # a system fallback this machine does not have
+        covered: set[int] = set()
+        for table in TTFont(str(path))["cmap"].tables:
+            covered |= set(table.cmap)
+        missing = needed - covered
+        assert not missing, (
+            f"{family} ({path.name}) cannot draw {len(missing)} Arabic forms, "
+            f"starting with {''.join(chr(cp) for cp in sorted(missing)[:8])!r}"
+        )
+
+
+def test_arabic_text_is_joined_but_left_in_logical_order():
+    """Joining is ours; the right-to-left reordering is libass's.
+
+    Doing both is what produced the first round of broken captions: libass
+    (built here with fribidi) reverses a second time, so every letter ends up
+    drawn in the form it had before the reversal and the words render visibly
+    disconnected.
+    """
     plain = "ريال مدريد"
     shaped = subtitles.shape_arabic(plain)
     assert shaped != plain, "Arabic was not shaped; letters will not join"
-    assert len(shaped) >= 3
+    assert any("ﹰ" <= ch <= "﻿" for ch in shaped), "no joined presentation forms"
+    # Logical order intact. Reshaping is character-for-character, so the two
+    # words keep their lengths; a bidi pass would have swapped them and the
+    # 4-letter word would now be second.
+    assert [len(word) for word in shaped.split()] == [4, 5], (
+        "the words were reordered; libass would then reorder them again"
+    )
 
 
 def test_latin_text_is_left_alone_by_the_shaper():
@@ -158,44 +212,274 @@ def test_a_search_that_finds_nothing_is_broadened_not_abandoned():
 
 
 @pytest.mark.asyncio
-async def test_one_dead_beat_does_not_lose_the_others(tmp_path, monkeypatch):
-    async def flaky(term, target, *, client, seen, portrait):
-        if "broken" in term:
-            return None
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"x" * 60_000)
-        return footage.Clip(target, "pexels", term, 1080, 1920, 6.0)
+async def test_ranking_a_beat_is_charged_to_the_run(tmp_path, monkeypatch):
+    """Ranking is the biggest line in a generation and was going unbilled.
 
-    monkeypatch.setattr(footage, "fetch_one", flaky)
+    The script call alone was reported as the cost of a video, which
+    understated it by roughly an order of magnitude once there is a vision
+    call per beat.
+    """
+    from aivideo import rank as ranking
+    from aivideo.cost import CostLedger
+
+    frame = tmp_path / "f.jpg"
+    frame.write_bytes(b"x" * 100)
+
+    async def review(prompt, images, *, operation_label="", on_usage=None, **kwargs):
+        on_usage("gemini-3-flash-preview", 6950, 300)
+        return {"scores": [{"n": 1, "score": 9, "why": "on subject"}]}
+
+    monkeypatch.setattr(ranking.clients, "review_with_vision", review)
+
+    ledger = CostLedger()
+    scored = await ranking.rank_candidates([frame], intent="a reef", ledger=ledger)
+
+    assert scored[0].score == 9
+    assert ledger.total_usd > 0
+    item = ledger.summary()["items"][0]
+    assert item["label"] == "footage relevance"
+    assert item["input_tokens"] == 6950
+
+
+def _beat(shows: str, *terms: str) -> script_stage.Beat:
+    return script_stage.Beat(says=shows, shows=shows, terms=list(terms) or [shows])
+
+
+@pytest.fixture
+def stub_candidates(monkeypatch):
+    """Stand in for the provider search, the ranker and the frame sampler.
+
+    Candidate collection, ranking and fingerprinting all reach outside the
+    process. Patching them here is what keeps this suite offline and fast --
+    the previous version patched `fetch_one`, which `gather` no longer calls,
+    so the tests were silently making real provider requests.
+    """
+    from medialab import fingerprint, shots
+
+    plan: dict = {"pools": {}, "scores": {}, "hashes": {}}
+
+    async def collect(term_list, scratch, *, client, portrait, wanted, providers=None):
+        scratch.mkdir(parents=True, exist_ok=True)
+        plan.setdefault("queries", []).append(list(term_list))
+        key = term_list[0] if term_list else ""
+        clips = []
+        for i, spec in enumerate(plan["pools"].get(key, [])):
+            path = scratch / f"cand_{i:02d}.mp4"
+            path.write_bytes(b"x" * 60_000)
+            clips.append(footage.Clip(
+                path, spec.get("provider", "pexels"), key, 1080, 1920, 6.0,
+                source_url=spec.get("url", f"{key}-{i}"),
+            ))
+        return clips
+
+    async def rank_candidates(
+        frames, *, intent, says="", operation_label="", ledger=None
+    ):
+        from aivideo.rank import Scored
+
+        scores = plan["scores"].get(intent)
+        if scores is None:
+            return [Scored(i, 9) for i in range(len(frames))]
+        # A list of lists means "these scores, then those": the second entry
+        # is what the broadened second attempt at the same beat gets back.
+        if scores and isinstance(scores[0], list):
+            scores = scores.pop(0) if len(scores) > 1 else scores[0]
+        return [Scored(i, s) for i, s in enumerate(scores[: len(frames)])]
+
+    def sample_frames(video, count=3):
+        from PIL import Image
+
+        return [Image.new("RGB", (64, 64), (7, 7, 7)) for _ in range(count)]
+
+    def signature_for(video, count=3):
+        # Cryptographically spread by default, so two clips are only "similar"
+        # when the test says so. A plain encoding of the filename put
+        # "beat_00cand_00" and "beat_02cand_00" one bit apart, which the
+        # 10-bit near-duplicate threshold correctly -- and unhelpfully --
+        # treated as the same shot.
+        import hashlib
+
+        seed = f"{video.parent.name}/{video.stem}".encode()
+        default = int.from_bytes(hashlib.sha256(seed).digest()[:8], "big")
+        digest = plan["hashes"].get(video.parent.name, default)
+        return fingerprint.ClipSignature(path=video, hashes=[digest], width=1080, height=1920)
+
+    monkeypatch.setattr(footage, "_collect_candidates", collect)
+    monkeypatch.setattr("aivideo.rank.rank_candidates", rank_candidates)
+    monkeypatch.setattr(fingerprint, "sample_frames", sample_frames)
+    monkeypatch.setattr(fingerprint, "signature_for", signature_for)
+    monkeypatch.setattr(shots, "longest_clean_window", lambda v, *, wanted, shots=None: (0.0, wanted))
+    return plan
+
+
+@pytest.mark.asyncio
+async def test_one_dead_beat_does_not_lose_the_others(tmp_path, stub_candidates):
+    stub_candidates["pools"] = {
+        "dubai skyline": [{"url": "a"}],
+        "broken thing": [],
+        "desert road": [{"url": "b"}],
+    }
     clips, missing = await footage.gather(
-        ["dubai skyline", "broken thing", "desert road"], tmp_path
+        [_beat("dubai skyline"), _beat("broken thing"), _beat("desert road")],
+        tmp_path,
     )
     assert len(clips) == 2
     assert missing == ["broken thing"]
 
 
 @pytest.mark.asyncio
-async def test_a_beat_that_raises_is_contained(tmp_path, monkeypatch):
-    async def explodes(term, target, *, client, seen, portrait):
-        if "bad" in term:
+async def test_a_beat_that_raises_is_contained(tmp_path, stub_candidates, monkeypatch):
+    async def explodes(term_list, scratch, *, client, portrait, wanted):
+        if "bad" in term_list[0]:
             raise RuntimeError("provider exploded")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"x" * 60_000)
-        return footage.Clip(target, "pixabay", term, 1080, 1920, 5.0)
+        scratch.mkdir(parents=True, exist_ok=True)
+        path = scratch / "cand_00.mp4"
+        path.write_bytes(b"x" * 60_000)
+        return [footage.Clip(path, "pixabay", term_list[0], 1080, 1920, 5.0,
+                             source_url=term_list[0])]
 
-    monkeypatch.setattr(footage, "fetch_one", explodes)
-    clips, missing = await footage.gather(["good", "bad", "good two"], tmp_path)
+    monkeypatch.setattr(footage, "_collect_candidates", explodes)
+    clips, missing = await footage.gather(
+        [_beat("good"), _beat("bad"), _beat("good two")], tmp_path
+    )
     assert len(clips) == 2 and missing == ["bad"]
 
 
 @pytest.mark.asyncio
-async def test_no_footage_at_all_is_the_one_terminal_footage_case(tmp_path, monkeypatch):
-    async def nothing(term, target, *, client, seen, portrait):
-        return None
-
-    monkeypatch.setattr(footage, "fetch_one", nothing)
+async def test_no_footage_at_all_is_the_one_terminal_footage_case(
+    tmp_path, stub_candidates
+):
+    stub_candidates["pools"] = {}
     with pytest.raises(footage.NoFootage):
-        await footage.gather(["a", "b"], tmp_path)
+        await footage.gather([_beat("a"), _beat("b")], tmp_path)
+
+
+# ── relevance ranking and duplicate rejection ────────────────────────
+
+@pytest.mark.asyncio
+async def test_the_best_ranked_candidate_wins_not_the_first(
+    tmp_path, stub_candidates
+):
+    """Taking the first search result is what produced unrelated footage."""
+    stub_candidates["pools"] = {
+        "gold vending machine": [
+            {"url": "wrong"}, {"url": "alsowrong"}, {"url": "right"},
+        ]
+    }
+    stub_candidates["scores"] = {"a gold vending machine": [2, 3, 9]}
+    clips, _ = await footage.gather(
+        [_beat("a gold vending machine", "gold vending machine")], tmp_path
+    )
+    assert len(clips) == 1
+    assert clips[0].source_url == "right"
+
+
+@pytest.mark.asyncio
+async def test_a_beat_whose_candidates_are_all_unrelated_is_left_uncovered(
+    tmp_path, stub_candidates
+):
+    """Better an uncovered beat than footage of the wrong thing."""
+    stub_candidates["pools"] = {
+        "ok": [{"url": "good"}],
+        "x": [{"url": "a"}, {"url": "b"}],
+    }
+    stub_candidates["scores"] = {"an impossible shot": [1, 2]}
+    clips, missing = await footage.gather(
+        [_beat("a usable shot", "ok"), _beat("an impossible shot", "x")], tmp_path
+    )
+    assert len(clips) == 1, "an unrelated candidate was used anyway"
+    assert missing == ["an impossible shot"]
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_beat_gets_one_broader_second_attempt(
+    tmp_path, stub_candidates
+):
+    """The narrow query is usually what failed, not the subject.
+
+    A real Arabic run lost two beats this way: every candidate for
+    "coral bleaching underwater" was rejected and the beat was abandoned
+    without anyone ever searching "bleaching underwater".
+    """
+    stub_candidates["pools"] = {
+        "coral bleaching underwater": [{"url": "bad-a"}, {"url": "bad-b"}],
+        "bleaching underwater": [{"url": "wider-a"}, {"url": "wider-b"}],
+    }
+    stub_candidates["scores"] = {
+        "a bleached reef": [[1, 2], [9, 3]],      # all rejected, then a good one
+    }
+    clips, missing = await footage.gather(
+        [_beat("a bleached reef", "coral bleaching underwater")], tmp_path
+    )
+    assert missing == [], "the beat was abandoned without a second attempt"
+    assert clips[0].source_url == "wider-a"
+    assert ["bleaching underwater"] in stub_candidates["queries"]
+
+
+@pytest.mark.asyncio
+async def test_the_second_attempt_happens_at_most_once(tmp_path, stub_candidates):
+    """Bounded on purpose: a good pick, not an unbounded search."""
+    stub_candidates["pools"] = {
+        "healthy reef": [{"url": "good"}],
+        "coral bleaching underwater": [{"url": "bad-a"}, {"url": "bad-b"}],
+        "bleaching underwater": [{"url": "still-bad-a"}, {"url": "still-bad-b"}],
+        "underwater": [{"url": "never-reached"}],
+    }
+    stub_candidates["scores"] = {"a bleached reef": [0, 0]}
+    clips, missing = await footage.gather(
+        [
+            _beat("a living reef", "healthy reef"),
+            _beat("a bleached reef", "coral bleaching underwater"),
+        ],
+        tmp_path,
+    )
+    assert len(clips) == 1
+    assert missing == ["a bleached reef"]
+    assert ["underwater"] not in stub_candidates["queries"]
+
+
+@pytest.mark.asyncio
+async def test_the_same_source_is_never_used_for_two_beats(
+    tmp_path, stub_candidates
+):
+    stub_candidates["pools"] = {
+        "one": [{"url": "shared"}],
+        "two": [{"url": "shared"}, {"url": "distinct"}],
+    }
+    clips, _ = await footage.gather([_beat("one"), _beat("two")], tmp_path)
+    urls = [c.source_url for c in clips]
+    assert len(urls) == len(set(urls)), f"a source repeated: {urls}"
+    assert "distinct" in urls
+
+
+@pytest.mark.asyncio
+async def test_visually_near_identical_clips_are_rejected(
+    tmp_path, stub_candidates
+):
+    """The same drone shot sold under two ids is the repeat viewers notice."""
+    stub_candidates["pools"] = {
+        "one": [{"url": "a"}],
+        "two": [{"url": "b"}, {"url": "c"}],
+    }
+    # Beats 0 and 1's first candidate hash identically; the second differs.
+    stub_candidates["hashes"] = {"beat_00": 0b1010, "beat_01": 0b1010}
+    clips, missing = await footage.gather([_beat("one"), _beat("two")], tmp_path)
+    # The duplicate is refused, so beat two ends up uncovered rather than
+    # showing the same footage again.
+    assert len(clips) == 1
+    assert missing == ["two"]
+
+
+@pytest.mark.asyncio
+async def test_the_chosen_clip_is_cut_at_a_shot_boundary(tmp_path, stub_candidates, monkeypatch):
+    from medialab import shots
+
+    monkeypatch.setattr(
+        shots, "longest_clean_window", lambda v, *, wanted, shots=None: (2.5, 3.0)
+    )
+    stub_candidates["pools"] = {"one": [{"url": "a"}]}
+    clips, _ = await footage.gather([_beat("one")], tmp_path)
+    assert clips[0].window == (2.5, 3.0)
 
 
 def test_provider_order_puts_the_free_libraries_first():
@@ -262,16 +546,32 @@ def fake_engine(monkeypatch, tmp_path):
                 model="gemini-3-flash-preview",
                 input_tokens=400, output_tokens=120, label="script",
             )
-        return "Dubai was built in a hurry.", ["dubai skyline", "desert road"]
+        return "Dubai was built in a hurry.", [
+            script_stage.Beat(
+                says="Dubai was built in a hurry.",
+                shows="a desert city skyline under construction",
+                terms=["dubai skyline", "construction cranes"],
+            ),
+            script_stage.Beat(
+                says="Roads crossed empty sand.",
+                shows="an empty road through desert dunes",
+                terms=["desert road", "sand dunes"],
+            ),
+        ]
 
-    async def fake_gather(terms, directory, *, portrait=True, concurrency=4):
+    async def fake_gather(
+        beats, directory, *, portrait=True, concurrency=3, rank=True, ledger=None
+    ):
         calls["footage"] += 1
         directory.mkdir(parents=True, exist_ok=True)
         clips = []
-        for i, term in enumerate(terms):
+        for i, beat in enumerate(beats):
             p = directory / f"clip_{i:02d}.mp4"
             p.write_bytes(b"x" * 60_000)
-            clips.append(footage.Clip(p, "pexels", term, 1080, 1920, 6.0))
+            term = getattr(beat, "terms", [""])[0] if hasattr(beat, "terms") else str(beat)
+            clip = footage.Clip(p, "pexels", term, 1080, 1920, 6.0)
+            clip.window = (0.5, 4.0)
+            clips.append(clip)
         return clips, []
 
     async def fake_voice(text, voice_id, output, *, rate=1.0, volume=1.0):
@@ -282,7 +582,7 @@ def fake_engine(monkeypatch, tmp_path):
                  for i, w in enumerate(text.split())]
         return voice.Narration(output, words, 12.0, voice_id)
 
-    def fake_normalise(source, target, spec, seconds):
+    def fake_normalise(source, target, spec, seconds, start=0.0):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"x" * 20_000)
         return target
@@ -376,7 +676,9 @@ async def test_an_empty_topic_is_terminal(tmp_path, fake_engine):
 
 @pytest.mark.asyncio
 async def test_no_footage_anywhere_is_terminal(tmp_path, fake_engine, monkeypatch):
-    async def nothing(terms, directory, *, portrait=True, concurrency=4):
+    async def nothing(
+        beats, directory, *, portrait=True, concurrency=3, rank=True, ledger=None
+    ):
         raise footage.NoFootage("nothing found")
 
     monkeypatch.setattr(pipeline.footage, "gather", nothing)
@@ -434,7 +736,7 @@ async def test_music_failure_falls_back_to_a_silent_render(
 async def test_an_unpreparable_clip_is_dropped_not_fatal(
     tmp_path, fake_engine, monkeypatch
 ):
-    def one_bad(source, target, spec, seconds):
+    def one_bad(source, target, spec, seconds, start=0.0):
         if source.name.endswith("_00.mp4"):
             raise RuntimeError("corrupt download")
         target.parent.mkdir(parents=True, exist_ok=True)

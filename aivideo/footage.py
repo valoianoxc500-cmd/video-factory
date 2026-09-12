@@ -45,6 +45,10 @@ class Clip:
     height: int
     duration: float
     source_url: str = ""
+    #: (start, seconds) inside the source that sits within one shot. Set by
+    #: `gather` from PySceneDetect so a beat does not open mid-edit; None
+    #: means "start at zero", which is what the naive cut did.
+    window: tuple[float, float] | None = None
 
     @property
     def is_portrait(self) -> bool:
@@ -235,52 +239,257 @@ async def fetch_one(
     return None
 
 
+#: Candidates downloaded per beat before ranking. More is a better field to
+#: choose from and more bandwidth; six is where the quality curve flattens on
+#: the two free libraries.
+CANDIDATES_PER_BEAT = 6
+
+
+async def _collect_candidates(
+    term_list: list[str],
+    scratch: Path,
+    *,
+    client: httpx.AsyncClient,
+    portrait: bool,
+    wanted: int,
+    providers=None,
+) -> list[Clip]:
+    """Download several distinct candidates for one beat.
+
+    Walks every term and both providers until it has enough, so a beat whose
+    first query is weak still gets a real field to choose from rather than one
+    poor result. `seen` is per-beat here: two beats may legitimately consider
+    the same clip, and the cross-beat duplicate rule is applied later where it
+    can see what was actually chosen.
+    """
+    scratch.mkdir(parents=True, exist_ok=True)
+    seen: set[str] = set()
+    found: list[Clip] = []
+    slot = 0
+    provider_list = providers or PROVIDERS
+
+    for term in term_list:
+        query = term
+        while query and len(found) < wanted:
+            for name, search in provider_list:
+                if len(found) >= wanted:
+                    break
+                try:
+                    candidates = await search(client, query, portrait)
+                except Exception as exc:
+                    logger.info(
+                        f"[aivideo] {name} unavailable for {query!r} "
+                        f"({type(exc).__name__}); trying the next provider"
+                    )
+                    continue
+                random.shuffle(candidates)
+                for candidate in candidates:
+                    if len(found) >= wanted:
+                        break
+                    candidate["term"] = term
+                    clip = await _download(
+                        client, candidate, scratch / f"cand_{slot:02d}.mp4", seen
+                    )
+                    slot += 1
+                    if clip:
+                        found.append(clip)
+            if len(found) >= wanted:
+                break
+            query = simplify(query)
+            if query:
+                logger.debug(f"[aivideo] broadening {term!r} to {query!r}")
+
+    return found
+
+
 async def gather(
-    terms: list[str],
+    beats: list,
     directory: Path,
     *,
     portrait: bool = True,
-    concurrency: int = 4,
+    concurrency: int = 3,
+    rank: bool = True,
+    ledger=None,
 ) -> tuple[list[Clip], list[str]]:
-    """Fetch a clip per term. Returns (clips, terms that found nothing).
+    """Fetch, rank and de-duplicate one clip per beat.
 
-    Beats run concurrently but each is isolated: one provider outage, one bad
-    URL or one oversized file costs that beat and nothing else. An exception
-    escaping a single task is caught here for the same reason.
+    Returns (chosen clips in beat order, beats that found nothing).
+
+    The pipeline per beat is: collect several candidates, sample a frame from
+    each, score those frames against the beat's visual intent, reject anything
+    unrelated, then reject anything that looks like footage already chosen for
+    another beat. That last step is what stops the same drone shot appearing
+    three times, and it has to run across beats rather than within one, so
+    selection is sequential even though downloading is not.
+
+    Beats accept either the `Beat` objects the script stage now returns or
+    plain search strings, so an older checkpoint still resumes.
     """
+    from medialab import fingerprint, shots
+
     directory.mkdir(parents=True, exist_ok=True)
-    seen: set[str] = set()
     limiter = asyncio.Semaphore(max(1, concurrency))
-    results: list[Clip | None] = [None] * len(terms)
+
+    def terms_for(beat) -> list[str]:
+        raw = getattr(beat, "terms", None) or ([beat] if isinstance(beat, str) else [])
+        return [t for t in raw if str(t).strip()] or [str(beat)]
+
+    def intent_for(beat) -> str:
+        return getattr(beat, "intent", None) or str(beat)
+
+    pools: list[list[Clip]] = [[] for _ in beats]
 
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
-        async def run(index: int, term: str) -> None:
+        async def collect(index: int, beat) -> None:
             async with limiter:
                 try:
-                    results[index] = await fetch_one(
-                        term,
-                        directory / f"clip_{index:02d}.mp4",
+                    pools[index] = await _collect_candidates(
+                        terms_for(beat),
+                        directory / f"beat_{index:02d}",
                         client=client,
-                        seen=seen,
                         portrait=portrait,
+                        wanted=CANDIDATES_PER_BEAT,
                     )
                 except Exception as exc:
                     logger.warning(
-                        f"[aivideo] beat {index} footage failed "
+                        f"[aivideo] beat {index} candidate search failed "
                         f"({type(exc).__name__}: {exc}); continuing without it"
                     )
 
-        await asyncio.gather(*(run(i, t) for i, t in enumerate(terms)))
+        await asyncio.gather(*(collect(i, b) for i, b in enumerate(beats)))
 
-    clips = [c for c in results if c is not None]
-    missing = [t for c, t in zip(results, terms) if c is None]
+    # ── rank, then choose with the duplicate guard ───────────────────
+    guard = fingerprint.DuplicateGuard()
+    chosen: list[Clip | None] = [None] * len(beats)
+    counts = {"unrelated": 0, "duplicate": 0, "retried": 0}
+
+    async def rank_pool(index: int, beat, pool: list[Clip], tag: str) -> list[int]:
+        """Candidate positions worth trying, best first."""
+        if not rank or len(pool) < 2:
+            return list(range(len(pool)))
+
+        from aivideo import rank as ranking
+
+        frames_dir = directory / f"beat_{index:02d}" / f"frames{tag}"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        frames: list[Path] = []
+        keep: list[int] = []
+        for position, clip in enumerate(pool[: ranking.MAX_RANKED]):
+            sampled = fingerprint.sample_frames(clip.path, count=1)
+            if not sampled:
+                continue
+            target = frames_dir / f"f_{position:02d}.jpg"
+            sampled[0].convert("RGB").save(target, quality=88)
+            frames.append(target)
+            keep.append(position)
+        if not frames:
+            return list(range(len(pool)))
+
+        scores = await ranking.rank_candidates(
+            frames, intent=intent_for(beat), says=getattr(beat, "says", ""),
+            ledger=ledger,
+        )
+        scored = sorted(zip(keep, scores), key=lambda pair: -pair[1].score)
+        counts["unrelated"] += sum(1 for _, s in scored if not s.acceptable)
+        return [i for i, s in scored if s.acceptable]
+
+    def take(index: int, pool: list[Clip], order: list[int]) -> Clip | None:
+        """First ranked candidate that is not a repeat of something chosen."""
+        for position in order:
+            clip = pool[position]
+            if guard.seen_source(clip.source_url or str(clip.path.name)):
+                counts["duplicate"] += 1
+                continue
+            signature = fingerprint.signature_for(clip.path)
+            reason = guard.rejects(signature)
+            if reason:
+                counts["duplicate"] += 1
+                logger.debug(f"[aivideo] beat {index}: skipped a clip {reason}")
+                continue
+
+            # Cut where the camera cuts, so the beat does not open mid-edit.
+            start, span = shots.longest_clean_window(clip.path, wanted=4.0)
+            clip.window = (start, span)
+            guard.accept(signature, clip.source_url)
+            logger.info(
+                f"[aivideo] beat {index}: {clip.provider} · {clip.term!r} "
+                f"({clip.width}x{clip.height}, window {start:.1f}s+{span:.1f}s)"
+            )
+            return clip
+        return None
+
+    for index, (beat, pool) in enumerate(zip(beats, pools)):
+        if not pool:
+            continue
+        order = await rank_pool(index, beat, pool, "")
+        if not order:
+            logger.info(
+                f"[aivideo] beat {index}: every candidate was unrelated "
+                f"to {intent_for(beat)[:60]!r}"
+            )
+        chosen[index] = take(index, pool, order)
+
+    # ── one broadened second attempt for the beats that came up empty ─
+    #
+    # A beat whose whole field was rejected used to be abandoned there, and
+    # the finished video simply held its neighbours longer. Before giving up
+    # it is worth one wider query with the providers tried in the other
+    # order: the narrow query is usually what failed, not the subject.
+    #
+    # Strictly one extra round per empty beat -- the point is a good pick,
+    # not an unbounded search.
+    stranded = [i for i, clip in enumerate(chosen) if clip is None]
+    if stranded:
+        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+            for index in stranded:
+                beat = beats[index]
+                wider = [q for q in (simplify(t) for t in terms_for(beat)) if q]
+                if not wider:
+                    continue
+                counts["retried"] += 1
+                try:
+                    retry_pool = await _collect_candidates(
+                        wider,
+                        directory / f"beat_{index:02d}" / "retry",
+                        client=client,
+                        portrait=portrait,
+                        wanted=CANDIDATES_PER_BEAT,
+                        providers=list(reversed(PROVIDERS)),
+                    )
+                except Exception as exc:
+                    logger.info(
+                        f"[aivideo] beat {index}: second attempt failed "
+                        f"({type(exc).__name__}); leaving it uncovered"
+                    )
+                    continue
+                if not retry_pool:
+                    continue
+                order = await rank_pool(index, beat, retry_pool, "_retry")
+                chosen[index] = take(index, retry_pool, order)
+                if chosen[index] is not None:
+                    logger.info(
+                        f"[aivideo] beat {index}: covered on the second attempt "
+                        f"with a broader query"
+                    )
+
+    clips = [c for c in chosen if c is not None]
+    missing = [
+        intent_for(b)[:60] for c, b in zip(chosen, beats) if c is None
+    ]
     if not clips:
         raise NoFootage(
             "no stock provider returned usable footage for any search term"
         )
+
+    logger.info(
+        f"[aivideo] footage: {len(clips)}/{len(beats)} beats covered "
+        f"({counts['unrelated']} rejected as unrelated, "
+        f"{counts['duplicate']} as duplicates, "
+        f"{counts['retried']} beat(s) given a second attempt)"
+    )
     if missing:
         logger.info(
-            f"[aivideo] {len(missing)} beat(s) found no footage; the video will "
-            f"hold the surrounding clips longer: {', '.join(missing)}"
+            f"[aivideo] {len(missing)} beat(s) found no usable footage; the "
+            f"video will hold the surrounding clips longer"
         )
     return clips, missing

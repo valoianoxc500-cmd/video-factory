@@ -5,6 +5,27 @@
  * part of the same application rather than a bolted-on second design.
  */
 
+/* The same font files the renderer burns into the video.
+ *
+ * Loading them here is what makes the caption preview honest: previewing
+ * Arabic in a system fallback and burning a different face shows the customer
+ * one thing and ships another. Both sides read /public/fonts, which is a copy
+ * of medialab/fonts. SIL Open Font Licence 1.1 — see the OFL-*.txt files
+ * beside them.
+ */
+@font-face {
+  font-family: "Noto Sans Arabic";
+  src: url("/fonts/NotoSansArabic.ttf") format("truetype");
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Noto Kufi Arabic";
+  src: url("/fonts/NotoKufiArabic.ttf") format("truetype");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
 .avm {
   --avm-gap: 20px;
   display: grid;

@@ -38,16 +38,52 @@ def test_the_shared_module_exists(ts_source):
     assert "AI Video Maker" in ts_source
 
 
+def _engine_voice_ids() -> set[str]:
+    """Every voice the engine will accept.
+
+    The discovered catalogue, not the hardcoded literal: the literal is now
+    only the fallback for a checkout that has never run voice discovery, and
+    comparing the form against it would fail the moment discovery ran.
+    """
+    from aivideo import voices as catalogue
+
+    return {v.id for v in catalogue.catalogue()}
+
+
 def test_every_engine_voice_is_offered_by_the_form(ts_source):
-    for voice in VOICES:
-        assert voice["id"] in ts_source, f"{voice['id']} missing from aivideo.ts"
+    for voice_id in _engine_voice_ids():
+        assert voice_id in ts_source, f"{voice_id} missing from aivideo.ts"
 
 
 def test_the_form_offers_no_voice_the_engine_cannot_use(ts_source):
-    offered = set(re.findall(r'id:\s*"([a-z]{2}-[A-Z]{2}-\w+Neural)"', ts_source))
-    known = {v["id"] for v in VOICES}
+    offered = set(re.findall(r'id:\s*"([a-z]{2}-[A-Z]{2}-\w+)"', ts_source))
+    known = _engine_voice_ids()
     assert offered <= known, f"the form offers unknown voices: {offered - known}"
     assert offered == known
+
+
+def test_the_offering_is_substantially_wider_than_the_original_eleven(ts_source):
+    """The complaint was 'too few voices'."""
+    from aivideo import voices as catalogue
+
+    arabic = catalogue.voices_for("ar")
+    english = catalogue.voices_for("en")
+    assert len(arabic) >= 20, f"only {len(arabic)} Arabic voices"
+    assert len(english) >= 15, f"only {len(english)} English voices"
+    # Multiple Arabic regions, not five voices for the whole Arab world.
+    assert len({v.locale for v in arabic}) >= 8
+    # Both English accents the brief names.
+    assert {"en-US", "en-GB"} <= {v.locale for v in english}
+
+
+def test_no_raw_voice_identifier_is_ever_shown(ts_source):
+    """Labels are people's names; the provider id stays internal."""
+    from aivideo import voices as catalogue
+
+    for voice in catalogue.catalogue():
+        assert "Neural" not in voice.label, f"{voice.label} leaks the model name"
+        assert "-" not in voice.label, f"{voice.label} looks like an identifier"
+        assert voice.accent, f"{voice.id} has no customer-facing accent"
 
 
 def test_both_sides_offer_the_same_durations(ts_source):
