@@ -1,1 +1,0 @@
-export function debounce<T extends (...args: never[])=>void>(fn:T,delay=800){let timer:ReturnType<typeof setTimeout>|null=null;const wrapped=(...args:Parameters<T>)=>{if(timer)clearTimeout(timer);timer=setTimeout(()=>fn(...args),delay)};wrapped.cancel=()=>{if(timer)clearTimeout(timer)};return wrapped;}
