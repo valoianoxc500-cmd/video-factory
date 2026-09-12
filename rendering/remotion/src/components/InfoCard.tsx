@@ -202,6 +202,11 @@ export const InfoCard: React.FC<InfoCardProps> = ({
             fontFamily: theme.font.sans,
             lineHeight: 1.4,
             textShadow: "0 1px 4px rgba(0,0,0,0.3)",
+            // Line breaks in props.text are meaningful. A verified information
+            // card is a stack of separate facts -- heading, result,
+            // competition, date, source -- and collapsing them into one
+            // paragraph is how a scoreline ends up reading as prose.
+            whiteSpace: "pre-line",
           }}
         >
           {renderHighlightedText(text, highlighted_keywords, highlight_color)}

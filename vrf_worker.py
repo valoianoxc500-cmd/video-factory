@@ -34,11 +34,23 @@ from viral.runner import main
 # `from worker.storage import upload_media` with "'worker' is not a package",
 # but only at the very end of a run, after the clip had been downloaded,
 # reframed and encoded. The work was done and then thrown away.
-from worker.singleton import (
-    RESTART_GRACE_SECONDS,
-    AlreadyRunningError,
-    SingleInstanceLock,
-)
+try:
+    from worker.singleton import (
+        RESTART_GRACE_SECONDS,
+        AlreadyRunningError,
+        SingleInstanceLock,
+    )
+except ImportError:  # pragma: no cover - depends on sys.path ordering
+    # Something ahead of us has already put `worker/` on sys.path -- several
+    # test modules and worker/run_worker.py do -- which makes `import worker`
+    # resolve to worker/worker.py and shadows the package. Importing the
+    # module directly is correct in exactly that situation, and the package
+    # import above stays the path production actually takes.
+    from singleton import (
+        RESTART_GRACE_SECONDS,
+        AlreadyRunningError,
+        SingleInstanceLock,
+    )
 
 # The worker credentials live in worker/.env, which the video worker already
 # loads through its own launcher. Reading the same file here means both workers

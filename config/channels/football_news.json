@@ -157,8 +157,10 @@
     "max_generated_fallback_images": 4,
     "allow_generated_player_reconstruction": true,
     "generated_player_reconstruction_model": "gemini-2.5-flash-image",
-    "max_generated_player_reconstructions": 2,
+    "max_generated_player_reconstructions": 8,
     "complete_over_coverage": true,
+    "verified_card_fallback": true,
+    "max_safe_fallback_visuals": 12,
     "scene_audio": true
   },
   "youtube": {
@@ -200,7 +202,8 @@
   },
   "script_style": {
     "tone": "Fast, confident Arabic sports-news delivery. Specific and factual, never hyped beyond the evidence.",
-    "instructions": "Write Modern Standard Arabic for a football news audience. Name the exact players, clubs, competitions, scorelines, and dates from the research brief - never speak in generalities. Respect the claim tags in the brief: state COMPLETED and CONFIRMED facts plainly, and attribute REPORTED or RUMORED ones as reports ('بحسب تقارير'). Never present a rumour as settled fact. Every visual slot must name a real, searchable football subject so a photograph of that exact person, club, or moment can be found. Place one short follow CTA after the viewer has received real value."
+    "instructions": "Write Modern Standard Arabic for a football news audience. Name the exact players, clubs, competitions, scorelines, and dates from the research brief - never speak in generalities. Respect the claim tags in the brief: state COMPLETED and CONFIRMED facts plainly, and attribute REPORTED or RUMORED ones as reports ('بحسب تقارير'). Never present a rumour as settled fact. Every visual slot must name a real, searchable football subject so a photograph of that exact person, club, or moment can be found. Place one short follow CTA after the viewer has received real value.",
+    "require_end_hook": true
   },
   "business_strategy": {
     "channel_goal": "Create fast, engaging Arabic football videos based on real football news, transfers, matches, players, clubs, competitions, controversies, and football stories.",

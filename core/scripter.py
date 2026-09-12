@@ -1188,6 +1188,61 @@ def _language_errors(content: dict, *, language: str) -> list[str]:
     return problems
 
 
+# A question mark in either script, plus the Arabic one, which is a different
+# codepoint and is what an Arabic script actually ends on.
+_QUESTION_MARKS = ("?", "؟")
+
+# Endings that are a call to action, not a hook. A subscribe line may live
+# elsewhere in the video; it may not be how the video ends.
+_NOT_A_HOOK = (
+    "subscribe", "follow for more", "like the video", "hit the bell",
+    "اشترك", "تابعنا", "لايك", "فعل الجرس", "اشتراك في القناة",
+)
+
+
+def _end_hook_errors(sections: list) -> list[str]:
+    """The last section has to ask the viewer something about this match.
+
+    Checked rather than merely requested, because "end with a hook" in a prompt
+    is a suggestion and this is a product requirement. Deliberately shallow: it
+    verifies that an ending exists and is aimed at the viewer, and leaves
+    whether the hook is any *good* to the script review gate, which can read
+    it. What it can check cheaply is the failure mode that actually shipped --
+    a script that stops dead on its last fact.
+    """
+    if not sections:
+        return []
+    last = sections[-1]
+    if not isinstance(last, dict):
+        return []
+    section_id = last.get("id", len(sections))
+    narration = str(last.get("narration") or "").strip()
+    if not narration:
+        return []
+
+    # The hook is the ending, so only the tail is inspected: a rhetorical
+    # question in the middle of the section is not an ending.
+    tail = narration[-160:]
+    lowered = tail.lower()
+
+    problems: list[str] = []
+    if not any(mark in tail for mark in _QUESTION_MARKS):
+        problems.append(
+            f"Section {section_id}: the video ends on a statement. The final "
+            f"section must close with a short question to the viewer about "
+            f"this match -- a prediction, an opinion, a man-of-the-match call "
+            f"or a comparison between the two sides -- built from the teams "
+            f"and result in the research context."
+        )
+    if any(phrase in lowered for phrase in _NOT_A_HOOK):
+        problems.append(
+            f"Section {section_id}: the video ends on a subscribe/follow CTA. "
+            f"That is not an end hook. Keep the CTA earlier if you want it, "
+            f"and end on a football question about this specific match."
+        )
+    return problems
+
+
 def _script_validation_errors(
     data: dict,
     *,
@@ -1202,9 +1257,12 @@ def _script_validation_errors(
     #: Floor on how long one visual owns the screen. Bounds the slot count
     #: from above, the way max_visual_hold_seconds bounds it from below.
     min_visible_beat_seconds: float = 2.5,
+    require_end_hook: bool = False,
 ) -> tuple[list[str], list[dict]]:
     sections = data.get("sections", [])
     errors = _title_banner_numbering_errors(data, numbering_order)
+    if require_end_hook:
+        errors.extend(_end_hook_errors(sections))
     pacing_issues: list[dict] = []
     subscribe_cta_sections: list[int] = []
 
@@ -1613,6 +1671,7 @@ async def generate_script(
         min_visible_beat_seconds=config.rendering_defaults.image_slot_min_duration,
         max_visual_hold_seconds=max_visual_hold_seconds,
         web_photos_only=config.image_sourcing.web_photos_only,
+        end_hook=config.script_style.require_end_hook,
     )
     system_inst = prompts.script_system(
         tone=config.script_style.tone,
@@ -1667,6 +1726,7 @@ async def generate_script(
             timing_profile=timing_profile,
             web_photos_only=config.image_sourcing.web_photos_only,
             min_visible_beat_seconds=config.rendering_defaults.image_slot_min_duration,
+            require_end_hook=config.script_style.require_end_hook,
         )
         # One video, one language. An English run ended on an Arabic
         # sentence because the English instructions carried an Arabic example;
@@ -1831,6 +1891,12 @@ async def generate_script(
             numbering_order=numbering_order,
             max_visual_hold_seconds=max_visual_hold_seconds,
             web_photos_only=config.image_sourcing.web_photos_only,
+            # The reviewer needs the same citations the writer had. Without
+            # them it scores facts against its training memory and rejects
+            # correct, sourced ones -- a real run was refused because the
+            # reviewer remembered a 2021 fixture and the cited report said
+            # 2026. This is the grounding layer's own output, not user text.
+            grounded_brief=research_context,
         )
 
     try:

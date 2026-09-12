@@ -28,6 +28,57 @@ class TerminalState(str, Enum):
     FAILED = "failed"
 
 
+class FailureKind(str, Enum):
+    """Why a run stopped, in the only two categories that change what happens.
+
+    RECOVERABLE means trying again could plausibly succeed with no new input
+    from the customer: a refused quota, a 5xx, a timeout, a sourcing provider
+    having a bad ten minutes. The checkpoint is kept and the job is requeued.
+
+    FACTUAL means the run is blocked on evidence, and retrying the exact same
+    request would burn the same money to reach the same wall. Only the customer
+    can unblock it, so the run is left terminal and told them what to add.
+
+    Kept deliberately coarse. Anything not positively identified as factual is
+    treated as recoverable and bounded by the retry ceiling, because guessing
+    "terminal" wrongly strands a paying run that a retry would have finished.
+    """
+
+    RECOVERABLE = "recoverable"
+    FACTUAL = "factual"
+
+
+#: Result vocabulary for a finished run. `completed` and the two failure states
+#: are what a future credit policy would read; nothing here decides or records
+#: money, it only makes the three outcomes distinguishable.
+RESULT_COMPLETED = "completed"
+RESULT_RECOVERABLE_FAILED = "recoverable_failed"
+RESULT_TERMINAL_FAILED = "terminal_failed"
+
+
+def result_status(*, completed: bool, recoverable: bool) -> str:
+    if completed:
+        return RESULT_COMPLETED
+    return RESULT_RECOVERABLE_FAILED if recoverable else RESULT_TERMINAL_FAILED
+
+
+#: Backoff between automatic resumes, in seconds, indexed by how many have
+#: already happened. Bounded on both ends. The first step outlasts the model
+#: quota cooldown in clients.py, so an immediate resume cannot walk straight
+#: back into the refusal that stopped it; the last is capped at five minutes
+#: because the worker is a singleton and waiting here also holds up whoever is
+#: behind this job in the queue.
+_RETRY_BACKOFF_SECONDS = (180.0, 300.0)
+
+
+def retry_delay_seconds(retry_count: int) -> float:
+    """How long to wait before resuming, after `retry_count` prior attempts."""
+    if retry_count < 0:
+        retry_count = 0
+    index = min(retry_count, len(_RETRY_BACKOFF_SECONDS) - 1)
+    return _RETRY_BACKOFF_SECONDS[index]
+
+
 class ProviderAttempt(BaseModel):
     provider: str = ""
     operation: str = ""
@@ -47,6 +98,7 @@ class RunAttempt(BaseModel):
     terminal_state: TerminalState = TerminalState.RUNNING
     recoverable: bool = True
     recovery_reason: str = ""
+    failure_kind: FailureKind | None = None
 
     def begin_resume(self) -> None:
         self.retry_count += 1
@@ -55,6 +107,7 @@ class RunAttempt(BaseModel):
         self.terminal_state = TerminalState.RUNNING
         self.recoverable = True
         self.recovery_reason = "resumed from valid checkpoint"
+        self.failure_kind = None
 
     def record_provider_failure(self, provider: str, operation: str, detail: str = "") -> None:
         self.provider_attempts.append(ProviderAttempt(
@@ -63,17 +116,101 @@ class RunAttempt(BaseModel):
         ))
         self.recovery_reason = detail[:240]
 
-    def finish(self, *, recoverable: bool, reason: str = "") -> None:
+    def finish(
+        self,
+        *,
+        recoverable: bool,
+        reason: str = "",
+        kind: FailureKind | None = None,
+    ) -> None:
         self.finished_at = now_iso()
         self.terminal_state = TerminalState.FAILED
         self.recoverable = recoverable
         self.recovery_reason = reason[:240]
+        self.failure_kind = kind or (
+            FailureKind.RECOVERABLE if recoverable else FailureKind.FACTUAL
+        )
 
     def complete(self) -> None:
         self.finished_at = now_iso()
         self.terminal_state = TerminalState.COMPLETE
         self.recoverable = False
         self.recovery_reason = ""
+        self.failure_kind = None
+
+    @property
+    def result_status(self) -> str:
+        return result_status(
+            completed=self.terminal_state is TerminalState.COMPLETE,
+            recoverable=self.recoverable,
+        )
+
+
+# ── What the customer is told ────────────────────────────────────────
+#
+# One place, so no caller has to decide how much of a provider incident to
+# leak. Nothing in here names a model, a vendor, an HTTP status, a stage or a
+# file path -- a customer gets a state and, when it is their call to make, the
+# one thing they can do about it.
+
+#: Shown while the run is still working. Keyed by pipeline stage.
+PROGRESS_MESSAGES: dict[str, str] = {
+    "planning": "Researching verified sources…",
+    "script": "Writing your video…",
+    "image_source": "Finding match visuals…",
+    "audio_source": "Recording the narration…",
+    "animation": "Building remaining visuals…",
+    "process": "Building remaining visuals…",
+    "render_sections": "Rendering your video…",
+    "assemble": "Rendering your video…",
+    "thumbnail": "Finalizing…",
+    "final_review": "Finalizing…",
+}
+
+#: Shown when a provider is degraded but the run is still going. Deliberately
+#: says nothing about which provider, or that anything is wrong at all beyond
+#: "slower" -- from the customer's side that is the whole truth.
+DEGRADED_MESSAGE = "Still working — we're using another source."
+
+#: Shown when the run has stopped and will resume on its own.
+RECOVERABLE_MESSAGE = (
+    "Generation is temporarily delayed. Your progress is saved and will "
+    "retry automatically."
+)
+
+#: Shown when the run has stopped and only the customer can unblock it.
+FACTUAL_MESSAGE = (
+    "We couldn't verify this match. Add the match date or competition."
+)
+
+#: The last resort: retries are spent, or the checkpoint could not be read.
+#: Still not a blame message -- the topic is not at fault for a system that
+#: ran out of attempts.
+EXHAUSTED_MESSAGE = (
+    "This generation could not be completed. Your topic is fine — please try "
+    "again."
+)
+
+
+def progress_message(stage: str) -> str:
+    return PROGRESS_MESSAGES.get(stage, "Working on your video…")
+
+
+def customer_failure_message(
+    kind: FailureKind | str | None,
+    *,
+    will_retry: bool,
+) -> str:
+    """The customer-facing sentence for a stopped run.
+
+    `will_retry` is what actually happens next, not what the failure was. A
+    recoverable failure that has run out of attempts must not keep promising an
+    automatic retry that is never coming -- and it must still not blame the
+    topic, because the topic was never the problem.
+    """
+    if kind in (FailureKind.FACTUAL, FailureKind.FACTUAL.value):
+        return FACTUAL_MESSAGE
+    return RECOVERABLE_MESSAGE if will_retry else EXHAUSTED_MESSAGE
 
 
 class StageFallbackContract(BaseModel):

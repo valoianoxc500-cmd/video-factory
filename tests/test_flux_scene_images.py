@@ -41,17 +41,40 @@ def test_story_channels_use_flux_in_every_language(slug, language):
     assert config.image_sourcing.generated_fallback_model == "fal-ai/flux/schnell"
 
 
-def test_football_is_not_routed_to_flux():
-    """Requirement 1: Football image generation is untouched."""
+def test_football_uses_flux_only_for_identity_free_beats():
+    """Football reaches the cheap generator, and the router says when.
+
+    This test used to assert the opposite -- that Football never touched fal
+    at all -- and the config had already moved on without it. The policy now
+    is narrower than either: the cheap generator is for beats that assert
+    nothing (a stadium, a crowd, a ball), a named person needs a verified face
+    reference and a reference-capable model, and a match event or a scoreline
+    is never generated at all.
+    """
+    from core.visual_router import BeatClass, generation_is_safe
+
     config = load_channel_config("football_news")
-    assert "fal" not in config.image_sourcing.generated_fallback_model
-    assert "flux" not in config.image_sourcing.generated_fallback_model.lower()
+    assert config.image_sourcing.generated_fallback_model == "fal-ai/flux/schnell"
+    assert config.image_sourcing.max_safe_fallback_visuals > 0
+
+    # fal's Schnell is text-to-image, so it can never be the model that draws
+    # a person from a face: that path is configured separately and is not fal.
+    person_model = config.image_sourcing.generated_player_reconstruction_model
+    assert not person_model.startswith("fal-ai/")
+
+    assert generation_is_safe(BeatClass.STADIUM_LOCATION, has_identity_reference=False)
+    assert not generation_is_safe(
+        BeatClass.EXACT_MATCH_EVENT, has_identity_reference=True
+    )
+    assert not generation_is_safe(
+        BeatClass.NAMED_REAL_PERSON, has_identity_reference=False
+    )
 
 
-def test_football_config_does_not_mention_fal_at_all():
-    text = (CHANNELS / "football_news.json").read_text(encoding="utf-8")
-    assert "fal-ai" not in text
-    assert "flux" not in text.lower()
+def test_football_still_searches_for_a_real_photograph_first():
+    """Cheap generation is a fallback, not a shortcut past sourcing."""
+    config = load_channel_config("football_news")
+    assert config.image_sourcing.web_photos_only is True
 
 
 def test_thumbnails_are_not_routed_to_flux():

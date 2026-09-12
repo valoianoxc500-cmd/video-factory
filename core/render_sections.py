@@ -82,6 +82,7 @@ _VISUAL_TO_COMPONENT = {
     "donut_gauge": "DonutGauge",
     "comparison_bars": "ComparisonBars",
     "info_card": "InfoCard",
+    "verified_card": "VerifiedCard",
     "info_slide": "InfoSlide",
     "text_only_slide": "TextOnlySlide",
     "fact_highlight": "FactHighlight",
@@ -737,6 +738,27 @@ async def _render_remotion_scene(
 
 
 
+def _component_minimum(slot, min_seconds: float, donor_min: float) -> float:
+    """How long this component slot needs to be readable.
+
+    The standard minimum is written for a prose InfoCard or a chart, which take
+    a while to read. A verified information card is five short lines -- a
+    scoreline, a competition, a date, a source -- and holding it for the full
+    prose minimum does two bad things at once when a section has several of
+    them: it repeats the same panel for most of the section, and the time has
+    to come from somewhere, which starved a photograph in section 1 of run
+    99db2deb down to a single frame.
+    """
+    if slot is None:
+        return min_seconds
+    if slot.visual == "verified_card" or (
+        slot.visual == "info_card"
+        and (getattr(slot, "props", None) or {}).get("verified_card")
+    ):
+        return max(donor_min, 3.0)
+    return min_seconds
+
+
 def _enforce_component_minimums(
     section: ScriptSection,
     sub_durations: list[float],
@@ -753,15 +775,17 @@ def _enforce_component_minimums(
     num_slots = len(sub_durations)
     non_overlay_slots = section.non_overlay_slots
     is_component = []
+    minimums: list[float] = []
     for i in range(num_slots):
         slot = non_overlay_slots[i] if i < len(non_overlay_slots) else None
         is_component.append(slot is not None and slot.visual in _VS.COMPONENT_TYPES)
+        minimums.append(_component_minimum(slot, min_seconds, donor_min))
 
     # Find which component slots are under minimum
     deficit = 0.0
     for i in range(num_slots):
-        if is_component[i] and sub_durations[i] < min_seconds:
-            deficit += min_seconds - sub_durations[i]
+        if is_component[i] and sub_durations[i] < minimums[i]:
+            deficit += minimums[i] - sub_durations[i]
 
     if deficit <= 0:
         return sub_durations
@@ -781,8 +805,8 @@ def _enforce_component_minimums(
 
     adjusted = list(sub_durations)
     for i in range(num_slots):
-        if is_component[i] and adjusted[i] < min_seconds:
-            adjusted[i] = min_seconds
+        if is_component[i] and adjusted[i] < minimums[i]:
+            adjusted[i] = minimums[i]
         elif not is_component[i]:
             give = max(adjusted[i] - donor_min, 0) * steal_ratio
             adjusted[i] -= give
@@ -1310,6 +1334,44 @@ def build_section_composition_plan(
 
 # ── Main stage ───────────────────────────────────────────────────
 
+def _section_props_fingerprint(props: dict) -> str:
+    """A stable digest of everything the renderer will draw for a section.
+
+    The whole props payload, so any change to a slot -- a different file, a
+    beat that became a card, a reordered sequence, a new duration split --
+    produces a different value. Sorted keys so an equivalent payload does not
+    look different because a dict happened to serialise in another order.
+    """
+    import hashlib
+
+    payload = json.dumps(props, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def _fingerprint_path(output_path: Path) -> Path:
+    return output_path.with_suffix(".props.sha256")
+
+
+def _cached_fingerprint(output_path: Path) -> str:
+    """What the clip on disk was rendered from, or "" if we cannot tell.
+
+    An unknown fingerprint deliberately does not match anything, so a clip
+    rendered before this existed is re-rendered once rather than trusted.
+    """
+    path = _fingerprint_path(output_path)
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _write_fingerprint(output_path: Path, fingerprint: str) -> None:
+    try:
+        _fingerprint_path(output_path).write_text(fingerprint, encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - disk-level failure
+        logger.warning(f"could not record render fingerprint: {exc}")
+
+
 async def render_sections(
     script: Script,
     config: ChannelConfig,
@@ -1362,14 +1424,23 @@ async def render_sections(
         )
         expected_duration = _expected_section_clip_duration(section, xfade_pad_frames, fps)
 
-        # Skip only when the cached clip still matches the script's audio duration.
+        # Skip only when the cached clip matches both the script's audio
+        # duration AND the visuals it was rendered from. Duration alone was
+        # not enough: replacing a beat's picture, or turning it into a card,
+        # changes what the section looks like without changing how long it
+        # runs, so a resumed run silently re-shipped the previous render and
+        # every new visual was thrown away between render and assemble.
+        fingerprint = _section_props_fingerprint(entry["props"])
         if output_path.exists():
-            if _section_clip_matches_duration(output_path, expected_duration):
+            if (
+                _section_clip_matches_duration(output_path, expected_duration)
+                and _cached_fingerprint(output_path) == fingerprint
+            ):
                 logger.info(f"Section clip already exists: {output_path.name}")
                 return {"section_id": section.id, "cached": True}
             logger.info(
-                "Section clip duration changed; rerendering "
-                f"{output_path.name} for {expected_duration:.2f}s"
+                f"Section clip is stale; rerendering {output_path.name} "
+                f"for {expected_duration:.2f}s"
             )
 
         slots = entry["props"]["slots"]
@@ -1381,6 +1452,7 @@ async def render_sections(
                 "SectionComposition", props_path, output_path,
                 w, h, fps, rd, total_frames,
             )
+        _write_fingerprint(output_path, fingerprint)
         slot_summary = ", ".join(
             s.get("preset", s.get("component", "video")) for s in slots
         )

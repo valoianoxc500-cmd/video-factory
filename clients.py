@@ -591,8 +591,14 @@ _GATEWAY_CACHE: dict[str, str] = {}
 
 
 def reset_gateway_cache() -> None:
-    """Clear the per-run answer cache. Called between runs and by tests."""
+    """Clear the per-run answer cache. Called between runs and by tests.
+
+    Also closes the quota breaker: it is per-run state like the cache, and a
+    breaker left open from a previous run would make the next one skip Gemini
+    for no reason.
+    """
     _GATEWAY_CACHE.clear()
+    reset_quota_circuit()
 
 
 _RETRYABLE_STATUS_MARKERS = (
@@ -618,19 +624,103 @@ def _is_retryable_model_error(exc: Exception) -> bool:
     return any(marker in text for marker in _RETRYABLE_STATUS_MARKERS)
 
 
+def _is_quota_error(exc: Exception) -> bool:
+    """A quota refusal, as opposed to a transient server blip.
+
+    Worth separating: a 500 clears on its own and is worth waiting out, while
+    an exhausted quota will refuse every caller for the rest of the window no
+    matter how patiently they queue.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    return "429" in text or "RESOURCE_EXHAUSTED" in text
+
+
+# ── quota circuit breaker ────────────────────────────────────────────
+#
+# The retry ladder above is per-call, and image sourcing runs many beats
+# concurrently, so an exhausted quota multiplies: one real Football run made
+# 29 Gemini calls in five minutes, every one refused, before the stage gave
+# up. Each individual caller was behaving correctly and the aggregate was a
+# storm.
+#
+# Once enough consecutive quota refusals arrive, this stops the *waiting*.
+# Callers still get their exception immediately and take their own fallback
+# path -- web search, licensed stock, the deterministic paths -- instead of
+# every beat independently sleeping through four minutes of backoff.
+#
+# It is not a global kill switch: a single success resets it, and it never
+# suppresses a non-quota error.
+_QUOTA_TRIP_THRESHOLD = 6
+_QUOTA_COOLDOWN_SECONDS = 120.0
+_quota_failures = 0
+_quota_open_until = 0.0
+
+
+def quota_circuit_open() -> bool:
+    """Whether Gemini is being skipped right now because quota is exhausted."""
+    return time.monotonic() < _quota_open_until
+
+
+def reset_quota_circuit() -> None:
+    """Close the breaker. Called between runs and by tests."""
+    global _quota_failures, _quota_open_until
+    _quota_failures = 0
+    _quota_open_until = 0.0
+
+
+def _record_quota_failure(operation: str) -> None:
+    global _quota_failures, _quota_open_until
+    _quota_failures += 1
+    if _quota_failures >= _QUOTA_TRIP_THRESHOLD and not quota_circuit_open():
+        _quota_open_until = time.monotonic() + _QUOTA_COOLDOWN_SECONDS
+        logger.warning(
+            f"[gemini] quota refused {_quota_failures} calls in a row "
+            f"({operation} most recently); pausing model calls for "
+            f"{_QUOTA_COOLDOWN_SECONDS:.0f}s so other sourcing paths run "
+            f"instead of queueing behind an exhausted quota"
+        )
+        # The customer-visible half of the same event. The worker matches this
+        # marker and shows "Still working -- we're using another source."
+        # Nothing about which provider, or that it was a quota, crosses over.
+        logger.warning("[recovery] degraded provider; continuing on another source")
+
+
+def _record_model_success() -> None:
+    global _quota_failures
+    _quota_failures = 0
+
+
 async def _call_model_with_retry(operation: str, call):
     """Await `call()`, retrying quota and transient server errors with backoff.
 
     Shared quota on preview models produces sporadic 429s; without this a
     single blip aborts a pipeline run that is otherwise minutes from done.
+
+    When the quota breaker is open the call is attempted once and its failure
+    returned immediately: the caller's own fallback is a better use of the
+    next four minutes than sleeping.
     """
     last_exc: Exception | None = None
-    for attempt in range(1, _MODEL_CALL_MAX_ATTEMPTS + 1):
+    attempts = 1 if quota_circuit_open() else _MODEL_CALL_MAX_ATTEMPTS
+    for attempt in range(1, attempts + 1):
         try:
-            return await call()
+            result = await call()
+            _record_model_success()
+            return result
         except Exception as exc:
             last_exc = exc
-            if attempt == _MODEL_CALL_MAX_ATTEMPTS or not _is_retryable_model_error(exc):
+            if attempt == attempts or not _is_retryable_model_error(exc):
+                # Counted once per *call*, not once per attempt. Counting
+                # attempts would trip the breaker inside a single caller's
+                # own backoff ladder and cut short the patient retry that
+                # exists to ride out a brief blip -- the breaker is meant to
+                # measure how many separate callers quota has refused.
+                if _is_quota_error(exc):
+                    _record_quota_failure(operation)
+                raise
+            # A quota refusal that has already tripped the breaker is not
+            # worth waiting out; give the caller its fallback now.
+            if quota_circuit_open():
                 raise
             delay = min(
                 _MODEL_CALL_BASE_DELAY * (2 ** (attempt - 1)),
@@ -638,7 +728,7 @@ async def _call_model_with_retry(operation: str, call):
             )
             logger.warning(
                 f"[gemini] {operation} attempt {attempt}/"
-                f"{_MODEL_CALL_MAX_ATTEMPTS} failed ({str(exc)[:120]}); "
+                f"{attempts} failed ({str(exc)[:120]}); "
                 f"retrying in {delay:.0f}s"
             )
             await asyncio.sleep(delay)

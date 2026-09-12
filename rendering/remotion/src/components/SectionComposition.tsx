@@ -1,4 +1,4 @@
-import React from "react";
+﻿import React from "react";
 import {
   AbsoluteFill,
   Sequence,
@@ -17,6 +17,7 @@ import { BackdropFigureScene } from "./BackdropFigureScene";
 import { TitleCard } from "./TitleCard";
 import { FactHighlight } from "./FactHighlight";
 import { InfoCard } from "./InfoCard";
+import { VerifiedCard } from "./VerifiedCard";
 import { InfoSlide } from "./InfoSlide";
 import { TextOnlySlide } from "./TextOnlySlide";
 import { SubscribeCTA } from "./SubscribeCTA";
@@ -87,6 +88,7 @@ const COMPONENTS: Record<string, ComponentType<any>> = {
   TitleCard,
   FactHighlight,
   InfoCard,
+  VerifiedCard,
   InfoSlide,
   TextOnlySlide,
   ImageScene,

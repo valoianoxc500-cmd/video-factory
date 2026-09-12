@@ -41,6 +41,7 @@ import settings  # noqa: E402,F401
 
 import storage  # noqa: E402
 import diskspace  # noqa: E402
+from core import reliability  # noqa: E402
 from core.reliability import deterministic_workspace  # noqa: E402
 from singleton import (  # noqa: E402
     RESTART_GRACE_SECONDS,
@@ -104,19 +105,38 @@ MAX_RECOVERY_ATTEMPTS = int(os.environ.get("MAX_RECOVERY_ATTEMPTS", "3"))
 
 # Fraction of overall progress attributed to each pipeline stage, cumulative.
 # Weighted by observed wall-clock share so the bar tracks reality.
+# Percentages live here; the words live in core.reliability so that every
+# customer-visible string in the product is written in one place and none of
+# them can name a provider, a model or an internal stage.
+STAGE_PERCENT: dict[str, int] = {
+    "planning": 5,
+    "script": 30,
+    "image_source": 45,
+    "audio_source": 58,
+    "animation": 60,
+    "process": 62,
+    "render_sections": 85,
+    "assemble": 90,
+    "thumbnail": 96,
+    "final_review": 99,
+}
+
 STAGE_PROGRESS: dict[str, tuple[int, str]] = {
-    "planning": (5, "Choosing the angle for this topic"),
-    "script": (30, "Writing the Arabic script and visual plan"),
-    "image_source": (45, "Finding real photographs of the subject"),
-    "audio_source": (58, "Generating Arabic narration and caption timings"),
-    "process": (62, "Preparing images for the 1080x1920 canvas"),
-    "render_sections": (85, "Rendering scenes with motion and captions"),
-    "assemble": (90, "Mixing narration, music and SFX"),
-    "thumbnail": (96, "Creating the thumbnail"),
-    "final_review": (99, "Final quality review"),
+    stage: (pct, reliability.progress_message(stage))
+    for stage, pct in STAGE_PERCENT.items()
 }
 
 _STAGE_RE = re.compile(r"\[stage\]\s+(\w+)\s+started")
+
+# The pipeline prints this when it has stepped down to a slower or lesser
+# source and is still going -- a paused provider, a fallback tier. It carries
+# no provider name by design, so nothing internal can leak through it into the
+# customer's status line.
+_DEGRADED_RE = re.compile(r"\[recovery\]\s+degraded")
+
+# Printed when sourcing has stopped hunting for photographs on some beats and
+# is building their visuals locally instead.
+_FALLBACK_VISUALS_RE = re.compile(r"\[recovery\]\s+building-fallback-visuals")
 
 
 class WorkerConfigError(RuntimeError):
@@ -526,6 +546,23 @@ def run_pipeline(client: httpx.Client, job: dict) -> None:
             )
             last_post = time.monotonic()
 
+        # A provider stepped down but the run is still going. Say so, rather
+        # than leaving the customer on a status line that has not moved for
+        # two minutes and looks indistinguishable from a hang.
+        if _DEGRADED_RE.search(line) or _FALLBACK_VISUALS_RE.search(line):
+            last_post = time.monotonic()
+            post_update(
+                client, job_id,
+                status="running",
+                stage=last_stage, progress=last_pct,
+                message=(
+                    reliability.PROGRESS_MESSAGES["process"]
+                    if _FALLBACK_VISUALS_RE.search(line)
+                    else reliability.DEGRADED_MESSAGE
+                ),
+            )
+            continue
+
         match = _STAGE_RE.search(line)
         if match:
             stage = match.group(1)
@@ -804,24 +841,46 @@ def _serve(lock: SingleInstanceLock, once: bool) -> int:
                 # workspace or blindly repeats completed paid stages.
                 recoverable = True
                 retries = 0
+                kind = None
                 try:
                     from core.utils import load_checkpoint
                     checkpoint = load_checkpoint(workspace_for_job(job))
                     state = (checkpoint.run_attempt if checkpoint else {}) or {}
                     recoverable = bool(state.get("recoverable", True))
                     retries = int(state.get("retry_count", 0))
+                    kind = state.get("failure_kind")
                 except Exception:
                     recoverable = False
                 should_requeue = recoverable and retries < MAX_RECOVERY_ATTEMPTS
+                customer_message = reliability.customer_failure_message(
+                    kind, will_retry=should_requeue
+                )
+                logger.info(
+                    f"job {job['id']}: "
+                    f"{reliability.result_status(completed=False, recoverable=recoverable)}"
+                    f" (retry {retries}/{MAX_RECOVERY_ATTEMPTS})"
+                )
                 post_update(
                     client, job["id"],
                     attempts=4,
                     status="queued" if should_requeue else "error", progress=0,
-                    message=("Saved progress will resume automatically." if should_requeue else "This generation could not be completed."),
+                    message=customer_message,
                     # Diagnostics remain in worker logs and checkpoint.json;
                     # never hand a process tail or provider detail to a user.
-                    error=(None if should_requeue else "Generation could not be completed. Please try again."),
+                    error=(None if should_requeue else customer_message),
                 )
+                if should_requeue:
+                    # Wait before the job becomes claimable again. Resuming
+                    # instantly is how a quota refusal turns into three
+                    # identical refusals in ninety seconds: the first step here
+                    # outlasts the model cooldown. Bounded, and capped so one
+                    # stuck job cannot hold the queue indefinitely.
+                    delay = reliability.retry_delay_seconds(retries)
+                    logger.info(
+                        f"job {job['id']}: resuming from its checkpoint in "
+                        f"{int(delay)}s"
+                    )
+                    time.sleep(delay)
                 # A failed run leaves the same intermediates a successful one
                 # does, minus anything worth keeping. Without this, repeated
                 # failures fill the disk faster than successes would.

@@ -679,6 +679,54 @@ def _script_schema(
 }}"""
 
 
+def end_hook_rules(language: str = "") -> str:
+    """Make the video end on purpose instead of stopping.
+
+    A football short that ends on its last fact has no reason for anyone to
+    comment, and the run this was written for did exactly that: the final
+    section delivered the winning goal and simply stopped. The hook has to come
+    out of *this* match -- the teams, the result, the angle the script took --
+    which is also why it cannot be one canned sentence pasted into every video.
+
+    The constraints are the interesting part. A hook that speculates about a
+    fixture nobody has scheduled, or quotes a statistic the research never
+    retrieved, is an invented fact wearing a question mark.
+    """
+    arabic = str(language or "").lower().startswith("ar")
+    voice = (
+        "Write it in natural spoken Arabic the way a football account actually "
+        "talks -- short and conversational, not formal Modern Standard prose "
+        "and not a literal translation of an English sentence."
+        if arabic else
+        "Write it in natural spoken English, short and conversational."
+    )
+    return _block(f"""
+        END HOOK (required):
+        - The FINAL section must end with one short question or challenge to the
+          viewer. Do not let the script simply stop after the last fact.
+        - Build it from THIS match: the two teams, the actual result, and the
+          angle this video took. A hook that would fit any football video is a
+          failed hook.
+        - Aim it at a comment: a prediction, an opinion, a debate, a
+          man-of-the-match call, or a comparison between the two sides.
+        - {voice}
+        - One or two sentences at most.
+
+        The end hook must NOT:
+        - name or imply a future fixture, date, or competition round that the
+          research context does not contain;
+        - contain any statistic, score or record that is not in the research
+          context;
+        - be a generic "subscribe", "follow for more" or "like the video" as
+          the ending. A subscribe CTA may exist elsewhere, but it is not the
+          end hook.
+
+        Give the final section its own last visual slot for the hook: a team
+        matchup, a stadium, a player, or a score graphic. It follows the same
+        sourcing rules as every other slot.
+    """)
+
+
 def script_generation_prompt(
     topic: str,
     video_type: str,
@@ -715,6 +763,7 @@ def script_generation_prompt(
     min_visible_beat_seconds: float = 2.5,
     max_visual_hold_seconds: float = 5.0,
     web_photos_only: bool = False,
+    end_hook: bool = False,
 ) -> str:
     business_context = _format_business_strategy_context(
         channel_goal=channel_goal,
@@ -792,6 +841,7 @@ def script_generation_prompt(
         "VISUAL TOOLKIT:\n" + toolkit,
         policy,
         visual_rules,
+        end_hook_rules(language) if end_hook else "",
         _content_safety_rules(web_photos_only),
     )
     input_block = _join_prompt_sections(
@@ -902,6 +952,7 @@ def script_review_prompt(
     numbering_order: str | None = None,
     max_visual_hold_seconds: float = 5.0,
     web_photos_only: bool = False,
+    grounded_brief: str = "",
 ) -> str:
     numbering_rule = ""
     if numbering_order == "ascending":
@@ -915,7 +966,37 @@ def script_review_prompt(
             "with no resets or skips in the order sections appear."
         )
     task = "Review this YouTube video script for quality."
+
+    # The grounding layer has already verified these facts against retrieved
+    # citations. Without them the reviewer judges dates and results from its
+    # own training memory, and a real run was rejected for exactly that: the
+    # script said the match was on 8 September 2026, which the retrieved ESPN
+    # report confirms, and the reviewer refused it because it remembered a
+    # 2021 fixture between the same clubs.
+    #
+    # This elevates only what the grounding layer approved -- never the user's
+    # raw topic text -- so it cannot be used to smuggle an unverified claim
+    # past the reviewer.
+    grounded_block = ""
+    if grounded_brief.strip():
+        grounded_block = _block(f"""
+            VERIFIED FACTS FOR THIS RUN (retrieved and cited during research):
+
+            {grounded_brief.strip()}
+
+            These are authoritative for this script. Where they conflict with
+            your own recollection -- a date, a scoreline, a competition, a
+            squad -- the verified facts above are correct and your prior is
+            not. Do NOT lower any score, and do NOT reject a visual prompt,
+            because a fact above disagrees with what you remember.
+
+            You must still reject anything the facts above do NOT support:
+            an invented statistic, an unsupported quote, a claimed event with
+            no line above backing it.
+        """)
+
     rules = _join_prompt_sections(
+        grounded_block,
         _block(f"""
             Score each criterion from 1-10:
             1. Hook strength â€” Does the first 30 seconds grab attention?
@@ -1018,6 +1099,14 @@ def image_review_prompt(
         prompt_line = f"\n  Target prompt: {target_prompt}" if target_prompt else ""
         opener_tag = "yes" if s.get("is_section_opener") else "no"
         text_only_tag = "yes" if s.get("text_only") else "no"
+        # The beat's contract, identical to the one the candidate selector was
+        # given. Indented into this image's block so a per-image verdict is
+        # made against this beat's requirement rather than the video's topic.
+        requirement = str(s.get("requirement") or "").strip()
+        requirement_line = ""
+        if requirement:
+            body = "\n".join(f"  {line}" for line in requirement.splitlines())
+            requirement_line = f"\n{body}"
         context_lines.append(
             f"Image {s['section_id']}.{sub_idx}{b_roll_tag} ({s['image_filename']}):\n"
             f"  Narration: {s['narration'][:400]}...\n"
@@ -1025,6 +1114,7 @@ def image_review_prompt(
             f"  Section opener: {opener_tag}\n"
             f"  Text-only component: {text_only_tag}\n"
             f"  Search keywords: {s['image_search_keywords']}{prompt_line}"
+            f"{requirement_line}"
         )
     context_str = "\n\n".join(context_lines)
 
@@ -1183,12 +1273,21 @@ def pexels_candidate_selection_prompt(
     prompt: str,
     num_images: int,
     narration: str = "",
+    requirement: str = "",
 ) -> str:
-    """Prompt for Vision API to pick the best candidate photo before saving."""
+    """Prompt for Vision API to pick the best candidate photo before saving.
+
+    `requirement` is the beat's visual contract from core.visual_contract --
+    who the beat is about, which club, which fixture, and whether the image
+    must be of the event itself. The review gate is given the identical text,
+    so a photo cannot satisfy one and fail the other, which is how a picture of
+    the wrong player reached the finished video.
+    """
     prompt_line = f"\nDESIRED IMAGE: {prompt}" if prompt else ""
     narration_line = (
         f"\nNARRATION THIS IMAGE APPEARS UNDER: {narration}" if narration else ""
     )
+    requirement_lines = f"\n\n{requirement.strip()}" if requirement.strip() else ""
     return _prompt_scaffold(
         task=f"Review {num_images} candidate stock photos for a single visual slot.",
         rules=_block("""
@@ -1268,7 +1367,7 @@ If none are good enough, respond:
 }
 
 winner_index is 1-based (1 = first image, 2 = second, etc.).""",
-        input_block=f'The images are numbered 1 through {num_images} in the order they are provided.\nSEARCH KEYWORDS: {keywords}{prompt_line}{narration_line}',
+        input_block=f'The images are numbered 1 through {num_images} in the order they are provided.\nSEARCH KEYWORDS: {keywords}{prompt_line}{narration_line}{requirement_lines}',
     )
 
 
@@ -1421,6 +1520,7 @@ def package_review_prompt(
     narration_summary: str,
     caption_highlight: str = "yellow",
     subject_domain: str = "",
+    grounded_brief: str = "",
 ) -> str:
     """Build the final package review prompt.
 
@@ -1429,8 +1529,30 @@ def package_review_prompt(
     A Horror run was rejected for using "red text" when red is exactly what its
     config specifies, and criterion 7 would flag every frame of a horror video
     as "not association football".
+
+    `grounded_brief` is the run's citations, for the same reason the script
+    gate gets them. Without it this gate rejected a finished video because an
+    on-screen graphic gave the cited match date, 8 September 2026, which the
+    reviewer called "in the future and factually incorrect ... which occurred
+    in 2021" -- reading its own training cutoff as the present and its memory
+    of an older fixture as the record. The citations are the record.
     """
     tags_str = ", ".join(tags)
+    grounded_block = ""
+    if grounded_brief.strip():
+        grounded_block = f"""
+VERIFIED FACTS FOR THIS RUN (retrieved and cited just now):
+{grounded_brief.strip()}
+
+These citations are the record for this video, and they outrank your own
+memory and your sense of what "now" is. Do not flag a date, score, competition
+or result as wrong, impossible or "in the future" because it disagrees with a
+match you remember or with your training cutoff -- if the lines above support
+it, it is correct. You must still reject anything they do NOT support: a
+different scoreline, an invented statistic, a player the citations never
+mention, or a frame showing the wrong person.
+"""
+
     domain_rule = (
         f"and anything outside this channel's subject area ({subject_domain})"
         if subject_domain
@@ -1448,7 +1570,7 @@ VIDEO METADATA:
 
 NARRATION SUMMARY:
 {narration_summary}
-
+{grounded_block}
 The images provided are (in order):
 1. Thumbnail (first image)
 2. Frame screenshots from the video (remaining images)

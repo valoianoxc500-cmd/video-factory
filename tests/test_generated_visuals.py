@@ -247,5 +247,12 @@ def test_football_news_has_a_bounded_generic_fallback_after_real_sources():
     assert sourcing.get("generated_fallback_model") == "fal-ai/flux/schnell"
     assert sourcing.get("max_generated_fallback_images") == 4
     assert sourcing.get("allow_generated_player_reconstruction") is True
-    assert sourcing.get("max_generated_player_reconstructions") == 2
+    # Bounded, not pinned. Reconstruction is now the primary route for a
+    # named-person beat that no real photograph covers -- it draws the player
+    # from a verified face reference rather than letting the beat die -- so a
+    # ceiling of two made the ladder decorative on a script that talks about
+    # five people across twenty beats. It must still be a ceiling.
+    reconstructions = sourcing.get("max_generated_player_reconstructions")
+    assert isinstance(reconstructions, int)
+    assert 0 < reconstructions <= 12
     assert sourcing.get("web_photos_only") is True

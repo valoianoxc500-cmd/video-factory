@@ -377,6 +377,20 @@ class ImageSourcingConfig(BaseModel):
     # never overrides a slot that explicitly names a photo source, so a beat
     # with a strong licensed visual still gets it.
     prefer_generated_visuals: bool = False
+    # The floor under the photo ladder. When the relevance gate has spent its
+    # attempts and some beats still have no acceptable picture, those beats
+    # become editorial cards built from the run's own citations rather than
+    # taking the whole video down with them. Only reached after the gate has
+    # finished; never applied to a beat whose photograph passed; and inert on a
+    # run with no cited facts, because then there is nothing honest to print.
+    # See core/verified_cards.py.
+    verified_card_fallback: bool = False
+    # How many refused beats may be drawn on the cheap generator rather than
+    # becoming information cards. Only beats the visual router says carry no
+    # identity and no event claim are eligible, so this is a spend ceiling, not
+    # a truth setting -- raising it cannot let a generated player or a
+    # generated goal through. See core/visual_router.py.
+    max_safe_fallback_visuals: int = 0
     generate_info_slide_illustrations: bool = True
     generate_info_card_illustrations: bool = True
     style_prompt_suffix: str = ""
@@ -398,6 +412,11 @@ class YouTubeConfig(BaseModel):
 class ScriptStyleConfig(BaseModel):
     tone: str = ""
     instructions: str = ""
+    # Whether the final section must end on a question aimed at the comments,
+    # built from this video's own grounded facts. Off by default: a horror
+    # story that ends by asking who your man of the match was is worse than one
+    # that just ends. See prompts.end_hook_rules.
+    require_end_hook: bool = False
 
 
 class ContentFamilyConfig(BaseModel):
@@ -671,8 +690,11 @@ class VisualSlot(BaseModel):
     IMAGE_TYPES = {"google_photo", "stock_photo", "ai_photo", "ai_illustration", "b_roll"}
     CHART_TYPES = {"bar_chart", "line_chart", "donut_gauge", "comparison_bars"}
     BACKDROP_FIGURE_TYPES = {"fact_highlight", "title_card", "title_banner", "subscribe_cta"}
-    COMPONENT_TYPES = BACKDROP_FIGURE_TYPES | {"info_card", "info_slide", "text_only_slide", "bar_chart", "line_chart", "donut_gauge", "comparison_bars"}
+    COMPONENT_TYPES = BACKDROP_FIGURE_TYPES | {"info_card", "info_slide", "text_only_slide", "bar_chart", "line_chart", "donut_gauge", "comparison_bars", "verified_card"}
     ILLUSTRATION_TYPES = {"info_card", "info_slide", "ai_illustration"}
+    # `verified_card` is drawn entirely from the run's citations and never
+    # sourced, so it is deliberately absent here: asking for a photograph to
+    # illustrate it is what the card exists to avoid.
     SOURCEABLE_TYPES = IMAGE_TYPES | {"info_card", "info_slide"} | BACKDROP_FIGURE_TYPES
     VISUAL_POLICIES = {
         "source_as_written",

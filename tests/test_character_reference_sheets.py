@@ -271,11 +271,18 @@ def test_the_generator_entry_point_accepts_a_reference():
 
 
 def test_both_generation_call_sites_pass_the_reference():
-    """A helper that exists but is wired into neither call site fixes nothing."""
+    """A helper that exists but is wired into neither call site fixes nothing.
+
+    Counted as "at least", not "exactly". Football's person-reconstruction
+    path is a third caller that hands the generator an identity reference --
+    a face, rather than an Animated Stories character sheet -- and pinning the
+    count to two would make adding any further reference-aware caller fail a
+    test about Animated Stories wiring.
+    """
     from pathlib import Path as P
 
     source = (
         P(__file__).resolve().parent.parent / "core" / "image_sourcer.py"
     ).read_text(encoding="utf-8")
-    assert source.count("reference_image=reference") == 2
+    assert source.count("reference_image=reference") >= 2
     assert source.count("_with_reference_lock(") >= 3  # definition + both sites

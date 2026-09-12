@@ -506,11 +506,25 @@ async def run_pipeline(
             _finalize_total_duration()
         return bool(stopping and stage == "planning")
 
-    def fail_pipeline(message: str) -> None:
+    def fail_pipeline(message: str, *, recoverable: bool = True) -> None:
+        """Stop the run, recording whether resuming it could ever help.
+
+        The default stays recoverable on purpose. Guessing "terminal" wrongly
+        strands a paid run that one retry would have finished, whereas guessing
+        "recoverable" wrongly costs one bounded, checkpointed resume. Only a
+        caller that positively knows the run is blocked on evidence -- not on a
+        provider -- passes False.
+        """
+        from core.reliability import FailureKind
+
         logger.error(message)
         checkpoint.last_error = message
         state = RunAttempt.model_validate(checkpoint.run_attempt or {})
-        state.finish(recoverable=True, reason=message)
+        state.finish(
+            recoverable=recoverable,
+            reason=message,
+            kind=FailureKind.RECOVERABLE if recoverable else FailureKind.FACTUAL,
+        )
         checkpoint.run_attempt = state.model_dump(mode="json")
         save_checkpoint(ws, checkpoint)
         _finalize_outputs()
@@ -817,6 +831,11 @@ async def run_pipeline(
             return result
 
         tasks = []
+        # A stage that stopped because no cited fact exists is the one media
+        # failure a retry cannot fix. Recorded here as it is caught, so the
+        # decision is made by the code that knows, not by matching strings
+        # against an error message later.
+        factual_stages: list[str] = []
         if run_images:
             from core.image_sourcer import source_images
             tasks.append(("image_source", _timed("image_source", source_images(script, config, ws))))
@@ -887,6 +906,11 @@ async def run_pipeline(
                             result.result,
                             include_feedback=True,
                         )
+                        # Set by the sourcer when the card fallback had nothing
+                        # cited to draw on. Every other image_review failure is
+                        # a picture problem, which another attempt can fix.
+                        if getattr(result, "factual_limit", False):
+                            factual_stages.append(stage_name)
                         if "image_review" in allowed_review_failures:
                             _log_allowed_review_failure("image_review")
                             checkpoint.last_error = None
@@ -918,7 +942,10 @@ async def run_pipeline(
                 pending.clear()
 
         if failed_stages:
-            fail_pipeline("Media sourcing failed for stage(s): " + ", ".join(failed_stages))
+            fail_pipeline(
+                "Media sourcing failed for stage(s): " + ", ".join(failed_stages),
+                recoverable=not any(s in factual_stages for s in failed_stages),
+            )
 
         # Both stages validated their own outputs before being marked
         # complete, so reaching here means the assets are on disk.
@@ -1171,6 +1198,12 @@ async def _run_final_review(
     )
     narration_summary += f"\n\n... ({len(script.sections)} sections total)"
 
+    # The run's own citations. Without them this gate rejected a finished
+    # video for showing the cited match date, calling it "in the future".
+    from core.verified_cards import grounded_brief
+
+    research_brief = grounded_brief(workspace)
+
     def review_prompt(_content):
         return prompts.package_review_prompt(
             title=script.title,
@@ -1178,6 +1211,7 @@ async def _run_final_review(
             tags=script.tags,
             video_type=script.video_type,
             narration_summary=narration_summary,
+            grounded_brief=research_brief,
             # The gate judges captions and subject matter against this
             # channel's own spec. Hardcoding Football News' yellow highlight
             # rejected a Horror package for using the red its config asks for.

@@ -321,6 +321,39 @@ def test_section_clip_rejects_duration_mismatch(monkeypatch, tmp_path):
     assert _section_clip_matches_duration(output_path, expected_duration=10.0) is False
 
 
+def test_a_section_clip_is_reused_only_when_its_visuals_are_unchanged(tmp_path):
+    """Duration alone was the cache key, and that shipped the wrong video.
+
+    Replacing a beat's photograph, or turning it into a card, changes what the
+    section looks like without changing how long it runs. On the real resume of
+    run 99db2deb that meant image_source produced a whole new set of visuals
+    and assemble stitched together the previous render anyway.
+    """
+    from core.render_sections import (
+        _cached_fingerprint,
+        _section_props_fingerprint,
+        _write_fingerprint,
+    )
+
+    before = {"slots": [{"type": "image", "file": "a.png", "durationFrames": 75}]}
+    after = {"slots": [{"type": "component", "component": "InfoCard",
+                        "durationFrames": 75}]}
+
+    assert _section_props_fingerprint(before) != _section_props_fingerprint(after)
+    # Same payload, different key order, must be the same clip.
+    assert _section_props_fingerprint({"a": 1, "b": 2}) == _section_props_fingerprint(
+        {"b": 2, "a": 1}
+    )
+
+    clip = tmp_path / "section_001.mp4"
+    clip.write_bytes(b"x")
+    # A clip rendered before fingerprints existed is not trusted.
+    assert _cached_fingerprint(clip) == ""
+    _write_fingerprint(clip, _section_props_fingerprint(before))
+    assert _cached_fingerprint(clip) == _section_props_fingerprint(before)
+    assert _cached_fingerprint(clip) != _section_props_fingerprint(after)
+
+
 def test_info_card_slot_renders_infocard_component(tmp_path):
     slot = VisualSlot(
         visual="info_card",

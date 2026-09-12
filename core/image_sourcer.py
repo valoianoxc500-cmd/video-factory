@@ -5,6 +5,7 @@ After all images are sourced, Gate #2 reviews them with Gemini Vision.
 """
 
 import asyncio
+import contextvars
 import hashlib
 import io
 import json
@@ -22,6 +23,9 @@ from PIL import Image, ImageFilter, ImageOps
 import clients
 import prompts
 from core import generated_visuals
+from core import verified_cards
+from core import visual_contract
+from core import visual_router
 from core.bilingual_queries import build_bilingual_queries, is_single_script
 from core import semantic_match
 from core.framing import subject_aware_fit, verticality_score
@@ -642,6 +646,7 @@ def _build_sections_context(
     *,
     visual_overrides: dict[tuple[int, int], str] | None = None,
     prompt_overrides: dict[tuple[int, int], str] | None = None,
+    requirements: dict[tuple[int, int], str] | None = None,
 ) -> list[dict]:
     sections_context = []
     for section in script.sections:
@@ -689,8 +694,33 @@ def _build_sections_context(
                 "generated_reconstruction": bool(
                     (slot.props or {}).get("generated_reconstruction")
                 ),
+                # The same contract the candidate selector judged against.
+                "requirement": (requirements or {}).get(key, ""),
             })
     return sections_context
+
+
+def _beat_requirements(script: Script, facts, config: ChannelConfig) -> dict:
+    """The visual contract for every beat, keyed by (section_id, sub_index).
+
+    Built once per review pass and shared, so the selector and the gate cannot
+    drift apart. Empty for channels without grounded football facts -- there is
+    no contract to write without a fixture to write it about.
+    """
+    if facts is None:
+        return {}
+    people, clubs = verified_cards.known_entities(facts, script)
+    out: dict[tuple[int, int], str] = {}
+    for section in script.sections:
+        for sub_idx, slot in enumerate(section.non_overlay_slots, start=1):
+            requirement = visual_contract.derive_requirement(
+                section=section, slot=slot, sub_index=sub_idx, facts=facts,
+                known_people=people, known_clubs=clubs,
+            )
+            out[(section.id, sub_idx)] = visual_contract.requirement_block(
+                requirement
+            )
+    return out
 
 
 def _usable_pexels_key() -> str | None:
@@ -879,6 +909,21 @@ def _plan_slot_visual(*, section, slot: VisualSlot) -> tuple[str, bool]:
     if policy not in VisualSlot.VISUAL_POLICIES:
         raise ValueError(f"Unknown visual_policy '{policy}' for section {section.id}")
 
+    # A verified information card is not sourced, so whatever sourcing policy
+    # the beat carried before it was converted no longer describes it. Repaired
+    # rather than rejected: a resumed run reads a script written by an earlier
+    # pass, and a stale `photo_backed_info_slide` left on a converted beat
+    # failed the whole stage on exactly that resume.
+    if verified_cards.is_verified_card(slot):
+        if policy != "source_as_written":
+            logger.info(
+                f"Section {section.id}: clearing stale visual_policy "
+                f"'{policy}' from a verified information card"
+            )
+            slot.visual_policy = "source_as_written"
+            return "source_as_written", True
+        return policy, False
+
     if slot.visual == "text_only_slide" and (slot.props or {}).get("variant") != "ai_prompt_preview":
         raise ValueError(
             f"Section {section.id}: text_only_slide is reserved for internal AI prompt preview only"
@@ -945,6 +990,22 @@ async def source_images(
         animated_budget.activate(workspace, config)
     _reset_provenance()
     _reset_pexels_dedup()
+    _reset_face_references()
+    _reset_beat_requirements()
+
+    # The contract for every beat, derived once from the grounded script before
+    # anything is searched. Both the candidate selector and the review gate
+    # read from this, so the two judge a photograph against the same written
+    # requirement rather than each forming its own view of "relevant".
+    _run_facts = verified_cards.load_grounded_facts(workspace)
+    # Cards an earlier version of this module wrote are redrawn in the current
+    # design before anything else looks at them. Recorded so the rewritten
+    # script is saved even on a run where nothing else changes.
+    _legacy_cards_migrated = bool(
+        verified_cards.migrate_legacy_cards(script, config, _run_facts)
+    )
+    for (_sid, _sub), _text in _beat_requirements(script, _run_facts, config).items():
+        _REQUIREMENTS_BY_STEM[f"section_{_sid:03d}_{_sub:02d}"] = _text
     # Before the first beat is generated, not after: a sheet attached only at
     # redraw time would leave every first-pass scene drawn blind.
     register_character_sheets(workspace)
@@ -962,7 +1023,7 @@ async def source_images(
     videos_dir.mkdir(parents=True, exist_ok=True)
     target_size = tuple(config.video.resolution)
     fps = config.video.fps
-    script_mutated = False
+    script_mutated = _legacy_cards_migrated
 
     # Build task descriptors, filtering out cached images/videos
     descriptors = []
@@ -1422,7 +1483,13 @@ async def source_images(
     if not image_paths:
         image_paths = sorted(raw_dir.glob("section_*_*.png"))
 
-    sections_context = _build_sections_context(script, raw_dir, videos_dir)
+    # Rebuilt here rather than reused: slots can change type between the
+    # initial derivation and the gate, and the gate must judge what is on disk
+    # now. Same function, so it is still the selector's contract.
+    beat_requirements = _beat_requirements(script, _run_facts, config)
+    sections_context = _build_sections_context(
+        script, raw_dir, videos_dir, requirements=beat_requirements
+    )
 
     def _review_prompt(content):
         # Documentary channels judge b-roll against the scene, not the topic:
@@ -1562,7 +1629,9 @@ async def source_images(
             raw_dir.glob("section_*_*.png")
         )
         image_paths[:] = refreshed
-        sections_context = _build_sections_context(script, raw_dir, videos_dir)
+        sections_context = _build_sections_context(
+            script, raw_dir, videos_dir, requirements=beat_requirements
+        )
         return content
 
     # The stage does not get to report success on its own say-so. Every "this
@@ -1610,7 +1679,41 @@ async def source_images(
                 gate_name="image_review",
                 image_paths=image_paths,
             )
-        except ReviewGateError:
+        except ReviewGateError as gate_error:
+            # The gate has finished. Its verdict on every photograph stands --
+            # nothing below re-reviews, re-admits or softens a rejected picture.
+            # What it does is stop the beats the gate refused from taking the
+            # approved ones down with them: a rejected photo is deleted and the
+            # beat becomes an editorial card of this run's cited facts. Only
+            # the refused beats are touched; a slot that passed keeps its
+            # photograph untouched and unre-reviewed.
+            covered = await _cover_rejected_with_verified_cards(
+                gate_error=gate_error,
+                script=script,
+                config=config,
+                workspace=workspace,
+                sourcing_log=sourcing_log,
+                raw_dir=raw_dir,
+                videos_dir=videos_dir,
+                seen_hashes=seen_hashes,
+            )
+            if covered:
+                script_mutated = True
+                await _reconcile()
+                result = dict(gate_error.result)
+                result.update({
+                    "approved": True,
+                    "flagged_for_review": False,
+                    "verified_cards": covered,
+                    "feedback": (
+                        f"{len(covered)} beat(s) had no acceptable photograph "
+                        f"and now show a grounded information card"
+                    ),
+                })
+                result["sourcing_log"] = sourcing_log
+                result["asset_provenance"] = list(_ASSET_PROVENANCE.values())
+                return result
+
             # The gate rejecting an image is a verdict on the picture, not on
             # whether a file exists -- and the re-source it triggers leaves
             # beats it could not replace with nothing on disk. When the caller
@@ -1635,6 +1738,557 @@ async def source_images(
             logger.warning(f"could not write asset provenance: {exc}")
         if script_mutated:
             save_script(workspace, script)
+
+
+def _last_review(gate_error: ReviewGateError) -> dict:
+    """The reviewer's final verdict, which is the one that still stands.
+
+    Earlier attempts re-sourced the beats they rejected, so only the last pass
+    describes what is on disk now. Using an earlier one would convert a beat
+    whose replacement photograph was accepted.
+    """
+    history = gate_error.result.get("review_history") or []
+    for entry in reversed(history):
+        if isinstance(entry, dict) and entry.get("image_results"):
+            return entry
+    return {}
+
+
+async def _cover_rejected_with_verified_cards(
+    *,
+    gate_error: ReviewGateError,
+    script,
+    config: ChannelConfig,
+    workspace: Path,
+    sourcing_log: list[dict],
+    raw_dir: Path,
+    videos_dir: Path,
+    seen_hashes: set[str] | None = None,
+) -> list[tuple[int, int]]:
+    """Replace the beats the gate refused with cards of this run's own facts.
+
+    Returns the beats converted, or [] if the run must still fail. It fails --
+    correctly -- in three cases:
+
+      * the channel has not opted in;
+      * the reviewer's last verdict named no specific beat, so there is no way
+        to tell an approved photograph from a refused one and converting
+        anything would be guesswork;
+      * research.json holds no citations, so there is no fact to print. This is
+        the genuine factual limit, and inventing a card to get past it is the
+        one thing the fallback must never do.
+    """
+    if not getattr(config.image_sourcing, "verified_card_fallback", False):
+        return []
+
+    rejected = _rejected_slot_keys(_last_review(gate_error))
+    if not rejected:
+        logger.warning(
+            "[verified_card] the final review named no specific beat; "
+            "leaving the gate failure in place rather than guessing which "
+            "photographs to replace"
+        )
+        return []
+
+    facts = verified_cards.load_grounded_facts(workspace)
+    if facts is None:
+        # The genuine factual limit: no photograph, and no citation to print
+        # instead. Marked so the pipeline records it as terminal -- resuming
+        # would re-source the same beats against the same absent evidence.
+        gate_error.factual_limit = True
+        logger.error(
+            "[verified_card] this run has no cited facts, so there is nothing "
+            "truthful to put on a card; the review failure stands"
+        )
+        return []
+
+    logger.info(
+        f"[image_review] {len(rejected)} beat(s) still have no acceptable "
+        f"photograph after {gate_error.result.get('attempts')} attempt(s); "
+        f"the rest keep theirs"
+    )
+    logger.info("[recovery] building-fallback-visuals")
+
+    # A generated stadium is a better answer than a text card, and it is an
+    # honest one: the picture asserts nothing about who was there or what
+    # happened. So the beats that carry no identity and no event claim are
+    # drawn first, and only what is left becomes a card.
+    drawn = await _draw_safe_fallback_visuals(
+        script=script,
+        config=config,
+        facts=facts,
+        targets=set(rejected),
+        sourcing_log=sourcing_log,
+        raw_dir=raw_dir,
+        videos_dir=videos_dir,
+    )
+    remaining = set(rejected) - set(drawn)
+
+    # Named people, from a verified face reference only. Runs after the cheap
+    # tier because it is the expensive one and because a beat the cheap tier
+    # could honestly draw was never a person beat.
+    reconstructed = await _reconstruct_person_beats(
+        script=script,
+        config=config,
+        facts=facts,
+        targets=remaining,
+        sourcing_log=sourcing_log,
+        raw_dir=raw_dir,
+        videos_dir=videos_dir,
+        seen_hashes=seen_hashes if seen_hashes is not None else set(),
+    )
+    remaining -= set(reconstructed)
+    drawn += reconstructed
+
+    carded = verified_cards.apply_verified_cards(
+        script=script,
+        config=config,
+        facts=facts,
+        targets=remaining,
+        raw_dir=raw_dir,
+        videos_dir=videos_dir,
+        sourcing_log=sourcing_log,
+    )
+    return drawn + carded
+
+
+async def _draw_safe_fallback_visuals(
+    *,
+    script,
+    config: ChannelConfig,
+    facts,
+    targets: set[tuple[int, int]],
+    sourcing_log: list[dict],
+    raw_dir: Path,
+    videos_dir: Path,
+) -> list[tuple[int, int]]:
+    """Draw the beats a generated picture can honestly carry.
+
+    The router decides, per beat, whether a generated image would state
+    anything. A stadium, a crowd, a ball, a tactical board: it would not, so it
+    is generated on the channel's cheap generator. A named person, a goal being
+    scored, a scoreline: it would, so this leaves them alone and they fall
+    through to the verified card.
+
+    Every file written here is recorded as generated in both provenance stores
+    before it can be mistaken for a photograph.
+    """
+    sourcing = config.image_sourcing
+    if not getattr(sourcing, "allow_generated_fallback", False):
+        return []
+
+    people, clubs = verified_cards.known_entities(facts, script)
+    target_size = tuple(config.video.resolution)
+    cheap_model = str(getattr(sourcing, "generated_fallback_model", "") or "")
+    limit = max(0, int(getattr(sourcing, "max_safe_fallback_visuals", 0)))
+    if not cheap_model or not limit:
+        return []
+
+    drawn: list[tuple[int, int]] = []
+    for section in script.sections:
+        for sub_idx, slot in enumerate(section.non_overlay_slots):
+            key = (section.id, sub_idx + 1)
+            # An existing verified card is reconsidered too. A beat that became
+            # a card before this tier existed is still a stadium beat, and a
+            # drawn stadium is a better answer than a text panel -- which is
+            # also what the final gate said when it saw five of them.
+            was_carded = verified_cards.is_verified_card(slot)
+            if (key not in targets and not was_carded) or len(drawn) >= limit:
+                continue
+
+            props = slot.props or {}
+            beat = visual_router.classify_beat(
+                prompt=slot.prompt or props.get("original_prompt", ""),
+                keywords=slot.keywords or props.get("original_keywords", ""),
+                narration=section.narration,
+                props=props,
+                known_people=people,
+                known_clubs=clubs,
+            )
+            # No identity reference is fetched here, so a named-person beat is
+            # refused outright rather than drawn as a lookalike.
+            if not visual_router.generation_is_safe(
+                beat, has_identity_reference=False
+            ):
+                continue
+
+            prompt = _safe_fallback_prompt(
+                slot.keywords or props.get("original_keywords", ""),
+                slot.prompt or props.get("original_prompt", ""),
+            )
+            # A beat whose description was cleared upstream has nothing to
+            # draw. Generating from "Editorial sports illustration: ." spends
+            # money on an arbitrary picture with no relationship to the
+            # narration, which is worse than the card it would replace.
+            if prompt is None:
+                logger.info(
+                    f"[recovery] s{section.id}.{sub_idx + 1}: no description "
+                    f"left to draw from; leaving it to the card tier"
+                )
+                continue
+
+            stem = f"section_{section.id:03d}_{sub_idx + 1:02d}"
+            target = raw_dir / f"{stem}.jpg"
+            for stale in (raw_dir / f"{stem}.png", videos_dir / f"{stem}.mp4"):
+                if stale.exists():
+                    stale.unlink()
+            try:
+                written = await clients.generate_scene_image(
+                    prompt,
+                    target,
+                    model=cheap_model,
+                    aspect_ratio=generation_aspect_ratio(target_size),
+                    image_size="1K",
+                    target_size=target_size,
+                    operation_label="safe_fallback_visual",
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"[recovery] s{section.id}.{sub_idx + 1}: safe fallback "
+                    f"visual failed ({type(exc).__name__}: {exc})"
+                )
+                continue
+
+            if written is None or not _is_usable_asset(target):
+                continue
+            if not _conform_image_to_target(
+                target, target_size=target_size,
+                label=f"safe fallback s{section.id}.{sub_idx + 1}",
+            ):
+                continue
+
+            # A card being reclaimed gets its own words back, so the beat is a
+            # normal sourced slot again rather than a card wearing an image.
+            if was_carded:
+                slot.prompt = props.get("original_prompt", "")
+                slot.keywords = props.get("original_keywords", "")
+                slot.props = {}
+            slot.visual = "ai_illustration"
+            slot.visual_policy = "source_as_written"
+            record = {
+                "section_id": section.id,
+                "sub_image_index": sub_idx + 1,
+                "file": target.name,
+                "keywords": slot.keywords,
+                "source": f"generated_safe_visual ({beat.value})",
+                "provenance_kind": "generated_visual",
+                "provenance": (
+                    "AI-generated illustration of a generic football subject; "
+                    "not a photograph and not a record of this match"
+                ),
+            }
+            sourcing_log.append(record)
+            _record_generated_asset_provenance(target, record)
+            drawn.append(key)
+
+    if drawn:
+        logger.info(
+            f"[recovery] drew {len(drawn)} identity-free beat(s) on the cheap "
+            f"generator instead of showing a card: "
+            + ", ".join(f"s{s}.{i}" for s, i in drawn)
+        )
+    return drawn
+
+
+#: Where a face reference may come from. A portrait on a random blog is how
+#: the wrong person's face ends up locked into a generated scene, so the
+#: reference has to come from a site that captions who it is showing.
+_FACE_REFERENCE_DOMAINS = (
+    # encyclopaedic and governing-body sources
+    "wikipedia.org", "wikimedia.org", "britannica.com",
+    "uefa.com", "fifa.com", "premierleague.com", "laliga.com",
+    "legaseriea.it", "bundesliga.com",
+    # club sites
+    "realmadrid.com", "inter.it", "fcbarcelona.com", "manutd.com",
+    "liverpoolfc.com", "acmilan.com", "juventus.com",
+    # squad databases and wire agencies, which caption every player image by
+    # name. Kept to sources whose whole purpose is identifying who is in the
+    # picture -- a general news site's photo of "the celebration" is exactly
+    # how the wrong face gets locked in, which is the error this ladder exists
+    # to fix rather than repeat.
+    "transfermarkt.com", "transfermarkt.co.uk", "transfermarkt.de",
+    "transfermarkt.us", "gettyimages.com", "gettyimages.co.uk",
+    "sofascore.com", "espn.com", "espncdn.com",
+)
+
+
+#: Face references already looked up this run, keyed by person. A script talks
+#: about the same five people across twenty beats, and paying for the same
+#: portrait search twenty times is how the search budget disappears.
+_FACE_REFERENCES: dict[str, Path | None] = {}
+
+
+def _reset_face_references() -> None:
+    _FACE_REFERENCES.clear()
+
+
+async def _face_reference_for(
+    name: str,
+    *,
+    client: httpx.AsyncClient,
+    seen_hashes: set[str],
+    target_size: tuple[int, int],
+    tmp_dir: Path,
+) -> Path | None:
+    """A portrait of this exact person, to hand the generator as identity.
+
+    A face reference is not a scene and is never shown to the viewer -- it goes
+    into the generator so the person drawn is the person the narration names
+    rather than a plausible stranger. That is the whole reason this exists:
+    without one, "generate Rodrygo" produces someone who is not Rodrygo, and
+    the final gate has already caught exactly that failure once on this run
+    ("Frame 11 shows Eduardo Camavinga instead of Rodrygo").
+
+    Restricted to sources that caption their subjects. A face is only useful as
+    identity if we can believe whose face it is.
+    """
+    key = name.strip().lower()
+    if not key:
+        return None
+    if key in _FACE_REFERENCES:
+        cached = _FACE_REFERENCES[key]
+        # A miss is cached too: a player with no captioned portrait will not
+        # acquire one by being asked for again on the next beat.
+        if cached is None or cached.exists():
+            return cached
+
+    candidates = await _collect_serper_candidates(
+        keywords=f"{name} footballer portrait face",
+        output_name=f"face_ref_{re.sub(r'[^a-z0-9]+', '_', name.lower())}",
+        client=client,
+        seen_hashes=set(),  # a reference is not a shown asset; do not dedup it
+        target_size=(512, 512),
+        tmp_dir=tmp_dir,
+        limit=4,
+    )
+    for candidate in candidates:
+        url = " ".join(
+            str(candidate.get(field) or "")
+            for field in ("source_page", "image_url")
+        ).lower()
+        path = candidate.get("path")
+        if not path or not Path(path).exists():
+            continue
+        if not any(domain in url for domain in _FACE_REFERENCE_DOMAINS):
+            continue
+        logger.info(f"[recovery] face reference for {name} from {url[:60]}")
+        _FACE_REFERENCES[key] = Path(path)
+        return Path(path)
+
+    _FACE_REFERENCES[key] = None
+    return None
+
+
+async def _reconstruct_person_beats(
+    *,
+    script,
+    config: ChannelConfig,
+    facts,
+    targets: set[tuple[int, int]],
+    sourcing_log: list[dict],
+    raw_dir: Path,
+    videos_dir: Path,
+    seen_hashes: set[str],
+) -> list[tuple[int, int]]:
+    """Draw a named person from a verified face, or leave the beat alone.
+
+    The ladder the brief asks for, and the order matters:
+
+      1. a real photograph -- every tier above this one already tried;
+      2. a face reference for that exact person, from a captioned source;
+      3. an identity-preserving generated scene built on that reference.
+
+    Without step 2 there is no step 3. Generating "a Real Madrid forward" and
+    hoping is how another player ends up on screen, so a beat whose person
+    cannot be referenced keeps its failure and falls through to the card.
+
+    Nothing here is presented as documentary evidence: the output is recorded
+    as a reconstruction in both provenance stores, and the prompt says so.
+    """
+    sourcing = config.image_sourcing
+    if not getattr(sourcing, "allow_generated_player_reconstruction", False):
+        return []
+    limit = max(0, int(getattr(sourcing, "max_generated_player_reconstructions", 0)))
+    if not limit:
+        return []
+
+    people, clubs = verified_cards.known_entities(facts, script)
+    target_size = tuple(config.video.resolution)
+    model = str(
+        getattr(sourcing, "generated_player_reconstruction_model", "")
+        or sourcing.generation_model
+    )
+    tmp_dir = raw_dir.parent / "_face_refs"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    done: list[tuple[int, int]] = []
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(60, connect=10), follow_redirects=True
+    ) as client:
+        for section in script.sections:
+            for sub_idx, slot in enumerate(section.non_overlay_slots):
+                key = (section.id, sub_idx + 1)
+                if key not in targets or len(done) >= limit:
+                    continue
+
+                beat = visual_router.classify_beat(
+                    prompt=slot.prompt,
+                    keywords=slot.keywords,
+                    narration=section.narration,
+                    props=slot.props,
+                    known_people=people,
+                    known_clubs=clubs,
+                )
+                if beat is not visual_router.BeatClass.NAMED_REAL_PERSON:
+                    continue
+
+                name = str((slot.props or {}).get("football_player_name") or "").strip()
+                if not name:
+                    name = visual_router._named_person_in(
+                        f"{slot.prompt} {slot.keywords}", people, clubs
+                    )
+                if not name:
+                    continue
+
+                try:
+                    reference = await _face_reference_for(
+                        name,
+                        client=client,
+                        seen_hashes=seen_hashes,
+                        target_size=target_size,
+                        tmp_dir=tmp_dir,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"[recovery] face reference lookup failed for {name}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    reference = None
+
+                # The gate the brief sets: no reference, no generated person.
+                if reference is None or not visual_router.generation_is_safe(
+                    beat, has_identity_reference=True
+                ):
+                    logger.info(
+                        f"[recovery] s{section.id}.{sub_idx + 1}: no verified "
+                        f"face reference for {name}; not drawing a stand-in"
+                    )
+                    continue
+
+                stem = f"section_{section.id:03d}_{sub_idx + 1:02d}"
+                target = raw_dir / f"{stem}.jpg"
+                for stale in (raw_dir / f"{stem}.png", videos_dir / f"{stem}.mp4"):
+                    if stale.exists():
+                        stale.unlink()
+
+                club = _club_for_person(slot, facts)
+                prompt = (
+                    f"Editorial sports illustration reconstructing footballer "
+                    f"{name}{f' in {club} colours' if club else ''}, in the "
+                    f"situation described: "
+                    f"{strip_mood_words(str(slot.keywords or '')) or slot.prompt}. "
+                    "Match the attached reference photograph's face and build "
+                    "so the person is recognisably the same individual. "
+                    "Clearly an illustration, not documentary photography, not "
+                    "match footage, not archival evidence. No readable text, no "
+                    "scoreboard, no sponsor logos. Vertical 9:16."
+                )
+                try:
+                    written = await clients.generate_scene_image(
+                        prompt,
+                        target,
+                        model=_reference_capable_model(model, reference, config),
+                        aspect_ratio=generation_aspect_ratio(target_size),
+                        image_size="1K",
+                        target_size=target_size,
+                        operation_label="football_player_reconstruction",
+                        reference_image=reference,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"[recovery] reconstruction failed for {name}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    continue
+
+                if written is None or not _is_usable_asset(target):
+                    continue
+                if not _conform_image_to_target(
+                    target, target_size=target_size,
+                    label=f"person reconstruction s{section.id}.{sub_idx + 1}",
+                ):
+                    continue
+
+                slot.visual = "ai_illustration"
+                slot.visual_policy = "source_as_written"
+                record = {
+                    "section_id": section.id,
+                    "sub_image_index": sub_idx + 1,
+                    "file": target.name,
+                    "keywords": slot.keywords,
+                    "source": "generated_person_reconstruction",
+                    "person": name,
+                    "identity_reference": reference.name,
+                    "provenance_kind": "generated_reconstruction",
+                    "provenance": (
+                        f"AI-generated reconstruction of {name} from a verified "
+                        "face reference; not a photograph and not a record of "
+                        "this match"
+                    ),
+                }
+                sourcing_log.append(record)
+                _record_generated_asset_provenance(target, record)
+                done.append(key)
+
+    if done:
+        logger.info(
+            f"[recovery] reconstructed {len(done)} named-person beat(s) from "
+            f"verified face references: "
+            + ", ".join(f"s{s}.{i}" for s, i in done)
+        )
+    return done
+
+
+def _club_for_person(slot: VisualSlot, facts) -> str:
+    """The club to dress a reconstruction in, only when the run established it.
+
+    Taken from what the scripter verified for this slot, falling back to the
+    grounded fixture's own two clubs. Never guessed: putting a player in the
+    wrong shirt is the "stale former player" error the brief rules out.
+    """
+    club = str((slot.props or {}).get("football_current_club") or "").strip()
+    if club:
+        return club
+    text = f"{slot.prompt} {slot.keywords}".lower()
+    for candidate in (getattr(facts, "home", ""), getattr(facts, "away", "")):
+        if candidate and candidate.lower() in text:
+            return candidate
+    return ""
+
+
+def _safe_fallback_prompt(keywords: str, prompt: str) -> str | None:
+    """A generation brief that cannot drift into depicting a real person.
+
+    Built from the beat's own description, then fenced: no recognisable faces,
+    no readable text, no club badges. The fence is what keeps a "crowd
+    celebrating" prompt from producing something that reads as a photograph of
+    identifiable supporters at a specific match.
+
+    None when the beat has no description left -- an earlier pass can empty a
+    slot, and the fence alone is not a subject. Drawing from it produced
+    "Editorial sports illustration: ." on a real run: a paid, arbitrary picture
+    with no connection to what was being said.
+    """
+    subject = strip_mood_words(str(keywords or "").strip()) or str(prompt or "").strip()
+    if len(subject.strip()) < 3:
+        return None
+    return (
+        f"Editorial sports illustration: {subject}. "
+        "Generic football imagery only -- no recognisable real people, no "
+        "faces in focus, no club crests or badges, no sponsor logos, no "
+        "readable text or numbers, no scoreboard. Not documentary photography "
+        "and not a record of any specific match. Vertical 9:16 composition."
+    )
 
 
 def _rejected_slot_keys(feedback) -> dict[tuple[int, int], str]:
@@ -3248,6 +3902,28 @@ def _renumber_section_media(
                     logger.info(f"Re-indexed {source.name} -> {target.name}")
 
 
+#: The visual contract for the beat currently being sourced.
+#:
+#: A ContextVar rather than a parameter because the contract has to reach
+#: `_select_photo_candidate`, five call layers down through three different
+#: search functions, and beats are sourced concurrently -- a plain global would
+#: hand one beat's requirement to another's selector. asyncio gives each task
+#: its own view of a ContextVar, so this is safe under that concurrency and
+#: costs no signature churn in code that has nothing to do with the contract.
+_ACTIVE_REQUIREMENT: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "active_visual_requirement", default=""
+)
+
+#: Every beat's contract for this run, keyed by asset stem
+#: ("section_001_07"). Filled once per run; the stem is what every sourcing
+#: path already carries, so no tier needs a new parameter to find its beat.
+_REQUIREMENTS_BY_STEM: dict[str, str] = {}
+
+
+def _reset_beat_requirements() -> None:
+    _REQUIREMENTS_BY_STEM.clear()
+
+
 async def _source_single_image(
     keywords: str,
     prompt: str,
@@ -3269,6 +3945,11 @@ async def _source_single_image(
     generation with the illustration style prompt. Photo lanes fall back to AI
     generation unless allow_generation_fallback is false.
     """
+    # Publish this beat's contract for the selector further down. Set here
+    # because this is the one function every sourcing tier goes through, and
+    # `output_path` is the beat's identity.
+    _ACTIVE_REQUIREMENT.set(_REQUIREMENTS_BY_STEM.get(output_path.stem, ""))
+
     if lane == "photo":
         try:
             if image_source == "serper":
@@ -3831,6 +4512,10 @@ async def _select_photo_candidate(
                 prompt=prompt,
                 num_images=len(candidate_paths),
                 narration=narration,
+                # The same text the review gate will judge the winner against,
+                # so a candidate cannot satisfy the selector and then fail
+                # review for a reason the selector was never told about.
+                requirement=_ACTIVE_REQUIREMENT.get(),
             ),
             image_paths=candidate_paths,
             operation_label=operation_label,
@@ -4025,7 +4710,17 @@ async def _collect_serper_candidates(
             width=int(img_result.get("imageWidth") or 0),
             height=int(img_result.get("imageHeight") or 0),
         )
-        candidates.append({"path": candidate_path, "source": "serper"})
+        # The page it came from travels with the candidate. Provenance alone
+        # was not enough: a caller that has to decide whether a picture is a
+        # trustworthy likeness of a named person needs to know which site
+        # captioned it, and without this the face-reference lookup rejected
+        # every candidate it was ever offered.
+        candidates.append({
+            "path": candidate_path,
+            "source": "serper",
+            "source_page": source_url,
+            "image_url": img_url,
+        })
 
     return candidates
 
