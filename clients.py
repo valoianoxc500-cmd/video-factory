@@ -654,6 +654,7 @@ async def _generate_text_response(
     max_output_tokens: int = 8192,
     response_mime_type: str | None = None,
     operation_label: str | None = None,
+    bypass_cache: bool = False,
 ) -> tuple[str, TraceRef | None]:
     """Generate text with Gemini and return raw text plus trace reference.
 
@@ -716,7 +717,16 @@ async def _generate_text_response(
             operation, model, prompt, system_instruction,
             extra=f"{response_mime_type}|{max_output_tokens}",
         )
-        cached = _GATEWAY_CACHE.get(gateway_key)
+        # `bypass_cache` is what makes a retry a retry.
+        #
+        # A truncated response is cached like any other, and the caller only
+        # discovers it is unusable when parsing fails. Re-asking with the same
+        # prompt produces the same key, so without this the "retry" re-reads
+        # the identical corrupt entry and cannot ever succeed. A real football
+        # run failed exactly that way: nine review attempts, every one logged
+        # "cache hit ... no request made", all parsing the same 1198-char
+        # truncated body, and the gate failed having never re-asked the model.
+        cached = None if bypass_cache else _GATEWAY_CACHE.get(gateway_key)
         if cached is not None and ai_gateway.cache_enabled():
             logger.info(
                 f"[gateway] cache hit for {operation} "
@@ -857,8 +867,13 @@ async def generate_json(
     temperature: float = 1.0,
     max_output_tokens: int = 8192,
     operation_label: str | None = None,
+    bypass_cache: bool = False,
 ) -> dict | list:
-    """Generate structured JSON from Gemini."""
+    """Generate structured JSON from Gemini.
+
+    `bypass_cache` is for a caller retrying because the previous answer would
+    not parse: without it the retry is served the same unparseable text.
+    """
     text, trace_ref = await _generate_text_response(
         prompt,
         system_instruction=system_instruction,
@@ -867,6 +882,7 @@ async def generate_json(
         max_output_tokens=max_output_tokens,
         response_mime_type="application/json",
         operation_label=operation_label or "generate_json",
+        bypass_cache=bypass_cache,
     )
     parsed = json.loads(text)
     if trace_ref:

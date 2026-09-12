@@ -142,7 +142,7 @@ async def review_gate(
 
         prompt = review_prompt_fn(content)
 
-        async def _ask_reviewer():
+        async def _ask_reviewer(bypass_cache: bool = False):
             if image_paths:
                 answer = await clients.review_with_vision(
                     prompt,
@@ -156,6 +156,7 @@ async def review_gate(
                     system_instruction=system_instruction,
                     temperature=0.3,
                     operation_label=gate_name,
+                    bypass_cache=bypass_cache,
                 )
             # Normalised here so the identity check sees the same shape the
             # gate will act on, whichever form the model replied in.
@@ -181,7 +182,11 @@ async def review_gate(
         review = None
         for parse_attempt in range(1, _MALFORMED_REVIEW_RETRIES + 1):
             try:
-                review = await _ask_reviewer()
+                # Every attempt after the first must reach the model rather
+                # than the cache. The prompt is unchanged, so the cache key is
+                # unchanged, and a cached unparseable answer would otherwise
+                # be re-served to the very retry that exists to escape it.
+                review = await _ask_reviewer(bypass_cache=parse_attempt > 1)
                 break
             except (json.JSONDecodeError, ValueError) as e:
                 if parse_attempt == _MALFORMED_REVIEW_RETRIES:
