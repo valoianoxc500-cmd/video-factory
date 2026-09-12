@@ -304,6 +304,41 @@ def stub_candidates(monkeypatch):
         digest = plan["hashes"].get(video.parent.name, default)
         return fingerprint.ClipSignature(path=video, hashes=[digest], width=1080, height=1920)
 
+    # The fallback ladder reaches the model and the photo APIs. Off by
+    # default so the suite stays offline; a test that wants a rung sets
+    # plan["alternatives"] / plan["stills"] and gets it.
+    from aivideo import fallback
+
+    async def propose_alternatives(intents, *, ledger=None):
+        plan.setdefault("concept_calls", []).append(list(intents))
+        return dict(plan.get("alternatives") or {})
+
+    async def still_candidates(client, terms, scratch, *, portrait, wanted=4):
+        scratch.mkdir(parents=True, exist_ok=True)
+        out = []
+        for i, spec in enumerate(plan.get("stills", {}).get(terms[0] if terms else "", [])):
+            path = scratch / f"still_{i:02d}.jpg"
+            path.write_bytes(b"x" * 30_000)
+            out.append({**spec, "path": path, "term": terms[0]})
+        return out
+
+    def motion_clip(image, target, *, size, seconds=4.0, direction=0):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"x" * 60_000)
+        return target
+
+    async def generated_still(concept, target, *, portrait, ledger=None):
+        if not plan.get("allow_generated"):
+            return None
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"x" * 40_000)
+        plan.setdefault("generated", []).append(concept)
+        return target
+
+    monkeypatch.setattr(fallback, "propose_alternatives", propose_alternatives)
+    monkeypatch.setattr(fallback, "still_candidates", still_candidates)
+    monkeypatch.setattr(fallback, "motion_clip", motion_clip)
+    monkeypatch.setattr(fallback, "generated_still", generated_still)
     monkeypatch.setattr(footage, "_collect_candidates", collect)
     monkeypatch.setattr("aivideo.rank.rank_candidates", rank_candidates)
     monkeypatch.setattr(fingerprint, "sample_frames", sample_frames)
@@ -439,6 +474,177 @@ async def test_the_second_attempt_happens_at_most_once(tmp_path, stub_candidates
 
 
 @pytest.mark.asyncio
+async def test_runner_up_visuals_are_banked_for_the_extra_slots(
+    tmp_path, stub_candidates
+):
+    """A 60-second video needs ~17 visuals and has ~10 beats.
+
+    The other seven used to be the same clips shown again. A runner-up that
+    already passed the ranker and the duplicate guard is a better answer and
+    costs nothing extra -- it is already on disk.
+    """
+    stub_candidates["pools"] = {
+        "one": [{"url": "a1"}, {"url": "a2"}, {"url": "a3"}],
+        "two": [{"url": "b1"}, {"url": "b2"}],
+    }
+    reserves: list = []
+    clips, _ = await footage.gather(
+        [_beat("first", "one"), _beat("second", "two")], tmp_path,
+        reserves=reserves,
+    )
+    assert [c.source_url for c in clips] == ["a1", "b1"]
+    assert [c.source_url for c in reserves] == ["a2", "b2"]
+    # A reserve is a distinct source, never a second copy of a chosen one.
+    assert not {c.source_url for c in reserves} & {c.source_url for c in clips}
+
+
+@pytest.mark.asyncio
+async def test_banking_reserves_is_optional(tmp_path, stub_candidates):
+    """Callers that do not ask for them get the original behaviour."""
+    stub_candidates["pools"] = {"one": [{"url": "a1"}, {"url": "a2"}]}
+    clips, _ = await footage.gather([_beat("first", "one")], tmp_path)
+    assert [c.source_url for c in clips] == ["a1"]
+
+
+@pytest.mark.asyncio
+async def test_a_beat_stock_video_cannot_cover_falls_back_to_a_related_concept(
+    tmp_path, stub_candidates
+):
+    """Rung 2. "A satellite view of the reef" -> "an aerial shot of the reef".
+
+    Both show the viewer the same idea; only one of them exists on a free
+    stock library.
+    """
+    from aivideo.fallback import Alternative
+
+    stub_candidates["pools"] = {
+        "healthy reef": [{"url": "good"}],
+        "satellite view reef": [],
+        "aerial reef drone": [{"url": "aerial"}],
+    }
+    stub_candidates["alternatives"] = {
+        0: Alternative(
+            concept="an aerial drone shot looking down on a reef",
+            queries=["aerial reef drone"],
+            evidentiary=True,
+        )
+    }
+    clips, missing = await footage.gather(
+        [
+            _beat("a living reef", "healthy reef"),
+            _beat("the reef from space", "satellite view reef"),
+        ],
+        tmp_path,
+    )
+    assert missing == []
+    assert any(c.source_url == "aerial" for c in clips)
+
+
+@pytest.mark.asyncio
+async def test_a_still_with_motion_covers_a_beat_no_video_could(
+    tmp_path, stub_candidates
+):
+    """Rungs 3 and 4. A photograph with a slow push is a shot, not a gap."""
+    from aivideo.fallback import Alternative
+
+    stub_candidates["pools"] = {
+        "healthy reef": [{"url": "good"}],
+        "polyp cutaway animation": [],
+        "coral polyp macro": [],
+    }
+    stub_candidates["alternatives"] = {
+        0: Alternative(
+            concept="an extreme close-up of a living coral polyp",
+            queries=["coral polyp macro"],
+            still_queries=["coral polyp macro"],
+            evidentiary=False,
+        )
+    }
+    stub_candidates["stills"] = {
+        "coral polyp macro": [{"provider": "pexels", "page": "photo-1"}],
+    }
+    clips, missing = await footage.gather(
+        [
+            _beat("a living reef", "healthy reef"),
+            _beat("a polyp cutaway", "polyp cutaway animation"),
+        ],
+        tmp_path,
+    )
+    assert missing == []
+    still = [c for c in clips if c.source_url == "photo-1"]
+    assert still, "the still never became a clip"
+    # Its own window, not one re-derived by shot detection: a slow push over
+    # a photograph has no cuts and its whole length is the shot.
+    assert still[0].window == (0.0, 5.0)
+
+
+@pytest.mark.asyncio
+async def test_a_still_that_is_not_about_the_beat_is_still_rejected(
+    tmp_path, stub_candidates
+):
+    """The ladder lowers where we look, never the relevance bar."""
+    from aivideo.fallback import Alternative
+
+    stub_candidates["pools"] = {
+        "healthy reef": [{"url": "good"}],
+        "polyp cutaway animation": [],
+        "coral polyp macro": [],
+    }
+    stub_candidates["alternatives"] = {
+        0: Alternative(
+            concept="an extreme close-up of a living coral polyp",
+            still_queries=["coral polyp macro"],
+            evidentiary=True,
+        )
+    }
+    stub_candidates["stills"] = {
+        "coral polyp macro": [{"provider": "pexels", "page": "photo-1"}],
+    }
+    stub_candidates["scores"] = {"a polyp cutaway": [1]}
+    clips, missing = await footage.gather(
+        [
+            _beat("a living reef", "healthy reef"),
+            _beat("a polyp cutaway", "polyp cutaway animation"),
+        ],
+        tmp_path,
+    )
+    assert missing == ["a polyp cutaway"]
+    assert len(clips) == 1
+
+
+@pytest.mark.asyncio
+async def test_only_a_non_evidentiary_concept_may_be_generated(
+    tmp_path, stub_candidates
+):
+    """Generating a named place or a real event would be inventing evidence."""
+    from aivideo.fallback import Alternative
+
+    stub_candidates["pools"] = {"healthy reef": [{"url": "good"}], "x y z": []}
+    stub_candidates["allow_generated"] = True
+    stub_candidates["alternatives"] = {
+        0: Alternative(concept="the Great Barrier Reef from orbit",
+                       queries=["x y z"], evidentiary=True),
+    }
+    _, missing = await footage.gather(
+        [_beat("a living reef", "healthy reef"), _beat("from orbit", "x y z")],
+        tmp_path,
+    )
+    assert missing == ["from orbit"]
+    assert not stub_candidates.get("generated"), "an evidentiary beat was generated"
+
+    stub_candidates["alternatives"] = {
+        0: Alternative(concept="sunlight moving through shallow water",
+                       queries=["x y z"], evidentiary=False),
+    }
+    _, missing = await footage.gather(
+        [_beat("a living reef", "healthy reef"), _beat("from orbit", "x y z")],
+        tmp_path / "second",
+    )
+    assert missing == []
+    assert stub_candidates["generated"] == ["sunlight moving through shallow water"]
+
+
+@pytest.mark.asyncio
 async def test_the_same_source_is_never_used_for_two_beats(
     tmp_path, stub_candidates
 ):
@@ -560,7 +766,8 @@ def fake_engine(monkeypatch, tmp_path):
         ]
 
     async def fake_gather(
-        beats, directory, *, portrait=True, concurrency=3, rank=True, ledger=None
+        beats, directory, *, portrait=True, concurrency=3, rank=True,
+        ledger=None, reserves=None,
     ):
         calls["footage"] += 1
         directory.mkdir(parents=True, exist_ok=True)
@@ -677,7 +884,8 @@ async def test_an_empty_topic_is_terminal(tmp_path, fake_engine):
 @pytest.mark.asyncio
 async def test_no_footage_anywhere_is_terminal(tmp_path, fake_engine, monkeypatch):
     async def nothing(
-        beats, directory, *, portrait=True, concurrency=3, rank=True, ledger=None
+        beats, directory, *, portrait=True, concurrency=3, rank=True,
+        ledger=None, reserves=None,
     ):
         raise footage.NoFootage("nothing found")
 

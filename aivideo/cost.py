@@ -26,6 +26,14 @@ MODEL_RATES: dict[str, tuple[float, float]] = {
 }
 _FALLBACK_RATE = (0.30, 2.50)
 
+#: USD per generated image. Flat-rated rather than token-rated because that is
+#: how the image models are billed. At most one is generated per video, and
+#: only to rescue a beat no library could cover.
+IMAGE_USD: dict[str, float] = {
+    "gemini-3.1-flash-image-preview": 0.039,
+}
+_FALLBACK_IMAGE_USD = 0.04
+
 
 @dataclass
 class CostLedger:
@@ -46,6 +54,16 @@ class CostLedger:
             "model": model,
             "input_tokens": int(input_tokens),
             "output_tokens": int(output_tokens),
+            "usd": round(usd, 6),
+        })
+        return usd
+
+    def record_image(self, *, model: str, count: int = 1, label: str = "image") -> float:
+        usd = IMAGE_USD.get(model, _FALLBACK_IMAGE_USD) * max(0, count)
+        if model not in IMAGE_USD and model not in self.unpriced_models:
+            self.unpriced_models.append(model)
+        self.items.append({
+            "label": label, "model": model, "images": int(count),
             "usd": round(usd, 6),
         })
         return usd

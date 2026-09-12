@@ -302,6 +302,192 @@ async def _collect_candidates(
     return found
 
 
+#: Canvas the motion pass renders a still onto. The clip is normalised again
+#: downstream, so this only has to be at least the output size.
+_STILL_SIZE = {True: (1080, 1920), False: (1920, 1080)}
+
+
+async def _climb_ladder(
+    chosen: list,
+    beats: list,
+    stranded: list[int],
+    directory: Path,
+    *,
+    portrait: bool,
+    intent_for,
+    rank_pool,
+    take,
+    counts: dict,
+    ledger=None,
+) -> list:
+    """Rungs 2-5 for the beats stock video could not cover.
+
+    Returns `chosen` with whatever could be rescued filled in. Every rung is
+    bounded and every failure is contained to its own beat: this runs after
+    the video is already renderable, so nothing here may cost the render.
+    """
+    from aivideo import fallback
+    from aivideo import rank as ranking
+
+    alternatives = await fallback.propose_alternatives(
+        [intent_for(beats[i]) for i in stranded], ledger=ledger
+    )
+    generated = 0
+
+    async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+        for position, index in enumerate(stranded):
+            beat = beats[index]
+            alternative = alternatives.get(position)
+            scratch = directory / f"beat_{index:02d}" / "fallback"
+
+            # ── rung 2: the same idea, filmed differently ──────────────
+            if alternative and alternative.queries:
+                counts["reconcepted"] += 1
+                logger.info(
+                    f"[aivideo] beat {index}: retrying as {alternative.concept[:70]!r}"
+                )
+                try:
+                    pool = await _collect_candidates(
+                        alternative.queries, scratch / "video",
+                        client=client, portrait=portrait,
+                        wanted=CANDIDATES_PER_BEAT,
+                    )
+                except Exception as exc:
+                    logger.info(
+                        f"[aivideo] beat {index}: related-concept search failed "
+                        f"({type(exc).__name__})"
+                    )
+                    pool = []
+                if pool:
+                    order = await rank_pool(index, beat, pool, "_concept")
+                    chosen[index] = take(index, pool, order)
+                    if chosen[index] is not None:
+                        counts["by_concept"] += 1
+                        continue
+
+            # ── rungs 3 and 4: a still, with motion on it ──────────────
+            queries = list(alternative.still_queries) if alternative else []
+            queries += [t for t in getattr(beat, "terms", []) if t not in queries]
+            still = await _still_with_motion(
+                client, index, beat, queries, scratch,
+                portrait=portrait, intent_for=intent_for,
+                ranking=ranking, ledger=ledger,
+            )
+            if still is not None:
+                chosen[index] = take(index, [still], [0])
+                if chosen[index] is not None:
+                    counts["by_still"] += 1
+                    continue
+
+            # ── rung 5: one generated visual, generic concepts only ────
+            if (
+                alternative
+                and not alternative.evidentiary
+                and generated < fallback.MAX_GENERATED
+            ):
+                generated += 1
+                image = await fallback.generated_still(
+                    alternative.concept, scratch / "generated.png",
+                    portrait=portrait, ledger=ledger,
+                )
+                if image is not None:
+                    made = _motion_as_clip(
+                        image, scratch / "generated.mp4", index,
+                        portrait=portrait, term=alternative.concept[:60],
+                        provider="generated",
+                    )
+                    if made is not None:
+                        chosen[index] = take(index, [made], [0])
+                        if chosen[index] is not None:
+                            counts["by_generated"] += 1
+                            logger.info(
+                                f"[aivideo] beat {index}: covered by one "
+                                f"generated visual (non-evidentiary concept)"
+                            )
+                            continue
+
+            # ── rung 6: leave it; the caller holds a neighbour ─────────
+            logger.info(
+                f"[aivideo] beat {index}: no rung of the ladder covered "
+                f"{intent_for(beat)[:60]!r}"
+            )
+    return chosen
+
+
+async def _still_with_motion(
+    client, index: int, beat, queries: list[str], scratch: Path, *,
+    portrait: bool, intent_for, ranking, ledger,
+):
+    """A photograph that passes the ranker, turned into a moving shot."""
+    from aivideo import fallback
+
+    if not queries:
+        return None
+    try:
+        stills = await fallback.still_candidates(
+            client, queries[:3], scratch / "stills",
+            portrait=portrait, wanted=4,
+        )
+    except Exception as exc:
+        logger.info(f"[aivideo] beat {index}: still search failed ({type(exc).__name__})")
+        return None
+    if not stills:
+        return None
+
+    # Stills are ranked as they are: the ranker takes frames, and a photograph
+    # is already a frame. A still that is not about the beat is no better than
+    # a clip that is not about the beat.
+    scores = await ranking.rank_candidates(
+        [s["path"] for s in stills],
+        intent=intent_for(beat), says=getattr(beat, "says", ""),
+        ledger=ledger,
+    )
+    ranked = sorted(zip(stills, scores), key=lambda pair: -pair[1].score)
+    for still, score in ranked:
+        if not score.acceptable:
+            break
+        made = _motion_as_clip(
+            still["path"], scratch / f"motion_{index:02d}.mp4", index,
+            portrait=portrait, term=still.get("term", ""),
+            provider=still.get("provider", "still"),
+            source_url=still.get("page", ""),
+        )
+        if made is not None:
+            logger.info(
+                f"[aivideo] beat {index}: covered by a still with motion "
+                f"({still.get('provider')} · {still.get('term')!r})"
+            )
+            return made
+    return None
+
+
+def _motion_as_clip(
+    image: Path, target: Path, index: int, *, portrait: bool,
+    term: str, provider: str, source_url: str = "",
+) -> Clip | None:
+    """Wrap the motion pass so a still enters the pipeline as an ordinary clip.
+
+    Everything downstream -- fingerprinting, normalising, concatenation --
+    then treats it exactly like footage, which is the whole point: a still
+    with a slow push is a shot, not a special case.
+    """
+    from aivideo import fallback
+
+    size = _STILL_SIZE[bool(portrait)]
+    seconds = 5.0
+    made = fallback.motion_clip(
+        image, target, size=size, seconds=seconds, direction=index,
+    )
+    if made is None:
+        return None
+    return Clip(
+        path=made, provider=provider, term=term,
+        width=size[0], height=size[1], duration=seconds,
+        source_url=source_url or f"still:{image.name}",
+        window=(0.0, seconds),
+    )
+
+
 async def gather(
     beats: list,
     directory: Path,
@@ -310,6 +496,7 @@ async def gather(
     concurrency: int = 3,
     rank: bool = True,
     ledger=None,
+    reserves: list | None = None,
 ) -> tuple[list[Clip], list[str]]:
     """Fetch, rank and de-duplicate one clip per beat.
 
@@ -324,6 +511,10 @@ async def gather(
 
     Beats accept either the `Beat` objects the script stage now returns or
     plain search strings, so an older checkpoint still resumes.
+
+    Pass `reserves` to have runner-up candidates banked into it -- extra
+    distinct visuals, already ranked and de-duplicated, for the slots a video
+    needs beyond one per beat.
     """
     from medialab import fingerprint, shots
 
@@ -361,7 +552,10 @@ async def gather(
     # ── rank, then choose with the duplicate guard ───────────────────
     guard = fingerprint.DuplicateGuard()
     chosen: list[Clip | None] = [None] * len(beats)
-    counts = {"unrelated": 0, "duplicate": 0, "retried": 0}
+    counts = {
+        "unrelated": 0, "duplicate": 0, "retried": 0,
+        "reconcepted": 0, "by_concept": 0, "by_still": 0, "by_generated": 0,
+    }
 
     async def rank_pool(index: int, beat, pool: list[Clip], tag: str) -> list[int]:
         """Candidate positions worth trying, best first."""
@@ -394,7 +588,17 @@ async def gather(
         return [i for i, s in scored if s.acceptable]
 
     def take(index: int, pool: list[Clip], order: list[int]) -> Clip | None:
-        """First ranked candidate that is not a repeat of something chosen."""
+        """Best ranked candidate that is not a repeat of something chosen.
+
+        Also banks one runner-up per beat as a reserve. A video always needs
+        more on-screen slots than it has beats, and the alternative to a
+        reserve is showing a beat's clip twice -- which is what made the
+        second half of a video look like a rerun of the first. The runner-up
+        is already downloaded, already ranked acceptable and already checked
+        against the duplicate guard, so this costs nothing but the disk it is
+        already using.
+        """
+        picked: Clip | None = None
         for position in order:
             clip = pool[position]
             if guard.seen_source(clip.source_url or str(clip.path.name)):
@@ -407,16 +611,29 @@ async def gather(
                 logger.debug(f"[aivideo] beat {index}: skipped a clip {reason}")
                 continue
 
-            # Cut where the camera cuts, so the beat does not open mid-edit.
-            start, span = shots.longest_clean_window(clip.path, wanted=4.0)
-            clip.window = (start, span)
+            if clip.window is None:
+                # Cut where the camera cuts, so the beat does not open
+                # mid-edit. A clip that arrived with a window already set
+                # chose it deliberately -- a still under a slow push has no
+                # cuts to find and its whole length is the shot.
+                clip.window = shots.longest_clean_window(clip.path, wanted=4.0)
+            start, span = clip.window
             guard.accept(signature, clip.source_url)
-            logger.info(
-                f"[aivideo] beat {index}: {clip.provider} · {clip.term!r} "
-                f"({clip.width}x{clip.height}, window {start:.1f}s+{span:.1f}s)"
-            )
-            return clip
-        return None
+
+            if picked is None:
+                picked = clip
+                logger.info(
+                    f"[aivideo] beat {index}: {clip.provider} · {clip.term!r} "
+                    f"({clip.width}x{clip.height}, window {start:.1f}s+{span:.1f}s)"
+                )
+                if reserves is None:
+                    return picked
+                continue          # look once more, for the reserve
+
+            reserves.append(clip)
+            logger.debug(f"[aivideo] beat {index}: banked a reserve visual")
+            break
+        return picked
 
     for index, (beat, pool) in enumerate(zip(beats, pools)):
         if not pool:
@@ -472,6 +689,20 @@ async def gather(
                         f"with a broader query"
                     )
 
+    # ── rungs 2-5: a related concept, a still, motion, one generated ──
+    #
+    # Anything still uncovered here has nothing in either video library under
+    # any phrasing of its own wording. Leaving it uncovered means the finished
+    # video pads over it with a neighbour, which is the pacing problem this
+    # ladder exists to remove. Every rung still goes through the ranker.
+    still_missing = [i for i, clip in enumerate(chosen) if clip is None]
+    if still_missing:
+        chosen = await _climb_ladder(
+            chosen, beats, still_missing, directory,
+            portrait=portrait, intent_for=intent_for,
+            rank_pool=rank_pool, take=take, counts=counts, ledger=ledger,
+        )
+
     clips = [c for c in chosen if c is not None]
     missing = [
         intent_for(b)[:60] for c, b in zip(chosen, beats) if c is None
@@ -485,7 +716,10 @@ async def gather(
         f"[aivideo] footage: {len(clips)}/{len(beats)} beats covered "
         f"({counts['unrelated']} rejected as unrelated, "
         f"{counts['duplicate']} as duplicates, "
-        f"{counts['retried']} beat(s) given a second attempt)"
+        f"{counts['retried']} broadened, "
+        f"{counts['by_concept']} by a related concept, "
+        f"{counts['by_still']} by a still with motion, "
+        f"{counts['by_generated']} generated)"
     )
     if missing:
         logger.info(

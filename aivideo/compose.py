@@ -145,6 +145,16 @@ def normalise_clip(
     return target
 
 
+def slots_needed(total_seconds: float, spec: VideoSpec) -> int:
+    """How many on-screen visuals it takes to cover the narration.
+
+    Shared with the render stage, which builds a distinct cut for each slot;
+    the two must agree or the track ends up padded or short.
+    """
+    per_clip = max(1.2, spec.clip_seconds)
+    return max(1, int(total_seconds / per_clip) + 1)
+
+
 def build_visual_track(
     clips: list[Path], target: Path, total_seconds: float, spec: VideoSpec
 ) -> Path:
@@ -152,13 +162,14 @@ def build_visual_track(
 
     Looping is what makes a missing beat survivable: when footage came back
     short, the clips that did arrive are simply shown again rather than the
-    video ending early or the stage failing.
+    video ending early or the stage failing. The caller normally hands over
+    exactly `slots_needed` cuts, in which case nothing loops and each slot is
+    its own piece of footage.
     """
     if not clips:
         raise RenderFailed("no usable clips to build a visual track from")
 
-    per_clip = max(1.2, spec.clip_seconds)
-    needed = max(1, int(total_seconds / per_clip) + 1)
+    needed = slots_needed(total_seconds, spec)
     ordered = [clips[i % len(clips)] for i in range(needed)]
 
     listing = target.parent / "concat.txt"
