@@ -24,6 +24,11 @@ assets/channels/senior_health/
 *.mp4
 *.mp3
 *.raw
+
+# AI Video Maker voice samples are product assets shipped with the app, not
+# generated media: the voice picker plays the real Edge TTS voice so the
+# preview matches what the finished video will sound like.
+!web/public/voice-previews/*.mp3
 .claude/
 .codex/
 .vscode/

@@ -1,0 +1,229 @@
+"""Word timings into a burned-in caption track, Arabic included.
+
+The caption format is ASS rather than SRT. SRT can only carry text; ASS carries
+the font, size, outline, shadow, colours and position, which is the entire
+point of a caption-style picker. Everything the customer chose in the UI is
+expressible here and is burned by one FFmpeg filter.
+
+Arabic is the part that needs care. Three separate things have to be right or
+the output is wrong in a way no exception reports:
+
+  * **shaping** -- Arabic letters change form by position. Unshaped text
+    renders as disconnected islands. `arabic_reshaper` fixes this.
+  * **direction** -- the logical order stored in the file is not the visual
+    order. libass does not run the bidi algorithm, so the text is reordered
+    here with `python-bidi`. Without it Arabic renders backwards.
+  * **the font** -- a family with no Arabic coverage draws boxes or falls back
+    silently to something that cannot join. The resolver below only returns
+    files that exist on this machine.
+
+Numbers are deliberately left in Western digits: bidi already places them
+correctly, and Arabic short-form content overwhelmingly uses them.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+from aivideo.spec import CaptionStyle
+from aivideo.voice import Word
+
+logger = logging.getLogger("aivideo")
+
+#: Font family -> candidate files, most preferred first. Bundled families are
+#: tried before system ones so a deployment can pin its own look, and every
+#: family ends at a file that is present on essentially any machine.
+_FONT_FILES: dict[str, tuple[str, ...]] = {
+    "inter": ("Inter-Bold.ttf", "Inter.ttf", "segoeui.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf"),
+    "montserrat": ("Montserrat-Black.ttf", "Montserrat-Bold.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf"),
+    "playfair": ("PlayfairDisplay-Bold.ttf", "georgiab.ttf", "georgia.ttf", "DejaVuSerif-Bold.ttf"),
+    # Arabic-capable
+    "cairo": ("Cairo-Bold.ttf", "Cairo-Regular.ttf", "tahomabd.ttf", "arialbd.ttf",
+              "NotoNaskhArabic-Bold.ttf", "DejaVuSans-Bold.ttf"),
+    "tajawal": ("Tajawal-Bold.ttf", "tahomabd.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf"),
+    "notoarabic": ("NotoNaskhArabic-Bold.ttf", "NotoSansArabic-Bold.ttf", "arialbd.ttf"),
+    "arial": ("arialbd.ttf", "arial.ttf", "DejaVuSans-Bold.ttf"),
+    "tahoma": ("tahomabd.ttf", "tahoma.ttf", "DejaVuSans-Bold.ttf"),
+}
+
+_FONT_DIRS = (
+    Path(__file__).resolve().parent / "fonts",
+    Path("C:/Windows/Fonts"),
+    Path("/usr/share/fonts/truetype/dejavu"),
+    Path("/usr/share/fonts/truetype/noto"),
+    Path("/usr/share/fonts"),
+    Path("/System/Library/Fonts/Supplemental"),
+)
+
+
+def resolve_font(family: str) -> tuple[str, Path | None]:
+    """(ASS font name, file on disk). The file is what FFmpeg actually needs.
+
+    Returns the first candidate that exists. `None` means nothing matched and
+    the caller should let libass pick, which is a worse look but still renders.
+    """
+    for candidate in _FONT_FILES.get(family, _FONT_FILES["arial"]):
+        for directory in _FONT_DIRS:
+            path = directory / candidate
+            if path.exists():
+                return path.stem, path
+    return family, None
+
+
+def _has_arabic(text: str) -> bool:
+    return any("\u0600" <= ch <= "\u06FF" or "\u0750" <= ch <= "\u077F" for ch in text)
+
+
+def shape_arabic(text: str) -> str:
+    """Join and visually order Arabic so libass draws it correctly.
+
+    A no-op for text with no Arabic in it, so this is safe to call on every
+    line regardless of the run's language.
+    """
+    if not _has_arabic(text):
+        return text
+    try:
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+
+        return get_display(arabic_reshaper.reshape(text))
+    except Exception as exc:      # pragma: no cover - depends on optional deps
+        logger.warning(
+            f"[aivideo] Arabic shaping unavailable ({type(exc).__name__}); "
+            f"captions may render disconnected"
+        )
+        return text
+
+
+@dataclass
+class Line:
+    text: str
+    start: float
+    end: float
+    words: list[Word]
+
+
+def group_lines(words: list[Word], per_line: int) -> list[Line]:
+    """Chunk word timings into caption lines.
+
+    Splits on sentence punctuation as well as the word count, because a line
+    that runs across a full stop reads as one thought when it is two.
+    """
+    lines: list[Line] = []
+    bucket: list[Word] = []
+    per_line = max(1, per_line)
+
+    for word in words:
+        bucket.append(word)
+        ends_sentence = bool(re.search(r"[.!?،؟…]$", word.text.strip()))
+        if len(bucket) >= per_line or ends_sentence:
+            lines.append(Line(
+                " ".join(w.text for w in bucket).strip(),
+                bucket[0].start, bucket[-1].end, list(bucket),
+            ))
+            bucket = []
+
+    if bucket:
+        lines.append(Line(
+            " ".join(w.text for w in bucket).strip(),
+            bucket[0].start, bucket[-1].end, list(bucket),
+        ))
+    return [line for line in lines if line.text]
+
+
+def _ass_colour(hex_colour: str, default: str = "&H00FFFFFF") -> str:
+    """#RRGGBB or #RRGGBBAA -> ASS &HAABBGGRR. ASS is BGR and alpha-inverted."""
+    value = str(hex_colour or "").lstrip("#")
+    if len(value) not in (6, 8):
+        return default
+    r, g, b = value[0:2], value[2:4], value[4:6]
+    alpha = "00" if len(value) == 6 else f"{255 - int(value[6:8], 16):02X}"
+    return f"&H{alpha}{b}{g}{r}".upper()
+
+
+#: ASS numeric alignment for a bottom-anchored numpad layout.
+_ALIGNMENT = {"bottom": 2, "center": 5, "top": 8}
+
+
+def _timestamp(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{int(hours)}:{int(minutes):02d}:{secs:05.2f}"
+
+
+def build_ass(
+    words: list[Word],
+    style: CaptionStyle,
+    size: tuple[int, int],
+    output: Path,
+    *,
+    language: str = "en",
+) -> Path | None:
+    """Write the caption track. None when there is nothing to caption."""
+    if not style.enabled or not words:
+        return None
+
+    lines = group_lines(words, style.words_per_line)
+    if not lines:
+        return None
+
+    width, height = size
+    font_name, font_file = resolve_font(style.font)
+    if font_file is None:
+        logger.warning(
+            f"[aivideo] no file found for caption font {style.font!r}; "
+            f"libass will substitute"
+        )
+
+    primary = _ass_colour(style.text_color)
+    outline = _ass_colour(style.outline_color, "&H00000000")
+    # Karaoke highlighting uses the secondary colour; presets that do not
+    # highlight simply set it to the same value as the text.
+    secondary = _ass_colour(style.highlight_color, primary)
+
+    boxed = str(style.background or "none").lower() != "none"
+    back = _ass_colour(style.background, "&H80000000") if boxed else "&H00000000"
+    border_style = 3 if boxed else 1        # 3 = opaque box behind the text
+
+    margin_v = int(height * (0.10 if style.position == "bottom" else 0.04))
+    alignment = _ALIGNMENT.get(style.position, 2)
+    bold = -1 if style.weight in {"bold", "black", "semibold"} else 0
+
+    header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {width}
+PlayResY: {height}
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+YCbCr Matrix: TV.709
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Caption,{font_name},{style.size},{primary},{secondary},{outline},{back},{bold},0,0,0,100,100,0,0,{border_style},{style.outline_width},0,{alignment},{int(width * 0.06)},{int(width * 0.06)},{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    events: list[str] = []
+    for line in lines:
+        text = line.text.upper() if style.uppercase else line.text
+        text = shape_arabic(text)
+        # Escape the few characters ASS treats as markup.
+        text = text.replace("\\", "").replace("{", "(").replace("}", ")")
+        events.append(
+            f"Dialogue: 0,{_timestamp(line.start)},{_timestamp(line.end)},"
+            f"Caption,,0,0,0,,{text}"
+        )
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(header + "\n".join(events) + "\n", encoding="utf-8")
+    logger.info(
+        f"[aivideo] captions: {len(lines)} lines, font {font_name}"
+        f"{' (Arabic shaped)' if language == 'ar' else ''}"
+    )
+    return output

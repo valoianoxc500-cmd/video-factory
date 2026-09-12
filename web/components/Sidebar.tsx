@@ -31,7 +31,15 @@ const Icon = {
     "M9 7H6a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h1a3 3 0 0 1-3 3m14-10h-3a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h1a3 3 0 0 1-3 3",
   pursuit:
     "M3 16h2l1.5-5h11L19 16h2M6 16v3m12-3v3M8 14h8M9 8l1-3h4l1 3M4 8l2 1m14-1-2 1",
+  aivideo:
+    "M4 6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6Zm11 4.5 4.4-2.5a.6.6 0 0 1 .9.5v7a.6.6 0 0 1-.9.5L15 13.5M8 9l3 3-3 3",
 } as const;
+
+// Football, Horror/True Stories and Animated Stories no longer appear in this
+// sidebar: AI Video Maker covers what they were for. Their routes, pipelines,
+// workspaces and historical videos are all untouched and still reachable by
+// URL — this is product simplification, not a deletion. Their icons are kept
+// in `Icon` above so restoring an entry is a one-line change.
 
 function NavIcon({ d }: { d: string }) {
   return (
@@ -54,8 +62,6 @@ export function Sidebar({ email }: { email: string }) {
     router.refresh();
   }
 
-  const storyOpen = is("/dashboard/story") || is("/dashboard/animated");
-
   return (
     <aside className="side">
       <Link href="/dashboard" style={{ textDecoration: "none" }}>
@@ -74,55 +80,16 @@ export function Sidebar({ email }: { email: string }) {
 
         <span className="nav-label">Create</span>
         <Link
-          href="/dashboard/football"
-          data-surface="football"
-          className={is("/dashboard/football") ? "active" : ""}
+          href="/dashboard/video"
+          data-surface="aivideo"
+          className={is("/dashboard/video") ? "active" : ""}
         >
-          <NavIcon d={Icon.football} />
+          <NavIcon d={Icon.aivideo} />
           <span>
-            Football
-            <span className="nav-sub">Researched Arabic football news</span>
+            AI Video Maker
+            <span className="nav-sub">An idea to a finished video</span>
           </span>
         </Link>
-
-        <span className={`nav-parent${storyOpen ? " is-open" : ""}`}>
-          <NavIcon d={Icon.story} /> Story To Video
-        </span>
-        <span className="nav-children">
-          <Link
-            href="/dashboard/story/horror"
-            data-surface="horror"
-            className={is("/dashboard/story/horror") ? "active" : ""}
-          >
-            <NavIcon d={Icon.horror} />
-            <span>
-              Horror Stories
-              <span className="nav-sub">Paranormal, legends, original horror</span>
-            </span>
-          </Link>
-          <Link
-            href="/dashboard/story/true"
-            data-surface="true"
-            className={is("/dashboard/story/true") ? "active" : ""}
-          >
-            <NavIcon d={Icon.truth} />
-            <span>
-              True Stories
-              <span className="nav-sub">Real cases, verified before written</span>
-            </span>
-          </Link>
-          <Link
-            href="/dashboard/animated"
-            data-surface="animated"
-            className={is("/dashboard/animated") ? "active" : ""}
-          >
-            <NavIcon d={Icon.animated} />
-            <span>
-              Animated Stories
-              <span className="nav-sub">One visual world, scene to scene</span>
-            </span>
-          </Link>
-        </span>
 
         <span className="nav-label">Tools</span>
         <Link
