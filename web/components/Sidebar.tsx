@@ -29,6 +29,8 @@ const Icon = {
     "M3 8h18v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8Zm0 0 2-3h14l2 3M8 13h4",
   quotes:
     "M9 7H6a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h1a3 3 0 0 1-3 3m14-10h-3a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h1a3 3 0 0 1-3 3",
+  pursuit:
+    "M3 16h2l1.5-5h11L19 16h2M6 16v3m12-3v3M8 14h8M9 8l1-3h4l1 3M4 8l2 1m14-1-2 1",
 } as const;
 
 function NavIcon({ d }: { d: string }) {
@@ -145,6 +147,11 @@ export function Sidebar({ email }: { email: string }) {
             Clipping
             <span className="nav-sub">Your footage, cut to 9:16</span>
           </span>
+        </Link>
+
+        <Link href="/dashboard/police-chase" data-surface="police-chase" className={is("/dashboard/police-chase") ? "active" : ""}>
+          <NavIcon d={Icon.pursuit} />
+          <span>Police Chase Studio<span className="nav-sub">Authorized pursuit footage to vertical clips</span></span>
         </Link>
 
         <Link

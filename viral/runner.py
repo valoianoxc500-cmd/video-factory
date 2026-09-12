@@ -49,6 +49,7 @@ from viral.discovery import (
 )
 from viral.processing import build_ffmpeg_command, build_plan, detect_subject_centre, probe
 from viral import clipping as vrf_clipping
+from viral import police_chase as chase
 from viral.publishing import (
     MAX_ATTEMPTS,
     PublishRequest,
@@ -789,6 +790,95 @@ def _run_viral_clip_batch(
     }
 
 
+def _police_visual_analysis(source_path: Path, duration: float, workdir: Path) -> dict:
+    """One bounded vision review over evenly sampled frames; never fabricates events."""
+    frame_paths: list[Path] = []
+    count = 10
+    for index in range(count):
+        at = (max(0.0, duration - .1) * index / max(1, count - 1))
+        target = workdir / f"analysis_{index:02d}.jpg"
+        result = subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{at:.3f}", "-i", str(source_path), "-frames:v", "1", "-vf", "scale=640:-2", str(target)], capture_output=True, text=True)
+        if result.returncode == 0 and target.exists(): frame_paths.append(target)
+    if not frame_paths: return {"events": [], "burned_english_captions": None}
+    try:
+        import clients
+        stamps = [round(max(0.0, duration-.1)*i/max(1,count-1), 2) for i in range(len(frame_paths))]
+        prompt = (
+            "Review these evenly spaced frames from one authorized police/bodycam/dashcam video. "
+            f"Frame timestamps in order: {stamps}. Detect only clearly visible events from: {sorted(chase.EVENT_LABELS)}. "
+            "Do not infer unseen events. Also decide whether repeated burned-in ENGLISH subtitle text is visibly present. "
+            "Return JSON with events [{seconds,label,confidence,description}], burned_english_captions true/false, caption_confidence 0..1."
+        )
+        value = asyncio.run(clients.review_with_vision(prompt, frame_paths, operation_label="police_chase_visual_analysis"))
+        return value if isinstance(value, dict) else {"events": [], "burned_english_captions": None}
+    except Exception as exc:
+        logger.warning(f"[police-chase] visual analysis unavailable: {str(exc)[:160]}")
+        return {"events": [], "burned_english_captions": None}
+
+
+def _cta_srt(spec: "vrf_clipping.ClipSpec", text: str, placement: str, workdir: Path) -> Path | None:
+    if not text: return None
+    start = .2 if placement == "persistent" else max(0.0, spec.duration - 2.7)
+    target = workdir / f"{spec.id}_cta.srt"
+    target.write_text(
+        vrf_clipping.cues_to_srt([
+            vrf_clipping.CaptionCue(start, max(start + .2, spec.duration - .1), text)
+        ]),
+        encoding="utf-8",
+    )
+    return target
+
+
+def _police_caption_words(words: list[dict], action: str) -> tuple[list[dict], bool]:
+    if action == "generate_en": return words, bool(words)
+    if action != "translate_ar" or not words: return [], False
+    try:
+        from core.caption_language import build_caption_words
+        narration = " ".join(str(row.get("word") or "") for row in words)
+        translated, ok = asyncio.run(build_caption_words(words, narration, voice_language="en", caption_language="ar"))
+        return (translated, True) if ok else ([], False)
+    except Exception as exc:
+        logger.warning(f"[police-chase] Arabic captions unavailable: {str(exc)[:160]}")
+        return [], False
+
+
+def _run_police_chase_batch(client: WorkerClient, payload: dict, asset: dict, source_path: Path, source, workdir: Path, attestation) -> dict:
+    options = payload.get("police_chase") or {}
+    target = int(options.get("target_seconds") or 30); requested = int(options.get("count") or 1)
+    retry = options.get("retry_moment")
+    analysis = {"events": [], "burned_english_captions": None} if retry else _police_visual_analysis(source_path, float(source.duration or 0), workdir)
+    try: words = _transcribe_for_viral_clips(source_path, workdir, "en")
+    except Exception as exc:
+        logger.warning(f"[police-chase] transcript unavailable: {str(exc)[:160]}"); words = []
+    if isinstance(retry, dict):
+        moments = [vrf_clipping.ViralMoment("chase_retry", str(retry.get("title") or "Selected chase moment"), float(retry.get("start") or 0), float(retry.get("end") or target), int(retry.get("viral_score") or 50), str(retry.get("reason") or "Selected moment"), dict(retry.get("signals") or {}))]
+    else:
+        moments = chase.select_chase_moments(words, list(analysis.get("events") or []), source_duration=float(source.duration or 0), target_seconds=target, count=requested)
+    if not moments: raise RuntimeError("We could not verify a strong chase moment in this source.")
+    burned = analysis.get("burned_english_captions") if float(analysis.get("caption_confidence") or 0) >= .65 else None
+    decision = chase.caption_decision(str(options.get("caption_language") or "auto"), burned)
+    caption_words, caption_ok = _police_caption_words(words, decision["action"])
+    if decision["action"] == "translate_ar" and not caption_ok: decision = {"action":"none","status":"Arabic captions unavailable"}
+    specs=[vrf_clipping.ClipSpec(id=m.id,start=m.start,end=m.end,aspect="9:16",captions=bool(caption_words),caption_style="bold",focus="auto",quality="balanced") for m in moments]
+    plan=vrf_clipping.plan_clips(source,[s.to_record() for s in specs],attestation=attestation,platform="tiktok")
+    rendered:dict[str,dict]={}; source_meta=chase.normalize_source_metadata(options.get("source_metadata")); moment_by={m.id:m for m in moments}
+    def render(spec):
+        output=workdir/f"{spec.id}.mp4"; subtitles=_subtitles_from_transcript(caption_words,spec,workdir) if caption_words else None
+        cta=chase.choose_cta(str(options.get("cta_mode") or "auto"),str(options.get("cta_text") or ""),f"{asset.get('id')}:{spec.id}",str(options.get("cta_placement") or "end")); cta_path=_cta_srt(spec,cta["text"],cta["placement"],workdir)
+        command=vrf_clipping.build_clip_command(source_path,output,spec,centre=vrf_clipping.focus_centre(source_path,spec),subtitle_path=subtitles,cta_path=cta_path,has_audio=source.has_audio)
+        result=subprocess.run(command,capture_output=True,text=True)
+        if result.returncode!=0 or not output.exists(): raise RuntimeError(vrf_clipping.safe_clip_error(result.stderr or ""))
+        measured=probe(output); remote=_upload_media(output,f"vrf/{asset.get('user_id')}/{asset.get('id')}/{spec.id}.mp4"); rendered[spec.id]={"captions":subtitles is not None,"caption_status":decision["status"],"cta_text":cta["text"],"duration":measured.duration or spec.duration,"width":measured.width,"height":measured.height}; return str(remote)
+    results=vrf_clipping.run_clip_batch(plan.specs,render); summary=vrf_clipping.batch_summary(results)
+    clips=[]
+    for result in results:
+        moment=moment_by[result.id]; clips.append({**moment.to_record(),**result.to_record(),**rendered.get(result.id,{"caption_status":decision["status"],"cta_text":""})})
+    if not summary["ok"]: raise RuntimeError(str(summary["message"]))
+    available=[c for c in clips if c["status"] in {"done","skipped"}]; first=available[0]; meta=rendered.get(first["id"],{})
+    client.call("save_processing",id=str(asset.get("id") or ""),processed_path=str(first["path"]),duration_seconds=meta.get("duration") or first["duration"],width=meta.get("width") or 1080,height=meta.get("height") or 1920,processing_plan={"mode":"police_chase","moments":[m.to_record() for m in moments],"source_metadata":source_meta.to_record()})
+    return {"processed":True,"mode":"police_chase","clips":clips,"ready":len(available),"failed":summary["failed"],"message":summary["message"],"source_metadata":source_meta.to_record(),"burned_caption_detection":"detected" if burned is True else "not_detected" if burned is False else "unavailable"}
+
+
 def run_process(client: WorkerClient, payload: dict) -> dict:
     """Format and quality work on a video the user holds rights to."""
     asset_id = str(payload.get("asset_id") or "")
@@ -826,6 +916,8 @@ def run_process(client: WorkerClient, payload: dict) -> dict:
         _download(str(asset.get("storage_path") or ""), source_path)
 
         source = probe(source_path)
+        if isinstance(payload.get("police_chase"), dict):
+            return _run_police_chase_batch(client, payload, asset, source_path, source, Path(workdir), attestation)
         auto_clip = payload.get("auto_clip")
         if isinstance(auto_clip, dict):
             return _run_viral_clip_batch(

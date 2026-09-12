@@ -801,6 +801,7 @@ def build_clip_command(
     *,
     centre: float = 0.5,
     subtitle_path: Path | None = None,
+    cta_path: Path | None = None,
     has_audio: bool = True,
 ) -> list[str]:
     """The exact invocation for one clip. Pure: builds, does not run."""
@@ -815,6 +816,12 @@ def build_clip_command(
     ]
     if spec.captions and subtitle_path is not None:
         filters.append(caption_filter(subtitle_path, spec.caption_style))
+    if cta_path is not None:
+        escaped = str(cta_path).replace("\\", "/").replace(":", r"\:")
+        filters.append(
+            f"subtitles='{escaped}':force_style='FontSize=17,Bold=1,"
+            "Outline=3,Shadow=1,Alignment=8,MarginV=75'"
+        )
 
     cmd = [
         "ffmpeg", "-y", "-v", "error",
