@@ -29,6 +29,8 @@ const Icon = {
     "M3 8h18v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8Zm0 0 2-3h14l2 3M8 13h4",
   quotes:
     "M9 7H6a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h1a3 3 0 0 1-3 3m14-10h-3a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h1a3 3 0 0 1-3 3",
+  chat:
+    "M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-5 4v-4.5A2.5 2.5 0 0 1 4 13.5v-8ZM8 8h8M8 12h5",
 } as const;
 
 function NavIcon({ d }: { d: string }) {
@@ -132,6 +134,18 @@ export function Sidebar({ email }: { email: string }) {
           <span>
             Quote Studio
             <span className="nav-sub">Photo to quote carousel</span>
+          </span>
+        </Link>
+
+        <Link
+          href="/dashboard/fake-chat"
+          data-surface="fake-chat"
+          className={is("/dashboard/fake-chat") ? "active" : ""}
+        >
+          <NavIcon d={Icon.chat} />
+          <span>
+            Fake Chat Studio
+            <span className="nav-sub">Design realistic chat mockups</span>
           </span>
         </Link>
 
