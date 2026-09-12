@@ -313,7 +313,7 @@ def stub_candidates(monkeypatch):
         plan.setdefault("concept_calls", []).append(list(intents))
         return dict(plan.get("alternatives") or {})
 
-    async def still_candidates(client, terms, scratch, *, portrait, wanted=4):
+    async def still_candidates(client, terms, scratch, *, portrait, wanted=4, says=""):
         scratch.mkdir(parents=True, exist_ok=True)
         out = []
         for i, spec in enumerate(plan.get("stills", {}).get(terms[0] if terms else "", [])):

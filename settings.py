@@ -95,6 +95,15 @@ class Settings(BaseSettings):
     # provider cannot see a key that has no field.
     fal_key: str = Field(default="", alias="FAL_KEY")
 
+    # Optional sources for the media aggregator. Every one of these is
+    # optional by design: an unset key makes that source report itself
+    # unavailable and the router asks the others, so nothing is blocked.
+    # Wikimedia Commons, the Internet Archive, the Library of Congress, the
+    # Met and NASA need no key at all -- only a User-Agent.
+    openverse_api_token: str = Field(default="", alias="OPENVERSE_API_TOKEN")
+    smithsonian_api_key: str = Field(default="", alias="SMITHSONIAN_API_KEY")
+    europeana_api_key: str = Field(default="", alias="EUROPEANA_API_KEY")
+
     # Research providers. Wikimedia Commons needs no key, only a User-Agent.
     youtube_api_key: str = Field(default="", alias="YOUTUBE_API_KEY")
     # NEWSAPI_KEY is the spelling already in use; NEWSAPI_API_KEY is also

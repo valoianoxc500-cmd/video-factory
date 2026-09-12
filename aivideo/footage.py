@@ -49,6 +49,25 @@ class Clip:
     #: `gather` from PySceneDetect so a beat does not open mid-edit; None
     #: means "start at zero", which is what the naive cut did.
     window: tuple[float, float] | None = None
+    #: Why this asset may be used, kept with the clip so the finished video
+    #: can say where every frame came from. The stock libraries need no
+    #: credit line; the archives generally do, and an unrecorded one is a
+    #: licence condition quietly unmet.
+    license: str = ""
+    license_url: str = ""
+    creator: str = ""
+    attribution: str = ""
+
+    def provenance(self) -> dict:
+        return {
+            "provider": self.provider,
+            "source_url": self.source_url,
+            "creator": self.creator,
+            "license": self.license,
+            "license_url": self.license_url,
+            "attribution": self.attribution,
+            "query": self.term,
+        }
 
     @property
     def is_portrait(self) -> bool:
@@ -186,15 +205,29 @@ async def _download(
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(bytes(body))
+    provider = candidate["provider"]
     return Clip(
         path=target,
-        provider=candidate["provider"],
+        provider=provider,
         term=candidate.get("term", ""),
         width=candidate["width"],
         height=candidate["height"],
         duration=candidate["duration"],
         source_url=candidate.get("page", ""),
+        # The stock libraries need no credit line, but the basis on which
+        # their footage is used still belongs in the record.
+        license=candidate.get("license") or provider,
+        license_url=_LICENSE_URLS.get(provider, ""),
+        creator=candidate.get("creator", ""),
     )
+
+
+#: Where each stock library's terms are published, for the provenance record.
+_LICENSE_URLS = {
+    "pexels": "https://www.pexels.com/license/",
+    "pixabay": "https://pixabay.com/service/license-summary/",
+    "unsplash": "https://unsplash.com/license",
+}
 
 
 async def fetch_one(
@@ -426,7 +459,7 @@ async def _still_with_motion(
     try:
         stills = await fallback.still_candidates(
             client, queries[:3], scratch / "stills",
-            portrait=portrait, wanted=4,
+            portrait=portrait, wanted=4, says=getattr(beat, "says", ""),
         )
     except Exception as exc:
         logger.info(f"[aivideo] beat {index}: still search failed ({type(exc).__name__})")
@@ -451,6 +484,7 @@ async def _still_with_motion(
             portrait=portrait, term=still.get("term", ""),
             provider=still.get("provider", "still"),
             source_url=still.get("page", ""),
+            credit=still,
         )
         if made is not None:
             logger.info(
@@ -463,7 +497,7 @@ async def _still_with_motion(
 
 def _motion_as_clip(
     image: Path, target: Path, index: int, *, portrait: bool,
-    term: str, provider: str, source_url: str = "",
+    term: str, provider: str, source_url: str = "", credit: dict | None = None,
 ) -> Clip | None:
     """Wrap the motion pass so a still enters the pipeline as an ordinary clip.
 
@@ -480,11 +514,16 @@ def _motion_as_clip(
     )
     if made is None:
         return None
+    credit = credit or {}
     return Clip(
         path=made, provider=provider, term=term,
         width=size[0], height=size[1], duration=seconds,
         source_url=source_url or f"still:{image.name}",
         window=(0.0, seconds),
+        license=str(credit.get("license") or ""),
+        license_url=str(credit.get("license_url") or ""),
+        creator=str(credit.get("creator") or ""),
+        attribution=str(credit.get("attribution") or ""),
     )
 
 

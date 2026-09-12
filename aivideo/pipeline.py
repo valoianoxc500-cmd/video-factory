@@ -78,6 +78,9 @@ class JobState:
     #: needs beyond one per beat.
     reserve_clips: list[str] = field(default_factory=list)
     reserve_windows: list[list] = field(default_factory=list)
+    #: One provenance record per visual: provider, source page, creator,
+    #: licence and the credit line, if the licence asks for one.
+    attribution: list[dict] = field(default_factory=list)
     missing_terms: list[str] = field(default_factory=list)
     narration_seconds: float = 0.0
     providers_used: list[str] = field(default_factory=list)
@@ -336,6 +339,11 @@ async def run(
         # is what keeps the back half of a video from replaying the front.
         state.reserve_clips = [str(c.path) for c in reserves]
         state.reserve_windows = [list(c.window or (0.0, 4.0)) for c in reserves]
+        # Where every frame came from and on what basis. Kept with the job
+        # because a licence condition that is only met at selection time is
+        # not met at all -- if anyone asks later why a shot was used, this is
+        # the answer.
+        state.attribution = [c.provenance() for c in (*clips, *reserves)]
         state.missing_terms = missing
         state.providers_used = sorted({c.provider for c in clips})
         if missing:

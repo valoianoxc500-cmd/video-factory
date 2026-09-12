@@ -56,7 +56,6 @@ __all__ = [
 #: sideline.
 MAX_GENERATED = 1
 
-_MIN_STILL_WIDTH = 1200
 _MAX_STILL_BYTES = 12 * 1024 * 1024
 
 
@@ -194,72 +193,25 @@ def _clean(raw) -> list[str]:
 
 # ── rung 3: stills ───────────────────────────────────────────────────
 
-async def _pexels_stills(client: httpx.AsyncClient, term: str, portrait: bool) -> list[dict]:
-    key = (settings.pexels_api_key or "").strip()
-    if not key or not key.isascii():
-        return []
-    resp = await client.get(
-        "https://api.pexels.com/v1/search",
-        headers={"Authorization": key},
-        params={
-            "query": term, "per_page": 10,
-            "orientation": "portrait" if portrait else "landscape",
-        },
-    )
-    if resp.status_code != 200:
-        return []
-    out = []
-    for photo in resp.json().get("photos", []):
-        src = (photo.get("src") or {}).get("large2x") or (photo.get("src") or {}).get("large")
-        if src and (photo.get("width") or 0) >= _MIN_STILL_WIDTH:
-            out.append({
-                "url": src, "provider": "pexels",
-                "page": photo.get("url", ""),
-                "width": photo.get("width") or 0,
-                "height": photo.get("height") or 0,
-            })
-    return out
-
-
-async def _pixabay_stills(client: httpx.AsyncClient, term: str, portrait: bool) -> list[dict]:
-    key = (settings.pixabay_api_key or "").strip()
-    if not key or not key.isascii():
-        return []
-    resp = await client.get(
-        "https://pixabay.com/api/",
-        params={
-            "key": key, "q": term, "per_page": 10, "image_type": "photo",
-            "orientation": "vertical" if portrait else "horizontal",
-        },
-    )
-    if resp.status_code != 200:
-        return []
-    out = []
-    for hit in resp.json().get("hits", []):
-        url = hit.get("largeImageURL")
-        if url and (hit.get("imageWidth") or 0) >= _MIN_STILL_WIDTH:
-            out.append({
-                "url": url, "provider": "pixabay",
-                "page": hit.get("pageURL", ""),
-                "width": hit.get("imageWidth") or 0,
-                "height": hit.get("imageHeight") or 0,
-            })
-    return out
-
-
-_STILL_PROVIDERS = (("pexels", _pexels_stills), ("pixabay", _pixabay_stills))
-
-
 async def still_candidates(
     client: httpx.AsyncClient, terms: list[str], scratch: Path, *,
-    portrait: bool, wanted: int = 4,
+    portrait: bool, wanted: int = 4, says: str = "",
 ) -> list[dict]:
     """Download a few candidate photographs. Each dict carries its local path.
 
-    Stills are worth reaching for because the libraries hold far more of them
-    than video, and a well-chosen photograph with motion on it is a better
-    answer than the wrong clip or a recycled neighbour.
+    Routed through the media aggregator, so this reaches all twelve sources
+    rather than the two stock libraries. That matters most exactly here: the
+    beats that reach this rung are the ones stock video could not cover, and
+    they are disproportionately the specific ones -- a named stadium, a dated
+    event, a real satellite view -- which is what the archives have and stock
+    does not.
+
+    Only assets that passed the licence filter are returned, and each carries
+    its licence and attribution onward.
     """
+    from medialab.media import MediaType, SearchContext
+    from medialab.media import search as media_search
+
     scratch.mkdir(parents=True, exist_ok=True)
     found: list[dict] = []
     seen: set[str] = set()
@@ -267,24 +219,35 @@ async def still_candidates(
     for term in terms:
         if len(found) >= wanted:
             break
-        for name, search in _STILL_PROVIDERS:
+        try:
+            result = await media_search(
+                term,
+                media_type=MediaType.IMAGE,
+                context=SearchContext(portrait=portrait, says=says, per_provider=4),
+                client=client,
+            )
+        except Exception as exc:
+            logger.info(f"[aivideo] media search failed ({type(exc).__name__})")
+            continue
+        for asset in result.assets:
             if len(found) >= wanted:
                 break
-            try:
-                candidates = await search(client, term, portrait)
-            except Exception as exc:
-                logger.debug(f"[aivideo] {name} stills failed: {type(exc).__name__}")
+            if not asset.download_url or asset.download_url in seen:
                 continue
-            for candidate in candidates:
-                if len(found) >= wanted:
-                    break
-                if candidate["url"] in seen:
-                    continue
-                seen.add(candidate["url"])
-                target = scratch / f"still_{slot:02d}.jpg"
-                slot += 1
-                if await _download_still(client, candidate["url"], target):
-                    found.append({**candidate, "path": target, "term": term})
+            seen.add(asset.download_url)
+            target = scratch / f"still_{slot:02d}.jpg"
+            slot += 1
+            if await _download_still(client, asset.download_url, target):
+                found.append({
+                    "path": target, "term": term,
+                    "provider": asset.provider,
+                    "page": asset.original_url,
+                    "width": asset.width, "height": asset.height,
+                    "license": asset.license,
+                    "license_url": asset.license_url,
+                    "creator": asset.creator,
+                    "attribution": asset.attribution,
+                })
     return found
 
 

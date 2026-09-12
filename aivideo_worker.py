@@ -301,6 +301,16 @@ def serve(once: bool) -> int:
     WORKSPACE.mkdir(parents=True, exist_ok=True)
     logger.info(f"AI Video Maker worker polling {APP_URL} every {POLL_SECONDS:.0f}s")
 
+    # Which media sources this deployment can actually draw on. Logged once at
+    # start so a missing optional key is a visible fact rather than a source
+    # that quietly never returns anything. None of them block startup.
+    try:
+        from medialab.media import log_status
+
+        log_status()
+    except Exception as exc:      # noqa: BLE001 - diagnostics are never fatal
+        logger.info(f"media source status unavailable ({type(exc).__name__})")
+
     with httpx.Client(timeout=60.0) as client:
         while True:
             try:
