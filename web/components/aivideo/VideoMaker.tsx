@@ -695,6 +695,12 @@ export function VideoMaker() {
             </div>
           )}
 
+          {active?.stalled && (
+            <div className="avm-note" data-kind="warn">
+              {active.message}
+            </div>
+          )}
+
           {active?.status === "error" && (
             <div className="avm-note" data-kind="error">
               {active.error || "That one didn't finish. Try generating again."}

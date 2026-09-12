@@ -12,6 +12,57 @@ import { sanitiseSettings } from "@/lib/aivideo";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * How long a job may sit unclaimed, or claimed but silent, before the customer
+ * is told something is wrong.
+ *
+ * A worker that is down produces no error anywhere: the row simply stays
+ * `queued` and the UI says "Waiting to start — 0%" indefinitely, which is
+ * exactly how this product looked before the worker was installed. Nothing in
+ * the pipeline can report that, because the pipeline never ran. So the read
+ * path decides it, from the row's own timestamps.
+ *
+ * Generous on purpose. A queued job normally waits seconds; a running one
+ * reports progress every stage boundary, and the slowest stage observed is the
+ * render at roughly four minutes.
+ */
+const UNCLAIMED_STALL_MS = 6 * 60 * 1000;
+const SILENT_STALL_MS = 12 * 60 * 1000;
+
+type JobRow = Record<string, unknown> & {
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+/**
+ * Annotate a job the worker has plainly not touched.
+ *
+ * Deliberately a *view*, not a write: this does not change the row, so the
+ * job stays exactly where it is and a worker coming back later still picks it
+ * up and finishes it. Nothing here can create a duplicate job, and a stalled
+ * job that later completes simply stops being reported as stalled.
+ */
+function withStallState<T extends JobRow>(job: T): T & { stalled?: boolean } {
+  if (job.status !== "queued" && job.status !== "running") return job;
+
+  const since = Date.parse(
+    (job.status === "queued" ? job.created_at : job.updated_at) ?? "",
+  );
+  if (!Number.isFinite(since)) return job;
+
+  const limit = job.status === "queued" ? UNCLAIMED_STALL_MS : SILENT_STALL_MS;
+  if (Date.now() - since < limit) return job;
+
+  return {
+    ...job,
+    stalled: true,
+    message:
+      "This is taking longer than usual. It's still queued and will start " +
+      "as soon as capacity frees up — you don't need to submit it again.",
+  };
+}
+
 function fail(err: unknown, action: string) {
   const message = (err as Error)?.message ?? "";
   if (/sign|auth|session|jwt/i.test(message)) {
@@ -30,13 +81,16 @@ export async function GET() {
       .select(
         "id, topic, language, duration_seconds, aspect_ratio, status, stage, " +
           "progress, message, error, video_url, thumbnail_url, duration_actual, " +
-          "cost_usd, created_at",
+          "cost_usd, created_at, updated_at, attempts, claimed_at",
       )
       .eq("user_id", user.id)
       .order("created_at", { ascending: false })
       .limit(24);
     if (error) throw new Error(error.message);
-    return Response.json({ jobs: data ?? [] });
+    // Cast because the client widens a long select into a union that includes
+    // its own error shape; `error` above is what actually distinguishes them.
+    const rows = (data ?? []) as unknown as JobRow[];
+    return Response.json({ jobs: rows.map(withStallState) });
   } catch (err) {
     return fail(err, "load your videos");
   }

@@ -39,9 +39,64 @@ import httpx
 
 from aivideo import pipeline
 
+# Imported as `worker.singleton`, NOT by putting `worker/` on sys.path -- that
+# insertion makes `import worker` resolve to worker/worker.py and shadows the
+# namespace package. The fallback covers a caller that already did it.
+try:
+    from worker.singleton import (
+        RESTART_GRACE_SECONDS,
+        AlreadyRunningError,
+        SingleInstanceLock,
+    )
+except ImportError:  # pragma: no cover - depends on sys.path ordering
+    from singleton import (
+        RESTART_GRACE_SECONDS,
+        AlreadyRunningError,
+        SingleInstanceLock,
+    )
+
 REPO_ROOT = Path(__file__).resolve().parent
 WORKSPACE = REPO_ROOT / "workspace" / "aivideo"
 MUSIC = REPO_ROOT / "assets" / "music"
+WORKER_ENV = REPO_ROOT / "worker" / ".env"
+
+# APP_URL is this worker's name for what worker/.env may call WORKER_API_BASE.
+_ALIASES = {"WORKER_API_BASE": "APP_URL", "APP_URL": "WORKER_API_BASE"}
+
+
+def load_worker_env(path: Path = WORKER_ENV) -> int:
+    """Read worker/.env into the process environment.
+
+    `settings.py` loads the repository's own .env but not this one, so a
+    scheduled task started with a bare environment saw no APP_URL and no
+    WORKER_TOKEN and exited immediately -- which is exactly how AI Video jobs
+    sat at "Waiting to start" with nothing in the log to explain it.
+
+    Deliberately a copy of the loader in vrf_worker.py rather than a shared
+    import: pulling that module in would drag the whole Viral Reels runner into
+    this process, and coupling two products' startup paths is the thing this
+    worker exists separately to avoid. A real environment variable always wins,
+    so a container or a one-off run can still override the file.
+    """
+    if not path.exists():
+        return 0
+    loaded = 0
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        for name in {key, _ALIASES.get(key, key)}:
+            if name and name not in os.environ:
+                os.environ[name] = value
+                loaded += 1
+    return loaded
+
+
+# Read before the module-level configuration below is evaluated.
+load_worker_env()
 
 APP_URL = (os.environ.get("APP_URL") or os.environ.get("WORKER_API_BASE") or "").rstrip("/")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
@@ -156,7 +211,28 @@ def run_job(client: httpx.Client, job: dict) -> None:
 
     # Upload through the existing media path so this product stores files the
     # same way every other one does.
-    video_url, thumb_url = _publish(video, Path(state.thumbnail) if state.thumbnail else None)
+    #
+    # Wrapped, because everything above this point already succeeded: the MP4
+    # is rendered and validated on disk. An upload failure must cost a retry of
+    # the upload, not the worker -- an exception escaping here killed the
+    # process on the first real job, and a worker that dies on one bad job is
+    # how a queue silently stops moving. The render stays checkpointed, so the
+    # retry re-uploads rather than re-renders.
+    try:
+        video_url, thumb_url = _publish(
+            job_id, video, Path(state.thumbnail) if state.thumbnail else None
+        )
+    except Exception as exc:
+        will_retry = attempts < MAX_ATTEMPTS
+        logger.exception(f"job {job_id} rendered but could not be stored: {exc}")
+        report(
+            client, job_id,
+            status="queued" if will_retry else "error",
+            message="Still working — finishing up" if will_retry else "",
+            error="" if will_retry else
+                  "Your video was created but could not be saved. Please try again.",
+        )
+        return
 
     report(
         client, job_id,
@@ -191,21 +267,25 @@ def _customer_message(exc: Exception, *, terminal: bool) -> str:
     return "This video didn't finish. Your progress is saved — try again."
 
 
-def _publish(video: Path, thumbnail: Path | None) -> tuple[str, str]:
+def _publish(job_id: str, video: Path, thumbnail: Path | None) -> tuple[str, str]:
     """Store the finished artifacts and return their URLs.
 
-    Reuses `worker/storage.py`, the same media layer the other products
-    upload through, so there is one storage backend to configure and one place
-    that knows about buckets.
+    Reuses `worker/storage.py`, the same media layer the other products upload
+    through, so there is one storage backend to configure and one place that
+    knows about buckets. Object names follow the video worker's convention:
+    `videos/<job id>.mp4`, which also makes the upload idempotent -- a resumed
+    job overwrites its own object rather than leaving an orphan behind.
     """
     sys.path.insert(0, str(REPO_ROOT / "worker"))
     import storage  # noqa: E402
 
-    video_url = storage.upload_media(video, "videos")
+    video_url = storage.upload_media(video, f"videos/{job_id}.mp4", "video/mp4")
     thumb_url = ""
     if thumbnail and thumbnail.exists():
         try:
-            thumb_url = storage.upload_media(thumbnail, "thumbnails")
+            thumb_url = storage.upload_media(
+                thumbnail, f"thumbnails/{job_id}.jpg", "image/jpeg"
+            )
         except Exception as exc:
             # A missing thumbnail costs a grid tile, not the video.
             logger.warning(f"thumbnail upload failed: {type(exc).__name__}: {exc}")
@@ -239,7 +319,13 @@ def serve(once: bool) -> int:
                 time.sleep(POLL_SECONDS)
                 continue
 
-            run_job(client, job)
+            # The last line of defence. `run_job` handles its own failures, but
+            # anything it misses must not take the loop down with it: the queue
+            # has to keep moving for every other customer.
+            try:
+                run_job(client, job)
+            except Exception as exc:
+                logger.exception(f"job {job.get('id')} crashed the handler: {exc}")
             if once:
                 return 0
 
@@ -263,6 +349,21 @@ def _quiet_windows_ssl_teardown() -> None:
         asyncio.set_event_loop_policy(policy())
 
 
+def aivideo_lock() -> "SingleInstanceLock":
+    """The lock that keeps this checkout to one AI Video Maker worker.
+
+    Its own lock file, beside the video worker's and the VRF worker's: all
+    three are meant to run side by side. What must not happen is two of *this*
+    one, because the claim window is not the whole job -- two workers would
+    each take a different job, then race on the same job directory the moment
+    the stale-reclaim window opened.
+    """
+    return SingleInstanceLock(
+        REPO_ROOT / "workspace" / ".aivideo_worker.lock",
+        name="AI Video Maker worker",
+    )
+
+
 def main() -> int:
     _quiet_windows_ssl_teardown()
     parser = argparse.ArgumentParser(description="AI Video Maker worker")
@@ -273,6 +374,17 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    # The keep-alive trigger fires every minute whether or not the worker is
+    # healthy, so the lock -- not the scheduler -- is what actually guarantees
+    # one instance. RESTART_GRACE_SECONDS lets an incoming process wait out an
+    # outgoing one during the daily recycle instead of both giving up.
+    try:
+        lock = aivideo_lock().acquire(RESTART_GRACE_SECONDS)
+    except AlreadyRunningError as exc:
+        logger.info(str(exc))
+        return 0
+
     try:
         return serve(args.once)
     except WorkerConfigError as exc:
@@ -280,6 +392,8 @@ def main() -> int:
         return 2
     except KeyboardInterrupt:
         return 0
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":

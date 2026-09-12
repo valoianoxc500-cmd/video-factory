@@ -196,6 +196,14 @@ export type VideoJob = {
   duration_actual: number;
   cost_usd: number;
   created_at: string;
+  /**
+   * Set by the read path when a job has sat unclaimed, or claimed and silent,
+   * past the bounded threshold — the shape a down worker takes, which nothing
+   * in the pipeline can report because the pipeline never ran. The job is
+   * untouched and still recoverable; this only changes what the customer is
+   * told.
+   */
+  stalled?: boolean;
 };
 
 /** The only progress wording the customer ever sees. */
@@ -209,9 +217,14 @@ export const PROGRESS_LABELS: Record<string, string> = {
   finalize: "Finalizing",
 };
 
-export function progressLabel(job: Pick<VideoJob, "status" | "stage" | "message">): string {
+export function progressLabel(
+  job: Pick<VideoJob, "status" | "stage" | "message"> & { stalled?: boolean },
+): string {
   if (job.status === "done") return "Ready";
   if (job.status === "error") return "Needs another try";
+  // A stalled job is still queued, so the honest label is "delayed", not
+  // "failed" — it will finish on its own once a worker is back.
+  if (job.stalled) return "Delayed — still queued";
   if (job.status === "queued") return "Waiting to start";
   return job.message || PROGRESS_LABELS[job.stage] || "Working on your video";
 }

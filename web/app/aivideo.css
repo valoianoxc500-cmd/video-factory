@@ -438,6 +438,12 @@
   border: 1px solid var(--sa-accent-line);
   color: var(--sa-accent);
 }
+/* Delayed, not failed: the job is still queued and will finish on its own. */
+.avm-note[data-kind="warn"] {
+  background: rgba(255, 193, 7, 0.10);
+  border: 1px solid rgba(255, 193, 7, 0.28);
+  color: #FFD98A;
+}
 
 .avm-generate {
   background: linear-gradient(120deg, var(--sa-violet), var(--sa-accent));
