@@ -24,6 +24,26 @@ interface TaskState {
   error: string;
   payload: Record<string, unknown>;
   result: Record<string, unknown>;
+  /** When the task was queued. Needed to tell working from stuck. */
+  created_at?: string;
+}
+
+/**
+ * How long a clip job may sit before the screen stops calling it progress.
+ *
+ * A real 60-second video finishes in well under a minute, so fifteen is
+ * generous for a queue backlog and still far short of the eighteen hours a
+ * task once displayed as 'Analyzing...' having never been claimed.
+ */
+const STALE_AFTER_MS = 15 * 60 * 1000;
+
+function isStale(task: TaskState | null, now: number): boolean {
+  if (!task || (task.status !== "queued" && task.status !== "running")) return false;
+  const queuedAt = Date.parse(String(task.created_at ?? ""));
+  // No timestamp means no evidence of being stuck; keep waiting rather
+  // than accusing a healthy job.
+  if (!Number.isFinite(queuedAt)) return false;
+  return now - queuedAt > STALE_AFTER_MS;
 }
 
 function clock(value: number): string {
@@ -44,6 +64,10 @@ export function ViralClipping({
 }) {
   const relevantInitial = initialTask?.payload?.auto_clip ? initialTask : null;
   const [assets, setAssets] = useState(initialAssets);
+  // Re-rendered on a timer so an open tab notices the threshold passing
+  // even when the task row itself never changes -- which is exactly the
+  // case being guarded against.
+  const [now, setNow] = useState(() => Date.now());
   const [selectedId, setSelectedId] = useState("");
   const [sourceUrl, setSourceUrl] = useState("");
   const [options, setOptions] = useState<AutoClipOptions>(defaultAutoClipOptions);
@@ -63,6 +87,14 @@ export function ViralClipping({
 
   const selected = assets.find((asset) => asset.id === selectedId) ?? null;
   const running = task?.status === "queued" || task?.status === "running";
+  const stale = isStale(task, now);
+
+  // Only ticks while something is outstanding, so an idle screen does no work.
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, [running]);
   const clips = (Array.isArray(task?.result?.clips) ? task?.result.clips : []) as ViralClipResult[];
   const readyClips = clips.filter((clip) => ["done", "skipped"].includes(clip.status));
   const hasInput = Boolean(selectedId || sourceUrl.trim());
@@ -298,11 +330,27 @@ export function ViralClipping({
         </section>
       )}
 
-      {running && (
+      {running && !stale && (
         <section className="viral-finding" aria-live="polite">
           <div className="viral-orbit"><span /></div>
           <h2>Finding your best clips...</h2>
           <p>Analyzing hooks, moments, speakers, and pacing.</p>
+        </section>
+      )}
+
+      {/* Still queued, still polling -- but no longer claiming that analysis
+          is underway, because after this long it almost certainly is not. */}
+      {running && stale && (
+        <section className="viral-finding" aria-live="polite">
+          <h2>This is taking longer than it should.</h2>
+          <p>
+            Your video is safe and this job is still in the queue. It has not
+            started processing yet, so nothing has been lost — try again, or
+            come back shortly.
+          </p>
+          <button className="btn-ghost" type="button" onClick={reset}>
+            Start over
+          </button>
         </section>
       )}
 

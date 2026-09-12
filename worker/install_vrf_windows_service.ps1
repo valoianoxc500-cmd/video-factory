@@ -21,6 +21,20 @@
     MultipleInstances is IgnoreNew -- and if one ever slipped past that, the
     kernel lock in worker/singleton.py refuses it.
 
+    ExecutionTimeLimit is one day rather than unlimited, and that is a repair
+    rather than a preference. IgnoreNew means the keep-alive trigger does
+    nothing while an instance is *registered as running*, which is not the
+    same as the worker being alive: a batch wrapper left at "Terminate batch
+    job (Y/N)?" after a Ctrl+C keeps the instance Running with no Python
+    behind it. That happened here -- the task sat Running for four days, every
+    heartbeat skipped, and clipping jobs queued untouched the whole time. A
+    finite limit means the scheduler eventually reaps a wedged instance and
+    the next heartbeat starts a healthy one.
+
+    The cost is that a perfectly healthy worker is also restarted once a day.
+    That is cheap: it polls, so it resumes immediately, and the kernel lock
+    keeps the restart from overlapping the outgoing process.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File worker\install_vrf_windows_service.ps1
 
@@ -86,7 +100,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -DontStopOnIdleEnd `
     -RestartCount 999 `
     -RestartInterval (New-TimeSpan -Minutes 1) `
-    -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
+    -ExecutionTimeLimit (New-TimeSpan -Days 1) `
     -MultipleInstances IgnoreNew `
     -StartWhenAvailable
 

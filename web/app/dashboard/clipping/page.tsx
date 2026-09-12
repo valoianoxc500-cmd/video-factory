@@ -73,6 +73,9 @@ export default async function ClippingPage() {
                 error: latest.error,
                 payload: latest.payload,
                 result: latest.result,
+                // Carried so the screen can tell a job that is working from
+                // one that was never claimed.
+                created_at: latest.created_at,
               }
             : null
         }

@@ -21,13 +21,20 @@ Environment it needs:
 import settings  # noqa: F401
 
 import logging
-import sys
 from pathlib import Path
 
 from viral.runner import main
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "worker"))
-from singleton import (  # noqa: E402
+# Imported as `worker.singleton`, NOT by putting `worker/` on sys.path.
+#
+# That path insertion used to sit here, and it silently broke every clipping
+# job: `worker/` has no `__init__.py`, so with the directory itself first on
+# sys.path `import worker` resolved to `worker/worker.py` -- a module -- and
+# shadowed the namespace package. `viral/runner.py` then failed on
+# `from worker.storage import upload_media` with "'worker' is not a package",
+# but only at the very end of a run, after the clip had been downloaded,
+# reframed and encoded. The work was done and then thrown away.
+from worker.singleton import (
     RESTART_GRACE_SECONDS,
     AlreadyRunningError,
     SingleInstanceLock,
